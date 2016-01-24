@@ -1,0 +1,1132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a 
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-1.6.xsd">
+
+    <service verb="get" noun="TimePeriodEmployments">
+        <in-parameters>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="ignoreType" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="employmentList" type="List"/>
+            <parameter name="timePeriod" type="Map"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+            <!-- convert from plain date range to date/time range; use parseTimestamp to be locale sensitive -->
+            <set field="fromTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.fromDate} 00:00:00.000&quot;, '')"/>
+            <set field="thruTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.thruDate} 23:59:59.999&quot;, '')"/>
+            <entity-find entity-name="mantle.humanres.employment.EmploymentFromDetail" list="employmentList">
+                <search-form-inputs default-order-by="pseudoId"/>
+                <econdition field-name="toPartyId" from="timePeriod.partyId"/>
+                <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId" ignore="ignoreType"/>
+                <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp" or-null="true"/>
+                <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp" or-null="true"/>
+            </entity-find>
+        </actions>
+    </service>
+
+    <!-- ========== Payroll Processing Services ========== -->
+
+    <service verb="process" noun="TimePeriodPay" transaction-timeout="600">
+        <in-parameters>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="invoiceIdByPartyRelationshipId" type="Map"/>
+            <parameter name="payDate" type="Date"/>
+            <parameter name="totalPayAmount" type="BigDecimal"/>
+            <parameter name="totalNetPayAmount" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <!-- lock the TimePeriod, will close later -->
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod" for-update="true"/>
+
+            <if condition="timePeriod.isClosed == 'Y'">
+                <message error="true">Not processing pay for period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, already closed.</message></if>
+            <if condition="ec.user.nowTimestamp.before(timePeriod.thruDate)">
+                <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, period has not ended (ends on ${timePeriod.thruDate}).</message></if>
+
+            <!-- get all relevant employments -->
+            <service-call name="mantle.humanres.PayrollServices.get#TimePeriodEmployments" in-map="context" out-map="context"/>
+            <if condition="!payDate"><set field="payDate" from="timePeriod.thruDate"/></if>
+
+            <!-- process pay for each employment -->
+            <set field="invoiceIdByPartyRelationshipId" from="[:]"/>
+            <set field="totalPayAmount" from="0"/>
+            <set field="totalNetPayAmount" from="0"/>
+            <set field="totalAmountByPayrollAdjustmentId" from="[:]"/>
+            <set field="garnishAdjustmentListByPartyId" from="[:]"/>
+            <iterate list="employmentList" entry="employment">
+                <service-call name="mantle.humanres.PayrollServices.process#EmploymentPay" out-map="payOut" out-map-add-to-existing="false"
+                        in-map="[partyRelationshipId:employment.partyRelationshipId, timePeriodId:timePeriodId]"/>
+                <script>invoiceIdByPartyRelationshipId.put(employment.partyRelationshipId, payOut.invoiceId)</script>
+                <set field="totalPayAmount" from="totalPayAmount + payOut.payAmount"/>
+                <set field="totalNetPayAmount" from="totalNetPayAmount + payOut.netPayAmount"/>
+
+                <!-- TODO: right now assumes currency the same for all employees (from EmploymentSalary and RateAmount),
+                    to support multiple currencies will need more than one invoice or conversion to currency of TaxAuthority -->
+                <set field="currencyUomId" from="payOut.currencyUomId"/>
+
+                <!-- calculate the total amount across all employees for each adjustment (for invoice from tax authority to employer) -->
+                <iterate list="payOut.amountByPayrollAdjustmentId" entry="adjAmount" key="payrollAdjustmentId">
+                    <script>StupidUtilities.addToBigDecimalInMap(payrollAdjustmentId, adjAmount, totalAmountByPayrollAdjustmentId)</script>
+                </iterate>
+                <!-- pull out adjustments with garnishPartyId, add to garnishAdjustmentListByPartyId -->
+                <iterate list="payOut.adjustmentList" entry="adjustment"><if condition="adjustment.payrollAdjustment.garnishPartyId">
+                    <script>StupidUtilities.addToListInMap(adjustment.payrollAdjustment.garnishPartyId, adjustment, garnishAdjustmentListByPartyId)</script>
+                </if></iterate>
+            </iterate>
+
+            <!-- create tax liability invoices (from tax authority to employer) as applicable -->
+            <set field="amountByAdjustmentIdByTaxAuthorityId" from="[:]"/>
+            <iterate list="totalAmountByPayrollAdjustmentId" entry="totalAmount" key="payrollAdjustmentId">
+                <entity-find-one entity-name="mantle.humanres.employment.PayrollAdjustment" value-field="payrollAdjustment"/>
+                <if condition="!payrollAdjustment.taxAuthorityId"><continue/></if>
+                <script>StupidUtilities.addToMapInMap(payrollAdjustment.taxAuthorityId, payrollAdjustmentId, totalAmount, amountByAdjustmentIdByTaxAuthorityId)</script>
+            </iterate>
+            <iterate list="amountByAdjustmentIdByTaxAuthorityId" entry="amountByAdjustmentId" key="taxAuthorityId">
+                <entity-find-one entity-name="mantle.other.tax.TaxAuthority" value-field="taxAuthority">
+                    <field-map field-name="taxAuthorityId"/></entity-find-one>
+
+                <!-- create Invoice -->
+                <service-call name="create#mantle.account.invoice.Invoice" out-map="invoiceOut" out-map-add-to-existing="false"
+                        in-map="[invoiceTypeEnumId:'InvoiceTax', fromPartyId:taxAuthority.taxAuthPartyId,
+                            toPartyId:timePeriod.partyId, statusId:'InvoiceReceived', invoiceDate:payDate,
+                            currencyUomId:currencyUomId, timePeriodId:timePeriodId]"/>
+                <set field="taxInvoiceId" from="invoiceOut.invoiceId"/>
+
+                <iterate list="amountByAdjustmentId" entry="totalAmount" key="payrollAdjustmentId">
+                    <entity-find-one entity-name="mantle.humanres.employment.PayrollAdjustment" value-field="payrollAdjustment"/>
+
+                    <!-- create InvoiceItem records for each adjustment -->
+                    <service-call name="create#mantle.account.invoice.InvoiceItem"
+                            in-map="[invoiceId:taxInvoiceId, itemTypeEnumId:payrollAdjustment.itemTypeEnumId,
+                                amount:totalAmount, quantity:1, description:payrollAdjustment.description,
+                                taxAuthorityId:taxAuthorityId, payrollAdjustmentId:payrollAdjustmentId]"/>
+                </iterate>
+            </iterate>
+
+            <!-- create garnishment payable invoices -->
+            <iterate list="garnishAdjustmentListByPartyId" entry="garnishAdjustmentList" key="garnishPartyId">
+                <!-- calc dueDate with lowest garnishDueDays -->
+                <set field="garnishDueDays" from="14L"/>
+                <iterate list="garnishAdjustmentList" entry="garnishAdjustment">
+                    <if condition="garnishAdjustment.payrollAdjustment.garnishDueDays">
+                        <if condition="garnishAdjustment.payrollAdjustment.garnishDueDays &lt; garnishDueDays">
+                            <set field="garnishDueDays" from="garnishAdjustment.payrollAdjustment.garnishDueDays"/></if>
+                    </if>
+                </iterate>
+                <script>
+                    Calendar dueDateCal = ec.user.getCalendarSafe()
+                    dueDateCal.setTime(payDate)
+                    dueDateCal.add(Calendar.DAY_OF_MONTH, garnishDueDays as int)
+                    dueDate = new java.sql.Timestamp(dueDateCal.getTimeInMillis())
+                </script>
+
+                <!-- create the invoice -->
+                <service-call name="create#mantle.account.invoice.Invoice" out-map="invoiceOut" out-map-add-to-existing="false"
+                        in-map="[invoiceTypeEnumId:'InvoiceGarnishment', fromPartyId:garnishPartyId,
+                            toPartyId:timePeriod.partyId, statusId:'InvoiceReceived', invoiceDate:payDate, dueDate:dueDate,
+                            currencyUomId:currencyUomId, timePeriodId:timePeriodId]"/>
+                <set field="garnishInvoiceId" from="invoiceOut.invoiceId"/>
+                <!-- create the invoice items, one for each garnishAdjustment -->
+                <iterate list="garnishAdjustmentList" entry="garnishAdjustment">
+                    <set field="payrollAdjustment" from="garnishAdjustment.payrollAdjustment"/>
+
+                    <!-- make description, lookup PartyDetail, SSN PartyIdentification -->
+                    <entity-find-one entity-name="mantle.party.PartyDetail" value-field="partyDetail">
+                        <field-map field-name="partyId" from="garnishAdjustment.employment.fromPartyId"/></entity-find-one>
+                    <entity-find-one entity-name="mantle.party.PartyIdentification" value-field="partySsn">
+                        <field-map field-name="partyId" from="garnishAdjustment.employment.fromPartyId"/>
+                        <field-map field-name="partyIdTypeEnumId" value="PtidSsn"/>
+                    </entity-find-one>
+                    <set field="description" value="${payrollAdjustment.description} for ${partyDetail.firstName?:''} ${partyDetail.lastName?:''}${partyDetail.organizationName?:''} SSN ${partySsn?.idValue ?: 'N/A'} Case ${payrollAdjustment.garnishCaseNumber ?: 'N/A'}"/>
+
+                    <service-call name="create#mantle.account.invoice.InvoiceItem"
+                            in-map="[invoiceId:garnishInvoiceId, itemTypeEnumId:payrollAdjustment.itemTypeEnumId,
+                                amount:-garnishAdjustment.amount, quantity:1, description:description,
+                                payrollAdjustmentId:garnishAdjustment.payrollAdjustmentId]"/>
+                </iterate>
+            </iterate>
+
+            <!-- close the TimePeriod -->
+            <set field="timePeriod.isClosed" value="Y"/>
+            <entity-update value-field="timePeriod"/>
+
+            <message>Processed pay for period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}: ${employmentList.size()} employees, gross pay total: ${totalPayAmount}, net pay total: ${totalNetPayAmount}</message>
+        </actions>
+    </service>
+    <service verb="approve" noun="PeriodInvoices">
+        <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceList">
+                <econdition field-name="timePeriodId"/>
+                <econdition field-name="invoiceTypeEnumId" value="InvoicePayroll"/>
+                <econdition field-name="statusId" value="InvoiceReceived"/>
+            </entity-find>
+            <iterate list="invoiceList" entry="invoice">
+                <service-call name="update#mantle.account.invoice.Invoice"
+                        in-map="[invoiceId:invoice.invoiceId, statusId:'InvoiceApproved']"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="create" noun="PeriodPayments">
+        <in-parameters>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="statusId" default-value="PmntAuthorized"/>
+            <parameter name="paymentInstrumentEnumId" default-value="PiCompanyCheck"/>
+            <parameter name="paymentMethodId"/>
+            <parameter name="effectiveDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+        </in-parameters>
+        <actions>
+            <!-- find the PmpPayroll purpose PaymentMethod -->
+            <if condition="!paymentMethodId">
+                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+                <entity-find entity-name="mantle.account.method.PaymentMethod" list="paymentMethodList">
+                    <date-filter/><econdition field-name="ownerPartyId" from="timePeriod.partyId"/>
+                    <econdition field-name="purposeEnumId" value="PmpPayroll"/>
+                    <!-- constrain by a paymentMethodTypeEnumId corresponding to the paymentInstrumentEnumId? -->
+                    <order-by field-name="-fromDate"/>
+                </entity-find>
+                <if condition="!paymentMethodList"><entity-find entity-name="mantle.account.method.PaymentMethod" list="paymentMethodList">
+                    <date-filter/><econdition field-name="ownerPartyId" from="timePeriod.partyId"/>
+                    <econdition field-name="purposeEnumId" value="PmpGeneral"/><order-by field-name="-fromDate"/></entity-find></if>
+                <if condition="paymentMethodList"><set field="paymentMethodId" from="paymentMethodList[0].paymentMethodId"/></if>
+            </if>
+
+            <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceList">
+                <econdition field-name="timePeriodId"/>
+                <econdition field-name="invoiceTypeEnumId" value="InvoicePayroll"/>
+                <econdition field-name="statusId" value="InvoiceApproved"/>
+            </entity-find>
+            <iterate list="invoiceList" entry="invoice">
+                <!-- if paymentInstrumentEnumId is PiAch look for employee's BankAccount -->
+                <set field="toPaymentMethodId" from="null"/>
+                <if condition="paymentInstrumentEnumId == 'PiAch'">
+                    <entity-find entity-name="mantle.account.method.PaymentMethod" list="toPaymentMethodList">
+                        <date-filter/>
+                        <econdition field-name="ownerPartyId" from="invoice.fromPartyId"/>
+                        <econdition field-name="purposeEnumId" value="PmpPayroll"/>
+                        <econdition field-name="paymentMethodTypeEnumId" value="PmtBankAccount"/>
+                        <order-by field-name="-fromDate"/>
+                    </entity-find>
+                    <if condition="toPaymentMethodList">
+                        <set field="toPaymentMethodId" from="toPaymentMethodList[0].paymentMethodId"/></if>
+                </if>
+
+                <service-call name="mantle.account.PaymentServices.create#InvoicePayment" out-map="paymentOut"
+                    in-map="context + [invoiceId:invoice.invoiceId, partyRelationshipId:invoice.partyRelationshipId]"/>
+            </iterate>
+        </actions>
+    </service>
+
+    <service verb="process" noun="EmploymentPay">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="invoiceId"/>
+            <parameter name="payDate" type="Date"/>
+            <parameter name="payAmount" type="BigDecimal"/>
+            <parameter name="netPayAmount" type="BigDecimal"/>
+            <parameter name="currencyUomId"/>
+
+            <parameter name="adjustmentList" type="List"/>
+            <parameter name="amountByPayrollAdjustmentId" type="Map"/>
+        </out-parameters>
+        <actions>
+            <!-- make sure there is no EmploymentPayHistory record for partyRelationshipId and timePeriodId -->
+            <entity-find entity-name="mantle.humanres.employment.EmploymentPayHistory" list="existingPayHistoryList">
+                <econdition field-name="partyRelationshipId"/><econdition field-name="timePeriodId"/></entity-find>
+            <if condition="existingPayHistoryList"><return message="Employment pay already processed for employment [${partyRelationshipId}], time period [${timePeriodId}]"/></if>
+
+            <!-- get the pay detail data; note that this sets default payDate if not passed in -->
+            <service-call name="mantle.humanres.PayrollServices.get#EmploymentPayDetail" in-map="context" out-map="context"/>
+
+            <!-- create Invoice -->
+            <service-call name="create#mantle.account.invoice.Invoice" out-map="context"
+                    in-map="[invoiceTypeEnumId:'InvoicePayroll', fromPartyId:employment.fromPartyId, toPartyId:employment.toPartyId,
+                        statusId:'InvoiceReceived', invoiceDate:payDate, currencyUomId:currencyUomId,
+                        partyRelationshipId:partyRelationshipId, timePeriodId:timePeriodId]"/>
+
+            <!-- create InvoiceItem for payAmount -->
+            <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="payIiOut"
+                    in-map="[invoiceId:invoiceId, amount:payAmount, quantity:1,
+                        itemTypeEnumId:(emplPosition.salaryFlag == 'Y' ? 'ItemSalary' : 'ItemHourlyEarnings'),
+                        description:ec.resource.expand('PayrollInvoicePayDescription', '', [emplPosition:emplPosition, timePeriod:timePeriod])]"/>
+
+            <!-- create InvoiceItem records for each adjustmentList element -->
+            <set field="amountByPayrollAdjustmentId" from="[:]"/>
+            <iterate list="adjustmentList" entry="adjustment">
+                <!-- only add to employee invoice if not employer paid -->
+                <if condition="adjustment.payrollAdjustment.isEmployerPaid != 'Y'">
+                    <service-call name="create#mantle.account.invoice.InvoiceItem"
+                            in-map="[invoiceId:invoiceId, itemTypeEnumId:adjustment.payrollAdjustment.itemTypeEnumId,
+                                amount:adjustment.amount, quantity:1, description:adjustment.payrollAdjustment.description,
+                                taxAuthorityId:adjustment.payrollAdjustment.taxAuthorityId,
+                                payrollAdjustmentId:adjustment.payrollAdjustmentId]"/>
+                </if>
+                <!-- add the amount for the adjustment, negated here so we get a positive total -->
+                <script>StupidUtilities.addToBigDecimalInMap(adjustment.payrollAdjustmentId, -adjustment.amount, amountByPayrollAdjustmentId)</script>
+            </iterate>
+
+            <!-- as a validation calc total for Invoice and compare with netPayAmount -->
+            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="totalOut"/>
+            <if condition="netPayAmount != totalOut.invoiceTotal">
+                <return error="true" message="For employment [${partyRelationshipId}] invoice total [${totalOut.invoiceTotal}] did not match net pay [${netPayAmount}]"/></if>
+
+            <!-- create EmploymentPayHistory and EmploymentPayDetail records -->
+            <service-call name="create#mantle.humanres.employment.EmploymentPayHistory"
+                    in-map="[partyRelationshipId:partyRelationshipId, payDate:payDate, timePeriodId:timePeriodId,
+                        invoiceId:invoiceId, internalPayroll:'Y', payAmount:payAmount, taxablePayAmount:taxablePayAmount,
+                        socialTaxablePayAmount:socialTaxablePayAmount, medicalTaxablePayAmount:medicalTaxablePayAmount,
+                        netPayAmount:netPayAmount, disposablePayAmount:disposablePayAmount, taxableYtdIncome:taxableYtdIncome,
+                        socialTaxableYtdIncome:socialTaxableYtdIncome, medicalTaxableYtdIncome:medicalTaxableYtdIncome,
+                        currencyUomId:currencyUomId]"/>
+            <iterate list="adjustmentList" entry="adjustment">
+                <!-- add records for all adjustments, including employer paid (this is the only detail record we have of employer paid) -->
+                <service-call name="create#mantle.humanres.employment.EmploymentPayDetail"
+                        in-map="[partyRelationshipId:partyRelationshipId, payDate:payDate,
+                            payrollAdjustmentId:adjustment.payrollAdjustmentId, amount:adjustment.amount,
+                            isEmployerPaid:adjustment.payrollAdjustment.isEmployerPaid,
+                            taxAuthorityId:adjustment.payrollAdjustment.taxAuthorityId,
+                            garnishPartyId:adjustment.payrollAdjustment.garnishPartyId,
+                            garnishCaseNumber:adjustment.payrollAdjustment.garnishCaseNumber]"/>
+            </iterate>
+
+            <!-- set TimeEntry.vendorInvoiceId on all in timeEntryList -->
+            <iterate list="timeEntryList" entry="timeEntry">
+                <set field="timeEntry.vendorInvoiceId" from="invoiceId"/>
+                <entity-update value-field="timeEntry"/><!-- do direct update, was selected with for-update -->
+            </iterate>
+        </actions>
+    </service>
+
+    <!-- ========== Payroll Calculation Services ========== -->
+
+    <service verb="get" noun="EmploymentPayAmount">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="payAmount" type="BigDecimal"/>
+            <parameter name="currencyUomId"/>
+            <parameter name="salaryFlag"/>
+            <parameter name="timeEntryList" type="List"/>
+
+            <parameter name="employment" type="Map"/>
+            <parameter name="emplPosition" type="Map"/>
+            <parameter name="timePeriod" type="Map"/>
+            <parameter name="fromTimestamp" type="Timestamp"/>
+            <parameter name="thruTimestamp" type="Timestamp"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromDetail">
+                <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
+
+            <set field="salaryFlag" from="emplPosition.salaryFlag ?: 'N'"/>
+            <set field="payAmount" from="0"/>
+
+            <if condition="employment.timePeriodTypeId != timePeriod.timePeriodTypeId">
+                <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is not paid in this type of period"/></if>
+
+            <set field="fromTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.fromDate} 00:00:00.000&quot;, '')"/>
+            <set field="thruTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.thruDate} 23:59:59.999&quot;, '')"/>
+
+            <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; thruTimestamp">
+                <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is not yet employed"/></if>
+            <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; fromTimestamp">
+                <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is no longer employed"/></if>
+
+            <if condition="salaryFlag == 'Y'">
+                <then>
+                    <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
+                    <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
+                        <date-filter valid-date="thruTimestamp"/>
+                        <econdition field-name="partyRelationshipId"/>
+                        <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+                        <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
+                    </entity-find>
+
+                    <if condition="!employmentSalaryList">
+                        <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
+                    <set field="employmentSalary" from="employmentSalaryList[0]"/>
+
+                    <set field="payAmount"  from="employmentSalary.amount"/>
+                    <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
+
+                    <!-- handle partial period for salary (first and last, ie by from and thru) -->
+                    <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; fromTimestamp">
+                        <set field="partialFrom" from="employment.fromDate"/></if>
+                    <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; thruTimestamp">
+                        <set field="partialThru" from="employment.thruDate"/></if>
+                    <if condition="partialFrom || partialThru">
+                        <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
+                            <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
+                        <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time)"/>
+                            <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
+                        <!-- TODO: this is messy, consider working days, etc? -->
+                        <!-- for now do a simple ratio of milliseconds -->
+                        <set field="partialTime" from="partialThru.time - partialFrom.time"/>
+                        <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
+                        <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                    </if>
+                </then>
+                <else>
+                    <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
+                        <econdition field-name="partyId" from="employment.fromPartyId"/>
+                        <econdition field-name="clientPartyId" from="employment.toPartyId"/>
+                        <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp"/>
+                        <econdition field-name="thruDate" operator="less-equals" from="thruTimestamp"/>
+                    </entity-find>
+                    <iterate list="timeEntryList" entry="timeEntry">
+                        <!-- NOTE: this service gets the higher of hourly and piece amounts -->
+                        <service-call name="mantle.work.TimeServices.get#TimeEntryAmount" out-map="getTeaOut"
+                                in-map="[timeEntryId:timeEntry.timeEntryId, timeEntry:timeEntry, ratePurposeEnumId:ratePurposeEnumId]"/>
+                        <set field="payAmount" from="payAmount + getTeaOut.amountTotal"/>
+                        <set field="currencyUomId" from="getTeaOut.currencyUomId"/>
+                    </iterate>
+                </else>
+            </if>
+        </actions>
+    </service>
+
+    <service verb="get" noun="TimePeriodTotalPayAmount">
+        <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="payAmountByCurrencyUomId" type="Map"/>
+        </out-parameters>
+        <actions>
+            <!-- find all employees active in the time period -->
+            <service-call name="mantle.humanres.PayrollServices.get#TimePeriodEmployments" in-map="context" out-map="context"/>
+
+            <!-- go through employmentList and get/calc amount for each, add to total -->
+            <set field="payAmountByCurrencyUomId" from="[:]"/>
+            <iterate list="employmentList" entry="employment">
+                <service-call name="mantle.humanres.PayrollServices.get#EmploymentPayAmount" out-map="payOut"
+                        in-map="[timePeriodId:timePeriodId, partyRelationshipId:employment.partyRelationshipId]"/>
+                <script>StupidUtilities.addToBigDecimalInMap(payOut.currencyUomId, payOut.payAmount, payAmountByCurrencyUomId)</script>
+            </iterate>
+        </actions>
+    </service>
+
+    <service verb="get" noun="EmploymentPayDetail">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="payAmount" type="BigDecimal"/>
+            <parameter name="currencyUomId"/>
+            <parameter name="salaryFlag"/>
+            <parameter name="timeEntryList" type="List"/>
+
+            <parameter name="employment" type="Map"/>
+            <parameter name="homePostalAddress" type="Map"/>
+            <parameter name="emplPosition" type="Map"/>
+            <parameter name="timePeriod" type="Map"/>
+            <parameter name="payDate" type="Date"/>
+
+            <parameter name="adjustmentList" type="List">
+                <description>List of Maps with out parameters from calculate#PayrollAdjustment</description></parameter>
+            <parameter name="netPayAmount" type="BigDecimal"/>
+
+            <parameter name="taxablePayAmount" type="BigDecimal"/>
+            <parameter name="socialTaxablePayAmount" type="BigDecimal"/>
+            <parameter name="medicalTaxablePayAmount" type="BigDecimal"/>
+            <parameter name="disposablePayAmount" type="BigDecimal"/>
+            <parameter name="taxableYtdIncome" type="BigDecimal"/>
+            <parameter name="socialTaxableYtdIncome" type="BigDecimal"/>
+            <parameter name="medicalTaxableYtdIncome" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <!-- get the pay amount and employment, emplPosition, timePeriod, fromTimestamp, thruTimestamp -->
+            <service-call name="mantle.humanres.PayrollServices.get#EmploymentPayAmount" in-map="context" out-map="context"/>
+
+            <if condition="!payDate"><set field="payDate" from="timePeriod.thruDate"/></if>
+            <set field="payTimestamp" from="ec.l10n.parseTimestamp(&quot;${payDate} 12:00:00.000&quot;, '')"/>
+
+            <!-- set initial taxablePayAmount, socialTaxablePayAmount, medicalTaxablePayAmount -->
+            <set field="taxablePayAmount" from="payAmount"/>
+            <set field="socialTaxablePayAmount" from="payAmount"/>
+            <set field="medicalTaxablePayAmount" from="payAmount"/>
+
+            <!-- calc taxableYtdIncome, socialTaxableYtdIncome, medicalTaxableYtdIncome -->
+            <set field="taxableYtdIncome" from="0"/>
+            <set field="socialTaxableYtdIncome" from="0"/>
+            <set field="medicalTaxableYtdIncome" from="0"/>
+            <set field="thisYearList" from="ec.user.getPeriodRange('year', '0')"/>
+            <set field="yearStart" from="new java.sql.Date(thisYearList[0].time)"/>
+            <set field="yearEnd" from="new java.sql.Date(thisYearList[1].time)"/>
+            <entity-find entity-name="mantle.humanres.employment.EmploymentPayHistory" list="payHistoryList">
+                <econdition field-name="partyRelationshipId"/>
+                <econdition field-name="payDate" operator="greater-equals" from="yearStart"/>
+                <econdition field-name="payDate" operator="less" from="yearEnd"/>
+            </entity-find>
+            <iterate list="payHistoryList" entry="payHistory">
+                <set field="taxableYtdIncome" from="taxableYtdIncome + payHistory.taxablePayAmount"/>
+                <set field="socialTaxableYtdIncome" from="socialTaxableYtdIncome + payHistory.socialTaxablePayAmount"/>
+                <set field="medicalTaxableYtdIncome" from="medicalTaxableYtdIncome + payHistory.medicalTaxablePayAmount"/>
+            </iterate>
+
+            <!-- get homePostalAddress -->
+            <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="employeeHomeContactInfo"
+                    in-map="[partyId:employment.toPartyId, postalContactMechId:employment.taxHomeContactMechId,
+                        postalContactMechPurposeId:'PostalHome']"/>
+            <set field="homePostalAddress" from="employeeHomeContactInfo.postalAddress"/>
+
+            <!-- calculate the adjustments -->
+            <set field="adjustmentList" from="[]"/>
+
+            <entity-find entity-name="mantle.humanres.employment.PayrollAdjustment" list="allPayrollAdjustmentList">
+                <date-filter valid-date="payTimestamp"/>
+                <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId" or-null="true"/>
+            </entity-find>
+
+            <!-- calculate global and employee adjustments (deductions, etc) - taxable -->
+            <set field="partyRelCondition" from="ec.entity.conditionFactory.makeCondition(
+                [[partyRelationshipId:null], [partyRelationshipId:partyRelationshipId]], 'or', '=', null)"/>
+            <set field="taxableCondition" from="ec.entity.conditionFactory.makeCondition(
+                [partyRelCondition, [isTaxable:'Y', isSocialTaxable:'Y', isMedicalTaxable:'Y']], 'and', '=', 'or')"/>
+            <script>dedPayrollAdjustmentList = allPayrollAdjustmentList.cloneList().filterByCondition(taxableCondition, true)</script>
+
+            <iterate list="dedPayrollAdjustmentList" entry="payrollAdjustment">
+                <set field="calcOut" from="null"/>
+                <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut"
+                    in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
+                        partyRelationshipId:partyRelationshipId, employment:employment,
+                        timePeriodTypeId:timePeriod.timePeriodTypeId, payTimestamp:payTimestamp,
+                        payAmount:payAmount, taxablePayAmount:taxablePayAmount,
+                        socialTaxablePayAmount:socialTaxablePayAmount, medicalTaxablePayAmount:medicalTaxablePayAmount,
+                        taxableYtdIncome:taxableYtdIncome, socialTaxableYtdIncome:socialTaxableYtdIncome,
+                        medicalTaxableYtdIncome:medicalTaxableYtdIncome,
+                        homePostalAddress:homePostalAddress]"/>
+                <if condition="!calcOut.adjustmentApplies"><continue/></if>
+                <script>adjustmentList.add(calcOut)</script>
+
+                <!-- update taxablePayAmount, socialTaxablePayAmount, medicalTaxablePayAmount -->
+                <if condition="payrollAdjustment.isTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                    <set field="taxablePayAmount" from="taxablePayAmount + calcOut.amount"/></if>
+                <if condition="payrollAdjustment.isSocialTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                    <set field="socialTaxablePayAmount" from="socialTaxablePayAmount + calcOut.amount"/></if>
+                <if condition="payrollAdjustment.isMedicalTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                    <set field="medicalTaxablePayAmount" from="medicalTaxablePayAmount + calcOut.amount"/></if>
+            </iterate>
+
+            <!-- update taxableYtdIncome, socialTaxableYtdIncome, medicalTaxableYtdIncome -->
+            <set field="taxableYtdIncome" from="taxableYtdIncome + taxablePayAmount"/>
+            <set field="socialTaxableYtdIncome" from="socialTaxableYtdIncome + socialTaxablePayAmount"/>
+            <set field="medicalTaxableYtdIncome" from="medicalTaxableYtdIncome + medicalTaxablePayAmount"/>
+
+            <!-- calculate global and employee adjustments (deductions, etc) - not taxable -->
+            <script>otherPayrollAdjustmentList = allPayrollAdjustmentList.cloneList().filterByCondition(partyRelCondition, true)
+                    .removeByAnd([isTaxable:'Y']).removeByAnd([isSocialTaxable:'Y']).removeByAnd([isMedicalTaxable:'Y'])</script>
+
+            <iterate list="otherPayrollAdjustmentList" entry="payrollAdjustment">
+                <set field="calcOut" from="null"/>
+                <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut"
+                    in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
+                        partyRelationshipId:partyRelationshipId, employment:employment,
+                        timePeriodTypeId:timePeriod.timePeriodTypeId, payTimestamp:payTimestamp,
+                        payAmount:payAmount, taxablePayAmount:taxablePayAmount,
+                        socialTaxablePayAmount:socialTaxablePayAmount, medicalTaxablePayAmount:medicalTaxablePayAmount,
+                        taxableYtdIncome:taxableYtdIncome, socialTaxableYtdIncome:socialTaxableYtdIncome,
+                        medicalTaxableYtdIncome:medicalTaxableYtdIncome,
+                        homePostalAddress:homePostalAddress]"/>
+                <if condition="!calcOut.adjustmentApplies"><continue/></if>
+                <script>adjustmentList.add(calcOut)</script>
+            </iterate>
+
+            <!-- calculate disposablePayAmount -->
+            <set field="disposablePayAmount" from="payAmount"/>
+            <iterate list="adjustmentList" entry="adjustment">
+                <if condition="adjustment.payrollAdjustment.deductFromDisposable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                    <set field="disposablePayAmount" from="disposablePayAmount + adjustment.amount"/></if>
+            </iterate>
+
+            <!-- find applicable garnish minimum wage -->
+            <entity-find entity-name="mantle.humanres.employment.PayrollGarnishMinWage" list="garnishMinWageList">
+                <date-filter/><econdition field-name="stateOrCountryGeoId" from="homePostalAddress.stateProvinceGeoId"/>
+                <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+            </entity-find>
+            <if condition="!garnishMinWageList">
+                <entity-find entity-name="mantle.humanres.employment.PayrollGarnishMinWage" list="garnishMinWageList">
+                    <date-filter/><econdition field-name="stateOrCountryGeoId" from="homePostalAddress.countryGeoId"/>
+                    <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+                </entity-find>
+            </if>
+            <if condition="garnishMinWageList"><set field="garnishMinWage" from="garnishMinWageList[0]"/></if>
+
+            <!-- adjust garnishments for disposable income limit (using garnishDisposablePercent, garnishPriority) -->
+            <set field="disposableRemaining" from="disposablePayAmount"/>
+            <order-map-list list="adjustmentList"><order-by field-name="garnishPriority"/></order-map-list>
+            <iterate list="adjustmentList" entry="adjustment">
+                <if condition="!adjustment.payrollAdjustment.garnishPartyId"><continue/></if>
+
+                <if condition="adjustment.payrollAdjustment.garnishDisposablePercent">
+                    <then><set field="garnishDisposableRatio" from="adjustment.payrollAdjustment.garnishDisposablePercent / 100"/></then>
+                    <else><set field="garnishDisposableRatio" from="0.25"/><!-- this is a good default for the USA, not necessarily for other places --></else>
+                </if>
+                <!-- calculate max amount from garnishMinWage (if applicable) or garnishDisposableRatio -->
+                <set field="deductionAmount" from="-adjustment.amount"/><!-- negate it so the code is easier to read -->
+                <if condition="adjustment.payrollAdjustment.garnishMinWageApplies == 'Y' &amp;&amp; garnishMinWage">
+                    <then>
+                        <if condition="disposableRemaining &lt;= garnishMinWage.rangeLow">
+                            <then><!-- do nothing, leave deductionAmount as-is --></then>
+                            <else-if condition="disposableRemaining &gt; garnishMinWage.rangeLow &amp;&amp; disposableRemaining &lt; garnishMinWage.rangeHigh">
+                                <set field="deductionAmount" from="disposableRemaining - garnishMinWage.rangeLow"/>
+                            </else-if>
+                            <else>
+                                <set field="maxDedAmount" from="disposablePayAmount * garnishDisposableRatio"/>
+                                <set field="deductionAmount" from="deductionAmount &gt; maxDedAmount ? maxDedAmount : deductionAmount"/>
+                            </else>
+                        </if>
+                    </then>
+                    <else>
+                        <set field="maxDedAmount" from="disposablePayAmount * garnishDisposableRatio"/>
+                        <set field="deductionAmount" from="deductionAmount &gt; maxDedAmount ? maxDedAmount : deductionAmount"/>
+                    </else>
+                </if>
+
+                <!-- ROUND_HALF_DOWN here so the deduction amount is never more than the percentage limit -->
+                <set field="deductionAmount" from="deductionAmount.setScale(2, BigDecimal.ROUND_HALF_DOWN)"/>
+                <set field="adjustment.amount" from="-deductionAmount"/>
+                <set field="disposableRemaining" from="disposableRemaining - deductionAmount"/>
+            </iterate>
+
+            <!-- calculate netPayAmount -->
+            <set field="netPayAmount" from="payAmount"/>
+            <iterate list="adjustmentList" entry="adjustment">
+                <if condition="adjustment.payrollAdjustment.isEmployerPaid != 'Y'">
+                    <set field="netPayAmount" from="netPayAmount + adjustment.amount"/></if>
+            </iterate>
+
+            <!-- <log message="===== payAmount=${payAmount}, netPayAmount=${netPayAmount}, adjustmentList:\n${adjustmentList}"/> -->
+        </actions>
+    </service>
+    <service verb="calculate" noun="PayrollAdjustment">
+        <in-parameters>
+            <parameter name="payrollAdjustmentId" required="true"/>
+            <parameter name="payrollAdjustment" type="Map"/>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="employment" type="Map"/>
+            <parameter name="emplPosition" type="Map"/>
+
+            <parameter name="timePeriodTypeId" required="true"/>
+            <parameter name="payTimestamp" type="Timestamp"/>
+
+            <parameter name="payAmount" type="BigDecimal" required="true"/>
+            <parameter name="taxablePayAmount" type="BigDecimal" required="true"/>
+            <parameter name="socialTaxablePayAmount" type="BigDecimal" required="true"/>
+            <parameter name="medicalTaxablePayAmount" type="BigDecimal" required="true"/>
+            <parameter name="taxableYtdIncome" type="BigDecimal" required="true"/>
+            <parameter name="socialTaxableYtdIncome" type="BigDecimal" required="true"/>
+            <parameter name="medicalTaxableYtdIncome" type="BigDecimal" required="true"/>
+
+            <parameter name="homePostalAddress" type="Map"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="adjustmentApplies" type="Boolean"/>
+
+            <parameter name="payrollAdjustmentId" required="true"/>
+            <parameter name="payrollAdjustment" type="Map"/>
+            <parameter name="employment" type="Map"/>
+            <parameter name="emplPosition" type="Map"/>
+            <parameter name="garnishPriority" type="Long"/>
+
+            <parameter name="amount" type="BigDecimal"/>
+            <parameter name="basisPayAmount" type="BigDecimal"/>
+            <parameter name="stdDeductionAmount" type="BigDecimal"/>
+            <parameter name="allowanceDeductionAmount" type="BigDecimal"/>
+            <parameter name="allowanceExemptionAmount" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <set field="adjustmentApplies" from="false"/>
+
+            <set field="amount" from="0"/>
+            <set field="stdDeductionAmount" from="0"/>
+            <set field="allowanceDeductionAmount" from="0"/>
+            <set field="allowanceExemptionAmount" from="0"/>
+
+            <if condition="!payrollAdjustment">
+                <entity-find-one entity-name="mantle.humanres.employment.PayrollAdjustment" value-field="payrollAdjustment"/></if>
+            <set field="garnishPriority" from="payrollAdjustment.garnishPriority"/>
+            <if condition="!employment">
+                <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/></if>
+            <if condition="!emplPosition">
+                <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                    <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+            </if>
+
+            <if condition="emplPosition.exemptFlag == 'Y' &amp;&amp;
+                    (payrollAdjustment.isTax == 'Y' || payrollAdjustment.isSocialTax == 'Y' || payrollAdjustment.isMedicalTax == 'Y')">
+                <return/><!-- adjustmentApplies=false so adjustment won't be added -->
+            </if>
+
+            <if condition="payrollAdjustment.isTax == 'Y'">
+                <then>
+                    <set field="basisPayAmount" from="taxablePayAmount"/>
+                    <set field="ytdIncome" from="taxableYtdIncome"/>
+                </then>
+                <else-if condition="payrollAdjustment.isSocialTax == 'Y'">
+                    <set field="basisPayAmount" from="socialTaxablePayAmount"/>
+                    <set field="ytdIncome" from="socialTaxableYtdIncome"/>
+                </else-if>
+                <else-if condition="payrollAdjustment.isMedicalTax == 'Y'">
+                    <set field="basisPayAmount" from="medicalTaxablePayAmount"/>
+                    <set field="ytdIncome" from="medicalTaxableYtdIncome"/>
+                </else-if>
+                <else>
+                    <set field="basisPayAmount" from="payAmount"/>
+                    <set field="ytdIncome" from="payAmount"/>
+                </else>
+            </if>
+
+            <!-- check state and federal filing status constraints, if any; if there are but none match skip it -->
+            <entity-find entity-name="mantle.humanres.employment.PayrollAdjustmentFedStts" list="fedSttsList">
+                <econdition field-name="payrollAdjustmentId"/></entity-find>
+            <if condition="fedSttsList &amp;&amp; employment.taxFederalStatusEnumId">
+                <filter-map-list list="fedSttsList"><field-map field-name="taxFederalStatusEnumId" from="employment.taxFederalStatusEnumId"/></filter-map-list>
+                <if condition="!fedSttsList"><return/></if>
+            </if>
+            <entity-find entity-name="mantle.humanres.employment.PayrollAdjustmentStateStts" list="stateSttsList">
+                <econdition field-name="payrollAdjustmentId"/></entity-find>
+            <if condition="stateSttsList &amp;&amp; employment.taxStateStatusEnumId">
+                <filter-map-list list="stateSttsList"><field-map field-name="taxStateStatusEnumId" from="employment.taxStateStatusEnumId"/></filter-map-list>
+                <if condition="!stateSttsList"><return/></if>
+            </if>
+
+            <if condition="payrollAdjustment.isTax == 'Y' || payrollAdjustment.isSocialTax == 'Y' || payrollAdjustment.isMedicalTax == 'Y'">
+                <entity-find-one entity-name="mantle.other.tax.TaxAuthority" value-field="taxAuthority">
+                    <field-map field-name="taxAuthorityId" from="payrollAdjustment.taxAuthorityId"/></entity-find-one>
+
+                <!-- see if employee home is in jurisdiction, if not skip this adjustment (return); also set applicable taxAllowances -->
+                <if condition="taxAuthority.taxAuthorityTypeEnumId == 'TatFederal'">
+                    <then>
+                        <if condition="homePostalAddress.countryGeoId != taxAuthority.taxAuthGeoId"><return/></if>
+                        <set field="taxAllowances" from="employment.taxFederalAllowances"/>
+                    </then>
+                    <else-if condition="taxAuthority.taxAuthorityTypeEnumId == 'TatState'">
+                        <if condition="homePostalAddress.stateProvinceGeoId != taxAuthority.taxAuthGeoId"><return/></if>
+                        <set field="taxAllowances" from="employment.taxStateAllowances"/>
+                    </else-if>
+                    <else>
+                        <set field="taxAllowances" from="0"/>
+                    </else>
+                </if>
+
+                <!-- Find applicable PayrollStdDeduction, subtract from basisPayAmount -->
+                <if condition="payrollAdjustment.applyStdDeduction == 'Y'">
+                    <entity-find entity-name="mantle.humanres.employment.PayrollStdDeduction" list="stdDeductionList">
+                        <date-filter valid-date="payTimestamp"/>
+                        <econdition field-name="taxAuthorityId" from="payrollAdjustment.taxAuthorityId"/>
+                        <econdition field-name="timePeriodTypeId"/>
+                        <econdition field-name="taxFederalStatusEnumId" from="employment.taxFederalStatusEnumId"
+                                ignore="taxAuthority.taxAuthorityTypeEnumId != 'TatFederal'"/>
+                        <econdition field-name="taxStateStatusEnumId" from="employment.taxStateStatusEnumId"
+                                ignore="taxAuthority.taxAuthorityTypeEnumId != 'TatState'"/>
+                        <econdition field-name="minAllowances" operator="less-equals" from="taxAllowances" or-null="true"/>
+                        <econdition field-name="maxAllowances" operator="greater-equals" from="taxAllowances" or-null="true"/>
+                    </entity-find>
+                    <if condition="stdDeductionList">
+                        <set field="stdDeduction" from="stdDeductionList[0]"/>
+                        <set field="stdDeductionAmount" from="stdDeduction.amount"/>
+                        <set field="basisPayAmount" from="basisPayAmount - stdDeductionAmount"/>
+                    </if>
+                </if>
+
+                <!-- Find applicable PayrollAllowance Deductions, multiply by (taxFederalAllowances or taxStateAllowances)
+                    subtract from basisPayAmount -->
+                <if condition="payrollAdjustment.applyAllowanceDeduction == 'Y' &amp;&amp; taxAllowances">
+                    <entity-find entity-name="mantle.humanres.employment.PayrollAllowance" list="allowanceList">
+                        <date-filter valid-date="payTimestamp"/>
+                        <econdition field-name="taxAuthorityId" from="payrollAdjustment.taxAuthorityId"/>
+                        <econdition field-name="timePeriodTypeId"/>
+                        <econdition field-name="amountTypeEnumId" value="PaatDeduction"/>
+                    </entity-find>
+                    <if condition="allowanceList">
+                        <set field="allowance" from="allowanceList[0]"/>
+                        <set field="allowanceDeductionAmount" from="allowance.amount * taxAllowances"/>
+                        <set field="basisPayAmount" from="basisPayAmount - allowanceDeductionAmount"/>
+                        <if condition="basisPayAmount &lt; 0"><set field="basisPayAmount" from="0"/></if>
+                    </if>
+                </if>
+            </if>
+
+            <!-- Find the applicable PayrollAdjustmentDetail record -->
+            <entity-find entity-name="mantle.humanres.employment.PayrollAdjustmentDetail" list="payrollAdjustmentDetailList">
+                <econdition field-name="payrollAdjustmentId"/>
+                <econdition field-name="ytdMin" operator="less-equals" from="ytdIncome" or-null="true"/>
+                <econdition field-name="ytdMax" operator="greater" from="ytdIncome" or-null="true"/>
+                <econdition field-name="periodMin" operator="less-equals" from="basisPayAmount" or-null="true"/>
+                <econdition field-name="periodMax" operator="greater" from="basisPayAmount" or-null="true"/>
+                <order-by field-name="-percentage,-flatAmount"/><!-- should always be one record, but just in case take the highest -->
+            </entity-find>
+
+            <!-- <log message="====== ytdIncome=${ytdIncome}, basisPayAmount=${basisPayAmount}, payrollAdjustmentDetailList:\n${payrollAdjustmentDetailList}"/> -->
+
+            <!-- calculate adjustment amount -->
+            <if condition="payrollAdjustmentDetailList">
+                <set field="adjustmentDetail" from="payrollAdjustmentDetailList[0]"/>
+
+                <set field="percentageBasis" from="basisPayAmount"/>
+                <if condition="adjustmentDetail.percAfterYtdMin == 'Y'">
+                    <set field="percentageBasis" from="percentageBasis - adjustmentDetail.ytdMin"/></if>
+                <if condition="adjustmentDetail.percAfterPeriodMin == 'Y'">
+                    <set field="percentageBasis" from="percentageBasis - adjustmentDetail.periodMin"/></if>
+                <set field="amount" from="(adjustmentDetail.flatAmount ?: 0) + (((adjustmentDetail.percentage ?: 0) / 100) * percentageBasis)" type="BigDecimal"/>
+                <set field="amount" from="amount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <!-- <log message="=== pre-exemption amount=${amount}"/> -->
+
+                <set field="adjustmentApplies" from="true"/>
+            </if>
+
+            <!-- Find applicable PayrollAllowance Exemptions, multiply by (taxFederalAllowances or taxStateAllowances)
+                subtract from adjustment amount, make sure amount is at least zero -->
+            <if condition="payrollAdjustment.applyAllowanceExemption == 'Y' &amp;&amp; taxAllowances">
+                <entity-find entity-name="mantle.humanres.employment.PayrollAllowance" list="allowanceExmList">
+                    <date-filter valid-date="payTimestamp"/>
+                    <econdition field-name="taxAuthorityId" from="payrollAdjustment.taxAuthorityId"/>
+                    <econdition field-name="timePeriodTypeId"/>
+                    <econdition field-name="amountTypeEnumId" value="PaatExemption"/>
+                </entity-find>
+                <if condition="allowanceExmList">
+                    <set field="allowance" from="allowanceExmList[0]"/>
+                    <set field="allowanceExemptionAmount" from="allowance.amount * taxAllowances"/>
+                    <!-- for all taxes amount will be negative (so we have a negative adjustment) but exemption amount
+                        will be positive so ADD instead of subtract -->
+                    <set field="amount" from="amount + allowanceExemptionAmount"/>
+                    <if condition="amount &gt; 0"><set field="amount" from="0"/></if>
+                </if>
+            </if>
+        </actions>
+    </service>
+
+    <!-- ========== Payroll Tax Reporting Services ========== -->
+
+    <service verb="get" noun="EmploymentWageAndTaxInfo">
+        <in-parameters>
+            <parameter name="timePeriodId" required="true"><description>Should be a period for a Tax Year/Quarter/etc</description></parameter>
+            <parameter name="partyRelationshipId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="timePeriod" type="Map"/>
+            <parameter name="employment" type="Map"/>
+
+            <parameter name="employeeFirstName"/>
+            <parameter name="employeeLastName"/>
+            <parameter name="employeeSuffix"/>
+            <parameter name="employeeSsn"/>
+            <parameter name="employeeHomeContactInfo" type="Map"/>
+            <parameter name="employeeHomeStreetString"/>
+            <parameter name="employeeHomeCszString"/>
+            <parameter name="employeeHomeString"/>
+
+            <parameter name="employerName"/>
+            <parameter name="employerEin"/>
+            <parameter name="employerContactInfo" type="Map"/>
+            <parameter name="employerAddressString"/>
+            <parameter name="employerPhoneString"/>
+
+            <parameter name="taxablePayAmount" type="BigDecimal"/>
+            <parameter name="socialTaxablePayAmount" type="BigDecimal"/>
+            <parameter name="medicalTaxablePayAmount" type="BigDecimal"/>
+            <parameter name="currencyUomId"/>
+
+            <parameter name="wageAndTaxInfoByTaxAuthorityId" type="Map"> <description>contains Map with: taxAuthority,
+                taxAuthorityGeo, incomeTaxWithheldAmount, socialTaxWithheldAmount, medicalTaxWithheldAmount</description></parameter>
+
+            <parameter name="federalTaxAuthorityIdList" type="List"/>
+            <parameter name="stateTaxAuthorityIdList" type="List"/>
+            <parameter name="localTaxAuthorityIdList" type="List"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="employeeDetail">
+                <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
+            <set field="employeeFirstName" from="employment.taxName ?: (employeeDetail.firstName + (employeeDetail.middleName ? ' ' + employeeDetail.middleName : ''))"/>
+            <set field="employeeLastName" from="employment.taxLastName ?: employeeDetail.lastName"/>
+            <set field="employeeSuffix" from="employeeDetail.suffix"/>
+            <entity-find-one entity-name="mantle.party.PartyIdentification" value-field="employeeSsnPi">
+                <field-map field-name="partyId" from="employment.fromPartyId"/>
+                <field-map field-name="partyIdTypeEnumId" value="PtidSsn"/>
+            </entity-find-one>
+            <set field="employeeSsn" from="employeeSsnPi?.idValue"/>
+            <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="employeeHomeContactInfo"
+                    in-map="[partyId:employment.toPartyId, postalContactMechId:employment.taxHomeContactMechId,
+                        postalContactMechPurposeId:'PostalHome']"/>
+            <script>employeeHomeStreetString = """${employeeHomeContactInfo?.postalAddress?.address1 ? employeeHomeContactInfo.postalAddress.address1 + (employeeHomeContactInfo.postalAddress.unitNumber ? ' #' + employeeHomeContactInfo.postalAddress.unitNumber : '') : ''}${employeeHomeContactInfo?.postalAddress?.address2 ? '\n' + employeeHomeContactInfo.postalAddress.address2 : ''}"""</script>
+            <script>employeeHomeCszString = """${employeeHomeContactInfo?.postalAddress ? (employeeHomeContactInfo.postalAddress.city ?: '') + (employeeHomeContactInfo.postalAddressStateGeo?.geoCodeAlpha2 ? ', ' + employeeHomeContactInfo.postalAddressStateGeo.geoCodeAlpha2 : '') + ' ' + (employeeHomeContactInfo.postalAddress.postalCode ?: '') + (employeeHomeContactInfo.postalAddress.postalCodeExt ? '-' + employeeHomeContactInfo.postalAddress.postalCodeExt : '') + (employeeHomeContactInfo.postalAddressCountryGeo?.geoCodeAlpha3 ? ' ' + employeeHomeContactInfo.postalAddressCountryGeo.geoCodeAlpha3 : '') : ''}"""</script>
+            <script>employeeHomeString = """${employeeHomeStreetString}\n${employeeHomeCszString}"""</script>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="employerDetail">
+                <field-map field-name="partyId" from="employment.toPartyId"/></entity-find-one>
+            <set field="employerName" value="${employerDetail.organizationName?:''}${employerDetail.firstName?:''}${employerDetail.lastName ? ' ' + employerDetail.lastName : ''}"/>
+            <entity-find-one entity-name="mantle.party.PartyIdentification" value-field="employerEinPi">
+                <field-map field-name="partyId" from="employment.toPartyId"/>
+                <field-map field-name="partyIdTypeEnumId" value="PtidFein"/>
+            </entity-find-one>
+            <set field="employerEin" from="employerEinPi?.idValue"/>
+            <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="employerContactInfo"
+                    in-map="[partyId:employment.toPartyId, postalContactMechPurposeId:'PostalTax',
+                        telecomContactMechPurposeId:'PhoneTax']"/>
+            <script>employerAddressString = """${employerContactInfo?.postalAddress?.address1 ? employerContactInfo.postalAddress.address1 + (employerContactInfo.postalAddress.unitNumber ? ' #' + employerContactInfo.postalAddress.unitNumber : '') + '\n' : ''}${employerContactInfo?.postalAddress?.address2 ? employerContactInfo.postalAddress.address2 + '\n' : ''}${employerContactInfo?.postalAddress ? (employerContactInfo.postalAddress.city ?: '') + (employerContactInfo.postalAddressStateGeo?.geoCodeAlpha2 ? ', ' + employerContactInfo.postalAddressStateGeo.geoCodeAlpha2 : '') + ' ' + (employerContactInfo.postalAddress.postalCode ?: '') + (employerContactInfo.postalAddress.postalCodeExt ? '-' + employerContactInfo.postalAddress.postalCodeExt : '') + (employerContactInfo.postalAddressCountryGeo?.geoCodeAlpha3 ? ' ' + employerContactInfo.postalAddressCountryGeo.geoCodeAlpha3 : '') : ''}"""</script>
+            <script>employerPhoneString = """${employerContactInfo?.telecomNumber ? (employerContactInfo.telecomNumber.countryCode ? employerContactInfo.telecomNumber.countryCode + '-' : '') + (employerContactInfo.telecomNumber.areaCode ? employerContactInfo.telecomNumber.areaCode + '-' : '') + (employerContactInfo.telecomNumber.contactNumber ?: '') : ''}"""</script>
+
+            <entity-find entity-name="mantle.humanres.employment.EmploymentPayHistory" list="payHistoryList">
+                <econdition field-name="partyRelationshipId"/>
+                <econdition field-name="payDate" operator="greater-equals" from="timePeriod.fromDate"/>
+                <econdition field-name="payDate" operator="less-equals" from="timePeriod.thruDate"/>
+                <econdition field-name="internalPayroll" value="Y"/>
+            </entity-find>
+            <set field="taxablePayAmount" from="0"/>
+            <set field="socialTaxablePayAmount" from="0"/>
+            <set field="medicalTaxablePayAmount" from="0"/>
+            <iterate list="payHistoryList" entry="payHistory">
+                <set field="taxablePayAmount" from="taxablePayAmount + payHistory.taxablePayAmount"/>
+                <set field="socialTaxablePayAmount" from="socialTaxablePayAmount + payHistory.socialTaxablePayAmount"/>
+                <set field="medicalTaxablePayAmount" from="medicalTaxablePayAmount + payHistory.medicalTaxablePayAmount"/>
+                <set field="currencyUomId" from="payHistory.currencyUomId"/><!-- NOTE: assumes all have same currency -->
+            </iterate>
+
+            <entity-find entity-name="mantle.humanres.employment.EmploymentPayDetail" list="payDetailList">
+                <econdition field-name="partyRelationshipId"/>
+                <econdition field-name="payDate" operator="greater-equals" from="timePeriod.fromDate"/>
+                <econdition field-name="payDate" operator="less-equals" from="timePeriod.thruDate"/>
+                <econdition field-name="isEmployerPaid" operator="not-equals" value="Y" or-null="true"/>
+            </entity-find>
+            <set field="wageAndTaxInfoByTaxAuthorityId" from="[:]"/>
+            <iterate list="payDetailList" entry="payDetail">
+                <if condition="!payDetail.taxAuthorityId"><continue/></if>
+                <set field="taxAuthorityId" from="payDetail.taxAuthorityId"/>
+                <entity-find-one entity-name="mantle.humanres.employment.PayrollAdjustment" value-field="payrollAdjustment">
+                    <field-map field-name="payrollAdjustmentId" from="payDetail.payrollAdjustmentId"/></entity-find-one>
+
+                <set field="wageAndTaxInfo" from="wageAndTaxInfoByTaxAuthorityId.get(taxAuthorityId)"/>
+                <if condition="!wageAndTaxInfo">
+                    <entity-find-one entity-name="mantle.other.tax.TaxAuthority" value-field="taxAuthority"/>
+                    <entity-find-one entity-name="moqui.basic.Geo" value-field="taxAuthorityGeo">
+                        <field-map field-name="geoId" from="taxAuthority.taxAuthGeoId"/></entity-find-one>
+                    <set field="wageAndTaxInfo" from="[taxAuthority:taxAuthority, taxAuthorityGeo:taxAuthorityGeo]"/>
+                    <script>wageAndTaxInfoByTaxAuthorityId.put(taxAuthorityId, wageAndTaxInfo)</script>
+                </if>
+                <script>
+                    if (payrollAdjustment.isTax == 'Y') {
+                        StupidUtilities.addToBigDecimalInMap('incomeTaxWithheldAmount', -payDetail.amount, wageAndTaxInfo)
+                    } else if (payrollAdjustment.isSocialTax == 'Y') {
+                        StupidUtilities.addToBigDecimalInMap('socialTaxWithheldAmount', -payDetail.amount, wageAndTaxInfo)
+                    } else if (payrollAdjustment.isMedicalTax == 'Y') {
+                        StupidUtilities.addToBigDecimalInMap('medicalTaxWithheldAmount', -payDetail.amount, wageAndTaxInfo)
+                    }
+                </script>
+            </iterate>
+
+            <set field="federalTaxAuthorityIdList" from="[]"/>
+            <set field="stateTaxAuthorityIdList" from="[]"/>
+            <set field="localTaxAuthorityIdList" from="[]"/>
+            <iterate list="wageAndTaxInfoByTaxAuthorityId" entry="wageAndTaxInfo" key="taxAuthorityId">
+                <if condition="wageAndTaxInfo.taxAuthority.taxAuthorityTypeEnumId == 'TatFederal'">
+                    <then><script>federalTaxAuthorityIdList.add(taxAuthorityId)</script></then>
+                    <else-if condition="wageAndTaxInfo.taxAuthority.taxAuthorityTypeEnumId == 'TatState'">
+                        <script>stateTaxAuthorityIdList.add(taxAuthorityId)</script></else-if>
+                    <else-if condition="wageAndTaxInfo.taxAuthority.taxAuthorityTypeEnumId == 'TatLocal'">
+                        <script>localTaxAuthorityIdList.add(taxAuthorityId)</script></else-if>
+                </if>
+            </iterate>
+        </actions>
+    </service>
+
+    <service verb="create" noun="PeriodWageAndTaxRecordsUsaIrs">
+        <in-parameters>
+            <parameter name="timePeriodId" required="true"><description>Should be a period for a Tax Year/Quarter/etc</description></parameter>
+        </in-parameters>
+        <actions>
+            <!-- lock the TimePeriod, will close later -->
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod" for-update="true"/>
+
+            <if condition="timePeriod.isClosed == 'Y'">
+                <message error="true">Not creating wage and text records for period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, already closed.</message></if>
+            <!-- TODO: uncomment this, commented for testing only
+            <if condition="ec.user.nowTimestamp.before(timePeriod.thruDate)">
+                <message error="true">Not creating wage and text records or closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, period has not ended (ends on ${timePeriod.thruDate}).</message></if>
+            -->
+
+            <service-call name="mantle.humanres.PayrollServices.get#TimePeriodEmployments"
+                    in-map="[timePeriodId:timePeriodId, ignoreType:true]" out-map="context"/>
+
+            <iterate list="employmentList" entry="employment">
+                <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                    <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+
+                <!-- if position exemptFlag=Y call get#UsaIrs1099MiscFormData, else call get#UsaIrsW2FormData -->
+                <if condition="emplPosition.exemptFlag == 'Y'">
+                    <then>
+                        <service-call name="mantle.humanres.PayrollServices.get#UsaIrs1099MiscFormData"
+                                out-map="formOut" out-map-add-to-existing="false"
+                                in-map="[timePeriodId:timePeriodId, partyRelationshipId:employment.partyRelationshipId]"/>
+                    </then>
+                    <else>
+                        <service-call name="mantle.humanres.PayrollServices.get#UsaIrsW2FormData"
+                                out-map="formOut" out-map-add-to-existing="false"
+                                in-map="[timePeriodId:timePeriodId, partyRelationshipId:employment.partyRelationshipId]"/>
+                    </else>
+                </if>
+
+                <!-- save FormResponse -->
+                <service-call name="org.moqui.impl.ScreenServices.create#FormResponse" out-map="responseOut"
+                        out-map-add-to-existing="false" in-map="[formId:formOut.formId, responseMap:formOut.formMap]"/>
+
+                <!-- create TaxStatement record -->
+                <service-call name="create#mantle.other.tax.TaxStatement"
+                        in-map="[timePeriodId:timePeriodId, partyId:employment.fromPartyId,
+                            partyRelationshipId:employment.partyRelationshipId, taxAuthorityId:formOut.federalTaxAuthorityId,
+                            formId:formOut.formId, formResponseId:responseOut.formResponseId]"/>
+            </iterate>
+
+            <!-- close the TimePeriod -->
+            <set field="timePeriod.isClosed" value="Y"/>
+            <entity-update value-field="timePeriod"/>
+        </actions>
+    </service>
+
+    <service verb="get" noun="UsaIrsW2FormData">
+        <!-- NOTE: currently supports only one federal, state, and local tax authority; to support multiple states with
+            different wage/etc amounts other payroll services/etc would also need to be changed -->
+        <!-- NOTE: currently uses FEIN for Employer's state ID -->
+        <!-- TODO: support multiple tax authorities at each level by making sure the state is related to
+            federalTaxAuthorityId, and match local with state -->
+        <implements service="mantle.humanres.PayrollServices.get#EmploymentWageAndTaxInfo"/>
+        <in-parameters>
+            <parameter name="federalTaxAuthorityId" default-value="UsaIrs"/>
+            <parameter name="formId" default-value="UsaIrsW2_2015"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="federalTaxAuthorityId"/>
+            <parameter name="formId"/>
+            <parameter name="formMap" type="Map">
+                <parameter name="w2_a"/><parameter name="w2_b"/><parameter name="w2_c"/>
+                <parameter name="w2_e1"/><parameter name="w2_e2"/><parameter name="w2_e3"/><parameter name="w2_f"/>
+                <parameter name="w2_01"/><parameter name="w2_02"/><parameter name="w2_03"/><parameter name="w2_04"/>
+                <parameter name="w2_05"/><parameter name="w2_06"/>
+                <parameter name="w2_15as"/><parameter name="w2_15ae"/><parameter name="w2_16a"/><parameter name="w2_17a"/>
+                <parameter name="w2_18a"/><parameter name="w2_19a"/><parameter name="w2_20a"/>
+            </parameter>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.humanres.PayrollServices.get#EmploymentWageAndTaxInfo" in-map="context" out-map="context"/>
+            <set field="formMap" from="[:]"/>
+
+            <set field="formMap.w2_a" from="employeeSsn"/>
+            <set field="formMap.w2_b" from="employerEin"/>
+            <set field="formMap.w2_c" value="${employerName}\n${employerAddressString}"/>
+            <set field="formMap.w2_e1" from="employeeFirstName"/>
+            <set field="formMap.w2_e2" from="employeeLastName"/>
+            <set field="formMap.w2_e3" from="employeeSuffix"/>
+            <set field="formMap.w2_f" from="employeeHomeString"/>
+
+            <set field="formMap.w2_01" from="ec.l10n.format(taxablePayAmount, '#,##0.00')"/>
+            <set field="formMap.w2_03" from="ec.l10n.format(socialTaxablePayAmount, '#,##0.00')"/>
+            <set field="formMap.w2_05" from="ec.l10n.format(medicalTaxablePayAmount, '#,##0.00')"/>
+
+            <set field="federalWageAndTaxInfo" from="wageAndTaxInfoByTaxAuthorityId.get(federalTaxAuthorityId)"/>
+            <set field="formMap.w2_02" from="ec.l10n.format(federalWageAndTaxInfo?.incomeTaxWithheldAmount, '#,##0.00')"/>
+            <set field="formMap.w2_04" from="ec.l10n.format(federalWageAndTaxInfo?.socialTaxWithheldAmount, '#,##0.00')"/>
+            <set field="formMap.w2_06" from="ec.l10n.format(federalWageAndTaxInfo?.medicalTaxWithheldAmount, '#,##0.00')"/>
+
+            <set field="stateTaxAuthorityId" from="stateTaxAuthorityIdList ? stateTaxAuthorityIdList[0] : 0"/>
+            <set field="stateWageAndTaxInfo" from="wageAndTaxInfoByTaxAuthorityId.get(stateTaxAuthorityId)"/>
+            <if condition="stateWageAndTaxInfo">
+                <set field="formMap.w2_15as" from="stateWageAndTaxInfo.taxAuthorityGeo?.geoCodeAlpha2"/>
+                <set field="formMap.w2_15ae" from="employerEin"/>
+                <set field="formMap.w2_16a" from="ec.l10n.format(taxablePayAmount, '#,##0.00')"/>
+                <set field="formMap.w2_17a" from="ec.l10n.format(stateWageAndTaxInfo.incomeTaxWithheldAmount, '#,##0.00')"/>
+            </if>
+
+            <set field="localTaxAuthorityId" from="localTaxAuthorityIdList ? localTaxAuthorityIdList[0] : 0"/>
+            <set field="localWageAndTaxInfo" from="wageAndTaxInfoByTaxAuthorityId.get(localTaxAuthorityId)"/>
+            <if condition="localWageAndTaxInfo">
+                <set field="formMap.w2_18a" from="ec.l10n.format(taxablePayAmount, '#,##0.00')"/>
+                <set field="formMap.w2_19a" from="ec.l10n.format(localWageAndTaxInfo.incomeTaxWithheldAmount, '#,##0.00')"/>
+                <!-- TODO: this may need to be shortened to fit in printed form field -->
+                <set field="formMap.w2_20a" from="localWageAndTaxInfo.taxAuthorityGeo.geoName"/>
+            </if>
+        </actions>
+    </service>
+    <service verb="get" noun="UsaIrs1099MiscFormData">
+        <!-- NOTE: currently supports only one federal and state; to support multiple states with
+            different wage/etc amounts other payroll services/etc would also need to be changed -->
+        <!-- NOTE: currently uses FEIN for Employer's state ID -->
+        <!-- TODO: support multiple state tax authorities by making sure the state is related to federalTaxAuthorityId -->
+        <implements service="mantle.humanres.PayrollServices.get#EmploymentWageAndTaxInfo"/>
+        <in-parameters>
+            <parameter name="federalTaxAuthorityId" default-value="UsaIrs"/>
+            <parameter name="formId" default-value="UsaIrs1099Misc_2015"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="federalTaxAuthorityId"/>
+            <parameter name="formId"/>
+            <parameter name="formMap" type="Map">
+                <parameter name="1099m_a"/><parameter name="1099m_b"/><parameter name="1099m_c"/>
+                <parameter name="1099m_d1"/><parameter name="1099m_d2"/><parameter name="1099m_d3"/>
+                <parameter name="1099m_03"/><parameter name="1099m_04"/><parameter name="1099m_07"/>
+                <parameter name="1099m_16a"/><parameter name="1099m_17a"/><parameter name="1099m_18a"/>
+            </parameter>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.humanres.PayrollServices.get#EmploymentWageAndTaxInfo" in-map="context" out-map="context"/>
+            <set field="formMap" from="[:]"/>
+
+            <set field="formMap.'1099m_a'" value="${employerName}\n${employerAddressString}\n${employerPhoneString}"/>
+            <set field="formMap.'1099m_b'" from="employerEin"/>
+            <set field="formMap.'1099m_c'" from="employeeSsn"/>
+
+            <set field="formMap.'1099m_d1'" value="${employeeFirstName?:''} ${employeeLastName?:''} ${employeeSuffix?:''}"/>
+            <set field="formMap.'1099m_d2'" from="employeeHomeStreetString"/>
+            <set field="formMap.'1099m_d3'" from="employeeHomeCszString"/>
+
+            <set field="federalWageAndTaxInfo" from="wageAndTaxInfoByTaxAuthorityId.get(federalTaxAuthorityId)"/>
+            <if condition="federalWageAndTaxInfo?.incomeTaxWithheldAmount">
+                <then>
+                    <set field="formMap.'1099m_03'" from="ec.l10n.format(taxablePayAmount, '#,##0.00')"/>
+                    <set field="formMap.'1099m_04'" from="ec.l10n.format(federalWageAndTaxInfo?.incomeTaxWithheldAmount, '#,##0.00')"/>
+                </then>
+                <else>
+                    <set field="formMap.'1099m_07'" from="ec.l10n.format(taxablePayAmount, '#,##0.00')"/>
+                </else>
+            </if>
+
+            <set field="stateTaxAuthorityId" from="stateTaxAuthorityIdList ? stateTaxAuthorityIdList[0] : 0"/>
+            <set field="stateWageAndTaxInfo" from="wageAndTaxInfoByTaxAuthorityId.get(stateTaxAuthorityId)"/>
+            <if condition="stateWageAndTaxInfo">
+                <set field="formMap.'1099m_16a'" from="ec.l10n.format(stateWageAndTaxInfo.incomeTaxWithheldAmount, '#,##0.00')"/>
+                <set field="formMap.'1099m_17a'" value="${stateWageAndTaxInfo.taxAuthorityGeo?.geoCodeAlpha2} ${employerEin}"/>
+                <set field="formMap.'1099m_18a'" from="ec.l10n.format(taxablePayAmount, '#,##0.00')"/>
+            </if>
+        </actions>
+    </service>
+</services>

@@ -1,0 +1,327 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a 
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-1.6.xsd">
+
+    <service verb="get" noun="InventoryProjectedInfo">
+        <in-parameters>
+            <parameter name="productIdList" type="List" required="true"/>
+            <parameter name="facilityId"/>
+            <parameter name="estThruDate" type="Timestamp"><description>Limits order item by requiredByDate, run
+                consume/produce by estimatedStartDate, production estimate by readyDate. Allows requiredByDate
+                and estimatedStartDate to be null (missing).</description></parameter>
+            <parameter name="maxResults" type="Integer" default="1000"/>
+            <parameter name="indexName" default-value="mantle_inventory"/>
+            <parameter name="getAssetData" type="Boolean" default="true"/>
+            <parameter name="assetDocumentName" default-value="MantleInventoryAsset"/>
+            <parameter name="getOrderItemData" type="Boolean" default="true"/>
+            <parameter name="orderItemDocumentName" default-value="MantleInventoryOrderItem"/>
+            <parameter name="getRunConsumeData" type="Boolean" default="true"/>
+            <parameter name="runConsumeDocumentName" default-value="MantleInventoryRunConsume"/>
+            <parameter name="getRunProduceData" type="Boolean" default="true"/>
+            <parameter name="runProduceDocumentName" default-value="MantleInventoryRunProduce"/>
+            <parameter name="getProdEstimateData" type="Boolean" default="true"/>
+            <parameter name="prodEstimateDocumentName" default-value="MantleInventoryProdEstimate"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="infoByProductId" type="Map"><description>A Map where the key is a productId and the value
+                is a Map with: orderQuantitySum, quantityReservedSum, quantityNotAvailableSum, quantityNotIssuedSum,
+                orderNotReserved, prodEstQuantitySum, availableToPromiseTotalSum, quantityOnHandTotalSum,
+                estimatedConsumeQuantitySum, consumeQuantitySum, estimatedProduceQuantitySum, produceQuantitySum,
+                estRunConsumeRemaining, estRunProduceRemaining, and totalProjected.
+
+                The totalProjected value = availableToPromiseTotalSum - orderNotReserved -
+                    estRunConsumeRemaining + estRunProduceRemaining + prodEstQuantitySum
+            </description></parameter>
+        </out-parameters>
+        <actions>
+            <set field="estThruDateStr" from="estThruDate ? (estThruDate.getTime() as String) : null"/>
+            <!-- <log level="warn" message="========= estThruDate=${estThruDate}, ${ec.l10n.format(estThruDate, 'yyyy-MM-dd\'T\'HH:mm:ssZ')}"/> -->
+
+            <!-- this could work in theory, but ElasticSearch only searches on the first document in the list, doesn't
+                seem to like the different document structures or something, so we end up doing the multiples searches below
+            <script>
+                searchSourceMap = [
+                    aggregations: [
+                        products: [
+                            terms: [field: 'productId'],
+                            aggregations: [
+                                orderQuantitySum: [sum: [field:'orderQuantity']],
+                                estimatedConsumeQuantitySum: [sum: [field:'estimatedConsumeQuantity']],
+                                consumeQuantitySum: [sum: [field:'consumeQuantity']],
+                                estimatedProduceQuantitySum: [sum: [field:'estimatedProduceQuantity']],
+                                produceQuantitySum: [sum: [field:'produceQuantity']],
+                                prodEstQuantitySum: [sum: [field:'prodEstQuantity']],
+                                availableToPromiseTotalSum: [sum: [field:'availableToPromiseTotal']],
+                                quantityOnHandTotalSum: [sum: [field:'quantityOnHandTotal']]
+                            ]
+                        ]
+                    ]
+                ]
+                if (facilityId) searchSourceMap.query = [match: [facilityId:facilityId]]
+                // TODO: filter by productId
+            </script>
+            <service-call name="org.moqui.impl.EntityServices.search#CountBySource" out-map="globalOut"
+                    in-map="[indexName:indexName, sourceMap:searchSourceMap,
+                        documentTypeList:[orderItemDocumentName,prodEstimateDocumentName,assetDocumentName,runConsumeDocumentName,runProduceDocumentName]]"/>
+            <log level="warn" message="========== globalOut.responseString: ${globalOut.searchResponse.toString()}"/>
+            -->
+
+            <if condition="getOrderItemData">
+                <script>
+                    andList = [[terms:[productId:productIdList]], [not:[terms:[partStatusId:['OrderCompleted','OrderRejected','OrderCancelled']]]]]
+                    if (facilityId) andList.add([term:[facilityId:facilityId]])
+                    if (estThruDateStr) andList.add([or: [[missing:[field:'requiredByDate']], [range:[requiredByDate:[lte:estThruDateStr]]]]])
+                    searchSourceMap = [
+                            size: maxResults, query: [filtered: [filter: [and: andList] ]],
+                            aggregations: [
+                                    products: [
+                                            terms: [field: 'productId', size: maxResults],
+                                            aggregations: [
+                                                    orderQuantitySum: [sum: [field:'orderQuantity']],
+                                                    quantityReservedSum: [sum: [field:'quantityReserved']],
+                                                    quantityNotAvailableSum: [sum: [field:'quantityNotAvailable']],
+                                                    quantityNotIssuedSum: [sum: [field:'quantityNotIssued']]
+                                            ]
+                                    ]
+                            ]
+                    ]
+                </script>
+                <service-call name="org.moqui.impl.EntityServices.search#CountBySource" out-map="orderItemOut"
+                        in-map="[indexName:indexName, sourceMap:searchSourceMap, documentTypeList:[orderItemDocumentName]]"/>
+                <!-- <log level="warn" message="========== searchSourceMap: ${searchSourceMap}\n orderItemOut.responseString: ${orderItemOut.searchResponse.toString()}"/> -->
+            </if>
+
+            <if condition="getProdEstimateData">
+                <script>
+                    andList = [[terms:[productId:productIdList]], [range:[readyDate:[gte:'now/d', lte:estThruDateStr]]]]
+                    if (facilityId) andList.add([term:[facilityId:facilityId]])
+                    searchSourceMap = [
+                            size: maxResults, query: [filtered: [filter: [and: andList] ]],
+                            aggregations: [
+                                    products: [
+                                            terms: [field: 'productId', size: maxResults],
+                                            aggregations: [ prodEstQuantitySum: [sum: [field:'prodEstQuantity']] ]
+                                    ]
+                            ]
+                    ]
+                </script>
+                <service-call name="org.moqui.impl.EntityServices.search#CountBySource" out-map="prodEstimateOut"
+                        in-map="[indexName:indexName, sourceMap:searchSourceMap, documentTypeList:[prodEstimateDocumentName]]"/>
+                <!-- <log level="warn" message="========== searchSourceMap: ${searchSourceMap}\n prodEstimateOut.responseString: ${prodEstimateOut.searchResponse.toString()}"/> -->
+            </if>
+
+            <if condition="getAssetData">
+                <script>
+                    andList = [[terms:[productId:productIdList]], [term:[statusId:'AstAvailable']]]
+                    if (facilityId) andList.add([term:[facilityId:facilityId]])
+                    searchSourceMap = [
+                            size: maxResults, query: [filtered: [filter: [and: andList] ]],
+                            aggregations: [
+                                    products: [
+                                            terms: [field: 'productId', size: maxResults],
+                                            aggregations: [
+                                                    availableToPromiseTotalSum: [sum: [field:'availableToPromiseTotal']],
+                                                    quantityOnHandTotalSum: [sum: [field:'quantityOnHandTotal']]
+                                            ]
+                                    ]
+                            ]
+                    ]
+                </script>
+                <service-call name="org.moqui.impl.EntityServices.search#CountBySource" out-map="invAssetOut"
+                        in-map="[indexName:indexName, sourceMap:searchSourceMap, documentTypeList:[assetDocumentName]]"/>
+                <!-- <log level="warn" message="========== searchSourceMap: ${searchSourceMap}\n invAssetOut.responseString: ${invAssetOut.searchResponse.toString()}"/> -->
+            </if>
+
+            <if condition="getRunConsumeData">
+                <script>
+                    andList = [[terms:[productId:productIdList]], [not:[terms:[statusId:['WeComplete','WeClosed','WeCancelled']]]]]
+                    if (facilityId) andList.add([term: [facilityId:facilityId]])
+                    if (estThruDateStr) andList.add([or: [[missing:[field:'estimatedStartDate']], [range:[estimatedStartDate:[lte:estThruDateStr]]]]])
+                    searchSourceMap = [
+                            size: maxResults, query: [filtered: [filter: [and: andList] ]],
+                            aggregations: [
+                                    products: [
+                                            terms: [field: 'productId', size: maxResults],
+                                            aggregations: [
+                                                    estimatedConsumeQuantitySum: [sum: [field:'estimatedConsumeQuantity']],
+                                                    consumeQuantitySum: [sum: [field:'consumeQuantity']]
+                                            ]
+                                    ]
+                            ]
+                    ]
+                </script>
+                <service-call name="org.moqui.impl.EntityServices.search#CountBySource" out-map="runConsumeOut"
+                        in-map="[indexName:indexName, sourceMap:searchSourceMap, documentTypeList:[runConsumeDocumentName]]"/>
+                <!-- <log level="warn" message="========== searchSourceMap: ${searchSourceMap}\n runConsumeOut.responseString: ${runConsumeOut.searchResponse.toString()}"/> -->
+            </if>
+
+            <if condition="getRunProduceData">
+                <script>
+                    andList = [[terms:[productId:productIdList]], [not:[terms:[statusId:['WeComplete','WeClosed','WeCancelled']]]]]
+                    if (facilityId) andList.add([term:[facilityId:facilityId]])
+                    if (estThruDateStr) andList.add([or: [[missing:[field:'estimatedStartDate']], [range:[estimatedStartDate:[lte:estThruDateStr]]]]])
+                    searchSourceMap = [
+                            size: maxResults, query: [filtered: [filter: [and: andList] ]],
+                            aggregations: [
+                                    products: [
+                                            terms: [field: 'productId', size: maxResults],
+                                            aggregations: [
+                                                    estimatedProduceQuantitySum: [sum: [field:'estimatedProduceQuantity']],
+                                                    produceQuantitySum: [sum: [field:'produceQuantity']]
+                                            ]
+                                    ]
+                            ]
+                    ]
+                </script>
+                <service-call name="org.moqui.impl.EntityServices.search#CountBySource" out-map="runProduceOut"
+                        in-map="[indexName:indexName, sourceMap:searchSourceMap, documentTypeList:[runProduceDocumentName]]"/>
+                <!-- <log level="warn" message="========== searchSourceMap: ${searchSourceMap}\n runProduceOut.responseString: ${runProduceOut.searchResponse.toString()}"/> -->
+            </if>
+
+            <script><![CDATA[
+                // consolidate the results into a single Map by productId
+                infoByProductId = [:]
+
+                if (orderItemOut) {
+                    for (def bucket in orderItemOut.searchResponse.getAggregations().get('products').getBuckets()) {
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'orderQuantitySum', bucket.getAggregations().get('orderQuantitySum').getValue(), infoByProductId)
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'quantityReservedSum', bucket.getAggregations().get('quantityReservedSum').getValue(), infoByProductId)
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'quantityNotAvailableSum', bucket.getAggregations().get('quantityNotAvailableSum').getValue(), infoByProductId)
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'quantityNotIssuedSum', bucket.getAggregations().get('quantityNotIssuedSum').getValue(), infoByProductId)
+                    }
+                }
+
+                if (prodEstimateOut) {
+                    for (def bucket in prodEstimateOut.searchResponse.getAggregations().get('products').getBuckets())
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'prodEstQuantitySum', bucket.getAggregations().get('prodEstQuantitySum').getValue(), infoByProductId)
+                }
+
+                if (invAssetOut) {
+                    for (def bucket in invAssetOut.searchResponse.getAggregations().get('products').getBuckets()) {
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'availableToPromiseTotalSum', bucket.getAggregations().get('availableToPromiseTotalSum').getValue(), infoByProductId)
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'quantityOnHandTotalSum', bucket.getAggregations().get('quantityOnHandTotalSum').getValue(), infoByProductId)
+                    }
+                }
+
+                if (runConsumeOut) {
+                    for (def bucket in runConsumeOut.searchResponse.getAggregations().get('products').getBuckets()) {
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'estimatedConsumeQuantitySum', bucket.getAggregations().get('estimatedConsumeQuantitySum').getValue(), infoByProductId)
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'consumeQuantitySum', bucket.getAggregations().get('consumeQuantitySum').getValue(), infoByProductId)
+                    }
+                }
+
+                if (runProduceOut) {
+                    for (def bucket in runProduceOut.searchResponse.getAggregations().get('products').getBuckets()) {
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'estimatedProduceQuantitySum', bucket.getAggregations().get('estimatedProduceQuantitySum').getValue(), infoByProductId)
+                        StupidUtilities.addToMapInMap(bucket.getKey(), 'produceQuantitySum', bucket.getAggregations().get('produceQuantitySum').getValue(), infoByProductId)
+                    }
+                }
+
+                // calculate totals, set zeroes
+                for (Map.Entry entry in infoByProductId) {
+                    Map infoMap = (Map) entry.getValue()
+
+                    // default all values to 0
+                    infoMap.orderQuantitySum = infoMap.orderQuantitySum ?: 0
+                    infoMap.quantityReservedSum = infoMap.quantityReservedSum ?: 0
+                    infoMap.quantityNotAvailableSum = infoMap.quantityNotAvailableSum ?: 0
+                    infoMap.quantityNotIssuedSum = infoMap.quantityNotIssuedSum ?: 0
+
+                    infoMap.prodEstQuantitySum = infoMap.prodEstQuantitySum ?: 0
+                    infoMap.availableToPromiseTotalSum = infoMap.availableToPromiseTotalSum ?: 0
+                    infoMap.quantityOnHandTotalSum = infoMap.quantityOnHandTotalSum ?: 0
+
+                    infoMap.estimatedConsumeQuantitySum = infoMap.estimatedConsumeQuantitySum ?: 0
+                    infoMap.consumeQuantitySum = infoMap.consumeQuantitySum ?: 0
+                    infoMap.estimatedProduceQuantitySum = infoMap.estimatedProduceQuantitySum ?: 0
+                    infoMap.produceQuantitySum = infoMap.produceQuantitySum ?: 0
+
+                    infoMap.orderNotReserved = infoMap.orderQuantitySum - infoMap.quantityReservedSum
+                    infoMap.estRunConsumeRemaining = infoMap.estimatedConsumeQuantitySum - infoMap.consumeQuantitySum
+                    if (infoMap.estRunConsumeRemaining < 0) infoMap.estRunConsumeRemaining = 0
+                    infoMap.estRunProduceRemaining = infoMap.estimatedProduceQuantitySum - infoMap.produceQuantitySum
+                    if (infoMap.estRunProduceRemaining < 0) infoMap.estRunProduceRemaining = 0
+
+                    infoMap.totalProjected = infoMap.availableToPromiseTotalSum - infoMap.orderNotReserved -
+                            infoMap.estRunConsumeRemaining + infoMap.estRunProduceRemaining + infoMap.prodEstQuantitySum
+                }
+                ]]></script>
+            <!-- <log level="warn" message="================== infoByProductId: ${infoByProductId}"/> -->
+        </actions>
+    </service>
+
+    <service verb="get" noun="PriceHistoryInfo">
+        <in-parameters>
+            <parameter name="productIdList" type="List" required="true"/>
+            <parameter name="facilityId"/>
+            <parameter name="fromDate" type="Timestamp"/>
+            <parameter name="thruDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="maxResults" type="Integer" default="1000"/>
+            <parameter name="indexName" default-value="mantle_inventory"/>
+            <parameter name="orderItemDocumentName" default-value="MantleInventoryOrderItem"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="infoByProductId" type="Map"><description>A Map where the key is a productId and the value
+                is a Map with: orderQuantitySum, unitAmountMin, unitAmountMax, weightedAmountSum, and weightedAmountAvg.</description></parameter>
+        </out-parameters>
+        <actions>
+            <set field="fromDateStr" from="fromDate ? (fromDate.getTime() as String) : null"/>
+            <set field="thruDateStr" from="thruDate.getTime() as String"/>
+
+            <!-- NOTE: there is a good reference for Elasticsearch scripting here:
+                http://www.elastic.co/guide/en/elasticsearch/reference/1.4/modules-scripting.html -->
+            <script>
+                andList = [[terms:[productId:productIdList]], [not:[terms:[partStatusId:['OrderRejected','OrderCancelled']]]]]
+                if (facilityId) andList.add([term:[facilityId:facilityId]])
+                // if (fromDateStr) andList.add([or: [[missing:[field:'OrderHeader.placedDate']], [range:['OrderHeader.placedDate':[gte:fromDateStr]]]]])
+                if (fromDateStr) andList.add([range:['OrderHeader.placedDate':[gte:fromDateStr]]])
+                andList.add([range:['OrderHeader.placedDate':[lte:thruDateStr]]])
+                searchSourceMap = [
+                    size: maxResults, query: [filtered: [filter: [and: andList] ]],
+                    aggregations: [
+                        products: [
+                            terms: [field: 'productId', size: maxResults],
+                            aggregations: [
+                                orderQuantitySum: [sum: [field:'orderQuantity']],
+                                unitAmountMin: [min: [field:'unitAmount']],
+                                unitAmountMax: [max: [field:'unitAmount']],
+                                weightedAmountSum: [sum: [script:"doc['unitAmount'].value * doc['orderQuantity'].value"]]
+                            ]
+                        ]
+                    ]
+                ]
+            </script>
+            <service-call name="org.moqui.impl.EntityServices.search#CountBySource" out-map="orderItemOut"
+                    in-map="[indexName:indexName, sourceMap:searchSourceMap, documentTypeList:[orderItemDocumentName]]"/>
+            <!-- <log level="warn" message="========== searchSourceMap: ${searchSourceMap}\n orderItemOut.responseString: ${orderItemOut.searchResponse.toString()}"/> -->
+            <script>
+                // consolidate the results into a single Map by productId
+                infoByProductId = [:]
+
+                for (def bucket in orderItemOut.searchResponse.getAggregations().get('products').getBuckets()) {
+                    String productId = bucket.getKey()
+                    BigDecimal orderQuantitySum = bucket.getAggregations().get('orderQuantitySum').getValue()
+                    BigDecimal weightedAmountSum = bucket.getAggregations().get('weightedAmountSum').getValue()
+                    BigDecimal weightedAmountAvg = (weightedAmountSum / orderQuantitySum).setScale(2, BigDecimal.ROUND_HALF_UP)
+                    StupidUtilities.addToMapInMap(productId, 'orderQuantitySum', orderQuantitySum, infoByProductId)
+                    StupidUtilities.addToMapInMap(productId, 'unitAmountMin', bucket.getAggregations().get('unitAmountMin').getValue(), infoByProductId)
+                    StupidUtilities.addToMapInMap(productId, 'unitAmountMax', bucket.getAggregations().get('unitAmountMax').getValue(), infoByProductId)
+                    StupidUtilities.addToMapInMap(productId, 'weightedAmountSum', weightedAmountSum, infoByProductId)
+                    StupidUtilities.addToMapInMap(productId, 'weightedAmountAvg', weightedAmountAvg, infoByProductId)
+                }
+            </script>
+        </actions>
+    </service>
+</services>

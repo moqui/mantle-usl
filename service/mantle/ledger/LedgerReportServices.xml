@@ -1,0 +1,668 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a 
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-1.6.xsd">
+
+    <service verb="get" noun="ReportBasicInfo">
+        <in-parameters>
+            <parameter name="organizationPartyId" required="true"/>
+            <parameter name="timePeriodIdList" type="List" required="true"><parameter name="timePeriodId"/></parameter>
+            <parameter name="childOrgPeriods" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="partyAcctgPreference" type="Map"/>
+            <parameter name="currencyUomId"/>
+            <parameter name="timePeriodIdList" type="List"><parameter name="timePeriodId"/></parameter>
+            <parameter name="timePeriodIdMap" type="Map"/>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
+                    in-map="[organizationPartyId:organizationPartyId]"/>
+            <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId"/>
+
+            <if condition="childOrgPeriods">
+                <service-call name="mantle.ledger.LedgerServices.expand#ChildOrganizationList" out-map="expandResult"
+                        in-map="[organizationPartyId:organizationPartyId]"/>
+                <set field="childOrgIdList" from="expandResult.orgPartyIdList"/>
+                <script>childOrgIdList.remove(organizationPartyId)</script>
+            </if>
+
+            <set field="timePeriodList" from="[]"/>
+            <iterate list="new ArrayList(timePeriodIdList)" entry="timePeriodId">
+                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+                <script>timePeriodList.add(timePeriod)</script>
+
+                <if condition="childOrgIdList">
+                    <entity-find entity-name="mantle.party.time.TimePeriod" list="childTimePeriodList">
+                        <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+                        <econdition field-name="fromDate" from="timePeriod.fromDate"/>
+                        <econdition field-name="partyId" operator="in" from="childOrgIdList"/>
+                    </entity-find>
+                    <script>timePeriodList.addAll(childTimePeriodList)</script>
+                </if>
+            </iterate>
+
+            <order-map-list list="timePeriodList"><order-by field-name="periodName"/></order-map-list>
+            <set field="timePeriodIdList" from="[]"/>
+            <set field="timePeriodIdMap" from="[:]"/>
+            <iterate list="timePeriodList" entry="timePeriod"><script>
+                timePeriodIdList.add(timePeriod.timePeriodId)
+                timePeriodIdMap.put(timePeriod.timePeriodId, timePeriod)
+            </script></iterate>
+        </actions>
+    </service>
+
+    <service verb="run" noun="BalanceSheet">
+        <implements service="mantle.ledger.LedgerReportServices.get#ReportBasicInfo"/>
+        <out-parameters>
+            <parameter name="classInfoById" type="Map"/>
+
+            <parameter name="netAssetTotalMap" type="Map"/>
+            <parameter name="liabilityEquityTotalMap" type="Map"/>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.ledger.LedgerReportServices.get#ReportBasicInfo" in-map="context" out-map="context"/>
+
+            <set field="classIdList" from="['ASSET', 'CONTRA_ASSET', 'LIABILITY', 'EQUITY']"/>
+            <!-- NOTE: should DISTRIBUTION go here, or somewhere else? -->
+
+            <set field="classInfoById" from="[:]"/>
+            <iterate list="['ASSET', 'LIABILITY', 'EQUITY']" entry="classId">
+                <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo"
+                        in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
+                            classInfoById:classInfoById, glAccountClassEnumId:classId]"/>
+            </iterate>
+            <!-- do this separately, only one that needs to be negated for this report -->
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo"
+                    in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
+                        classInfoById:classInfoById, glAccountClassEnumId:'CONTRA_ASSET', negateCredit:true]"/>
+
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netAssetTotalMap"
+                    in-map="[classInfoById:classInfoById, classIdList:['ASSET', 'CONTRA_ASSET']]"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="liabilityEquityTotalMap"
+                    in-map="[classInfoById:classInfoById, classIdList:['LIABILITY', 'EQUITY']]"/>
+        </actions>
+    </service>
+    <service verb="run" noun="IncomeStatement">
+        <implements service="mantle.ledger.LedgerReportServices.get#ReportBasicInfo"/>
+        <out-parameters>
+            <parameter name="classInfoById" type="Map"/>
+
+            <parameter name="grossProfitOnSalesMap" type="Map"/>
+            <parameter name="netOperatingIncomeMap" type="Map"/>
+            <parameter name="netIncomeMap" type="Map"/>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.ledger.LedgerReportServices.get#ReportBasicInfo" in-map="context" out-map="context"/>
+
+            <set field="classIdList" from="['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE']"/>
+            <!-- NOTE: should DISTRIBUTION go here, or somewhere else? -->
+
+            <set field="classInfoById" from="[:]"/>
+            <iterate list="classIdList" entry="classId">
+                <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo"
+                        in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
+                            classInfoById:classInfoById, negateDebit:true, glAccountClassEnumId:classId]"/>
+            </iterate>
+
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="grossProfitOnSalesOut"
+                    in-map="[classInfoById:classInfoById, classIdList:['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES']]"/>
+            <set field="grossProfitOnSalesMap" from="grossProfitOnSalesOut.totalPosted"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netOperatingIncomeOut"
+                    in-map="[classInfoById:classInfoById, classIdList:['INCOME', 'EXPENSE']]"/>
+            <set field="netOperatingIncomeMap" from="netOperatingIncomeOut.totalPosted"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netIncomeOut"
+                    in-map="[classInfoById:classInfoById, classIdList:classIdList]"/>
+            <set field="netIncomeMap" from="netIncomeOut.totalPosted"/>
+        </actions>
+    </service>
+
+    <service verb="run" noun="CashFlowStatement">
+        <implements service="mantle.ledger.LedgerReportServices.run#IncomeStatement"/>
+        <out-parameters>
+            <!--
+                General concept: show posted amount from Income Statement, posted amounts (and begin/end) from Balance Sheet accounts
+                Uses Indirect method; see https://en.wikipedia.org/wiki/Cash_flow_statement
+
+                net cash flow from
+                - operating activities
+                  - net income (add; from income statement)
+                  - cash from operating activities
+                    - TODO these two are in the income statement, include them here?
+                      - loss on disposal of assets (subtract)
+                      - gain on sale of assets (add)
+                    - CONTRA_ASSET (include this?)
+                      - accumulated depreciation ACCUM_DEPRECIATION (subtract)
+                      - accumulated amortization ACCUM_AMORTIZATION (subtract)
+                  - CURRENT_ASSET (end - begin balance) (except CASH_EQUIVALENT?)
+                    - accounts receivable ACCOUNTS_RECEIVABLE (add)
+                    - prepaid expenses PREPAID_EXPENSE (add)
+                    - accrued interest receivable (add)
+                    - inventory assets INVENTORY_ASSET (add)
+                  - other assets OTHER_ASSET (add)
+                  - CURRENT_LIABILITY (end - begin balance)
+                    - accounts payable ACCOUNTS_PAYABLE (subtract)
+                    - accrued expenses ACCRUED_EXPENSES (subtract)
+                    - accrued interest payable (subtract)
+                    - third party holdings THIRD_PARTY_HOLDINGS (subtract)
+                - investing activities
+                  - change (end - begin balance) in long term assets LONG_TERM_ASSET (subtract)
+                  - redundant? cash paid for assets (subtract)
+                - financing activities
+                  - DISTRIBUTION
+                    - cash paid for shareholder distributions DIVIDEND (subtract)
+                    - return of capital RETURN_OF_CAPITAL (subtract)
+                  - EQUITY
+                    - cash received from shareholders OWNERS_EQUITY (add)
+                    - retained earnings RETAINED_EARNINGS (add)
+                  - principal payments on long term debt LONG_TERM_LIABILITY, others? (subtract)
+                  - proceeds from long term debt (add)
+                - cash and equivalents CASH_EQUIVALENT; show change, begin balance, end balance
+
+            -->
+            <parameter name="classInfoById" type="Map"/>
+            <parameter name="netOperatingActivityMap" type="Map"/>
+            <parameter name="netInvestingActivityMap" type="Map"/>
+            <parameter name="netFinancingActivityMap" type="Map"/>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.ledger.LedgerReportServices.run#IncomeStatement" in-map="context" out-map="context"/>
+            <!-- NOTE: classInfoById used from run#IncomeStatement, contains 'REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE' -->
+
+            <!--
+                Operating Activities: +'CONTRA_ASSET', -'CURRENT_ASSET', -'OTHER_ASSET', +'CURRENT_LIABILITY'
+                Investing Activities: -'LONG_TERM_ASSET'
+                Financing Activities: -'DISTRIBUTION', +'EQUITY', +'LONG_TERM_LIABILITY'
+            -->
+            <set field="classIdList" from="['CONTRA_ASSET', 'CURRENT_ASSET', 'OTHER_ASSET', 'CURRENT_LIABILITY',
+                                            'LONG_TERM_ASSET',
+                                            'DISTRIBUTION', 'EQUITY', 'LONG_TERM_LIABILITY']"/>
+            <iterate list="classIdList" entry="classId">
+                <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo"
+                        in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
+                            classInfoById:classInfoById, glAccountClassEnumId:classId, negateDebit:true]"/>
+            </iterate>
+
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netOperatingActivityOut"
+                    in-map="[classInfoById:classInfoById, classIdList:['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES',
+                        'INCOME', 'EXPENSE', 'CURRENT_ASSET', 'OTHER_ASSET', 'CONTRA_ASSET', 'CURRENT_LIABILITY']]"/>
+            <set field="netOperatingActivityMap" from="netOperatingActivityOut.totalPosted"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netInvestingActivityOut"
+                    in-map="[classInfoById:classInfoById, classIdList:['LONG_TERM_ASSET']]"/>
+            <set field="netInvestingActivityMap" from="netInvestingActivityOut.totalPosted"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netFinancingActivityOut"
+                    in-map="[classInfoById:classInfoById, classIdList:['DISTRIBUTION', 'EQUITY', 'LONG_TERM_LIABILITY']]"/>
+            <set field="netFinancingActivityMap" from="netFinancingActivityOut.totalPosted"/>
+        </actions>
+    </service>
+    <service verb="run" noun="RetainedEarningsStatement">
+        <implements service="mantle.ledger.LedgerReportServices.run#IncomeStatement"/>
+        <out-parameters>
+            <!-- show RETAINED_EARNINGS, all from Income Statement (Net Income), DIVIDEND -->
+            <parameter name="classInfoById" type="Map"/>
+            <parameter name="netEarningsMap" type="Map"/>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.ledger.LedgerReportServices.run#IncomeStatement" in-map="context" out-map="context"/>
+
+            <set field="classIdList" from="['RETAINED_EARNINGS', 'DIVIDEND']"/>
+
+            <!-- NOTE: classInfoById used from run#IncomeStatement, contains 'REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE' -->
+            <iterate list="classIdList" entry="classId">
+                <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo"
+                        in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
+                            classInfoById:classInfoById, glAccountClassEnumId:classId, negateDebit:true]"/>
+            </iterate>
+
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netEarningsOut"
+                    in-map="[classInfoById:classInfoById, classIdList:['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES',
+                        'INCOME', 'EXPENSE', 'RETAINED_EARNINGS', 'DIVIDEND']]"/>
+            <set field="netEarningsMap" from="netEarningsOut.totalPosted"/>
+        </actions>
+    </service>
+
+    <service verb="run" noun="FinancialRatios">
+        <implements service="mantle.ledger.LedgerReportServices.get#ReportBasicInfo"/>
+        <out-parameters>
+            <parameter name="classInfoById" type="Map"/>
+
+            <!-- Metric Maps -->
+            <parameter name="netIncomeMap" type="Map"/>
+            <parameter name="salesMap" type="Map"/><parameter name="grossProfitMap" type="Map"/>
+            <parameter name="ebtMap" type="Map"/><parameter name="ibieMap" type="Map"/><parameter name="ebitMap" type="Map"/>
+
+            <!-- GL Class Total Maps -->
+            <parameter name="costOfSalesMap" type="Map"/><parameter name="cogsMap" type="Map"/>
+
+            <parameter name="totalAssetsMap" type="Map"/><parameter name="netFixedAssetsMap" type="Map"/>
+            <parameter name="currentAssetsMap" type="Map"/><parameter name="currentLiabilitiesMap" type="Map"/>
+            <parameter name="inventoryMap" type="Map"/><parameter name="totalLiabilitiesMap" type="Map"/>
+            <parameter name="longTermDebtMap" type="Map"/><parameter name="equityMap" type="Map"/>
+            <parameter name="accountsReceivableMap" type="Map"/><parameter name="depreciationMap" type="Map"/>
+            <parameter name="amortizationMap" type="Map"/><parameter name="interestExpenseMap" type="Map"/>
+
+            <!-- Ratio Maps -->
+            <parameter name="currentLiquidityMap" type="Map"/><parameter name="quickLiquidityMap" type="Map"/>
+            <parameter name="netCapitalToAssetsMap" type="Map"/>
+
+            <parameter name="inventoryTurnoverMap" type="Map"/><!-- <parameter name="collectionPeriodMap" type="Map"/> -->
+            <parameter name="fixedAssetTurnoverMap" type="Map"/><parameter name="totalAssetsTurnoverMap" type="Map"/>
+
+            <parameter name="debtRatioMap" type="Map"/><parameter name="debtToEquityMap" type="Map"/>
+            <parameter name="timesInterestEarnedMap" type="Map"/><parameter name="cashCoverageMap" type="Map"/>
+            <!-- <parameter name="fixedChargeCoverageMap" type="Map"/> --><parameter name="equityMultiplierMap" type="Map"/>
+
+            <parameter name="grossProfitMarginMap" type="Map"/><parameter name="netProfitMarginMap" type="Map"/>
+            <parameter name="returnOnAssetsMap" type="Map"/><parameter name="returnOnEquityMap" type="Map"/>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.ledger.LedgerReportServices.get#ReportBasicInfo" in-map="context" out-map="context"/>
+
+            <!-- Get info for all DEBIT and CREDIT accounts, we'll use them in various places -->
+            <set field="classIdList" from="['DEBIT', 'CREDIT']"/>
+            <set field="classInfoById" from="[:]"/>
+            <iterate list="classIdList" entry="classId">
+                <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo"
+                        in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
+                            classInfoById:classInfoById, glAccountClassEnumId:classId]"/>
+            </iterate>
+
+            <!-- empty Maps for the various values -->
+            <set field="metricMapNames" from="['salesMap', 'grossProfitMap', 'ebtMap', 'ibieMap', 'ebitMap']"/><!-- no netIncomeMap, gets from service and already in ALL entries -->
+            <set field="classMapNames" from="['costOfSalesMap', 'cogsMap', 'totalAssetsMap', 'netFixedAssetsMap', 'currentAssetsMap',
+                    'currentLiabilitiesMap', 'inventoryMap', 'totalLiabilitiesMap', 'longTermDebtMap', 'equityMap',
+                    'accountsReceivableMap', 'depreciationMap', 'amortizationMap', 'interestExpenseMap']"/>
+            <set field="ratioMapNames" from="['currentLiquidityMap', 'quickLiquidityMap', 'netCapitalToAssetsMap', 'inventoryTurnoverMap',
+                    'collectionPeriodMap', 'fixedAssetTurnoverMap', 'totalAssetsTurnoverMap', 'debtRatioMap',
+                    'debtToEquityMap', 'timesInterestEarnedMap', 'cashCoverageMap', 'fixedChargeCoverageMap',
+                    'equityMultiplierMap', 'grossProfitMarginMap', 'netProfitMarginMap', 'returnOnAssetsMap',
+                    'returnOnEquityMap']"/>
+            <iterate list="metricMapNames" entry="mapName"><script>context.put(mapName, [:])</script></iterate>
+            <iterate list="classMapNames" entry="mapName"><script>context.put(mapName, [:])</script></iterate>
+            <iterate list="ratioMapNames" entry="mapName"><script>context.put(mapName, [:])</script></iterate>
+
+            <!-- get Net Income -->
+            <set field="netIncomeClassIdList" from="['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE']"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netIncomeOut"
+                    in-map="[classInfoById:classInfoById, classIdList:netIncomeClassIdList]"/>
+            <set field="netIncomeMap" from="netIncomeOut.totalPosted"/>
+
+            <iterate list="timePeriodIdList" entry="timePeriodId">
+
+                <!-- ========== GL Class Totals ========== -->
+
+                <set field="costOfSales" from="classInfoById.COST_OF_SALES.totalPostedByTimePeriod[timePeriodId] ?: 0"/>
+                <script>costOfSalesMap.put(timePeriodId, costOfSales)</script>
+                <set field="cogs" from="classInfoById.COST_GOODS_SOLD.totalPostedByTimePeriod[timePeriodId] ?: 0"/>
+                <script>cogsMap.put(timePeriodId, cogs)</script>
+
+                <!-- Total Assets = ASSET - CONTRA_ASSET -->
+                <set field="totalAssets" from="(classInfoById.ASSET.totalBalanceByTimePeriod[timePeriodId] ?: 0) -
+                        (classInfoById.CONTRA_ASSET.totalBalanceByTimePeriod[timePeriodId] ?: 0)"/>
+                <script>totalAssetsMap.put(timePeriodId, totalAssets)</script>
+                <set field="netFixedAssets" from="(classInfoById.LONG_TERM_ASSET.totalBalanceByTimePeriod[timePeriodId] ?: 0) -
+                        (classInfoById.CONTRA_ASSET.totalBalanceByTimePeriod[timePeriodId] ?: 0)"/>
+                <script>netFixedAssetsMap.put(timePeriodId, netFixedAssets)</script>
+                <set field="currentAssets" from="classInfoById.CURRENT_ASSET.totalBalanceByTimePeriod[timePeriodId] ?: 0"/>
+                <script>currentAssetsMap.put(timePeriodId, currentAssets)</script>
+                <set field="currentLiabilities" from="classInfoById.CURRENT_LIABILITY.totalBalanceByTimePeriod[timePeriodId] ?: 0"/>
+                <script>currentLiabilitiesMap.put(timePeriodId, currentLiabilities)</script>
+                <set field="inventory" from="classInfoById.INVENTORY_ASSET.totalBalanceByTimePeriod[timePeriodId] ?: 0"/>
+                <script>inventoryMap.put(timePeriodId, inventory)</script>
+
+                <set field="totalLiabilities" from="classInfoById.LIABILITY.totalBalanceByTimePeriod[timePeriodId] ?: 0"/>
+                <script>totalLiabilitiesMap.put(timePeriodId, totalLiabilities)</script>
+                <set field="longTermDebt" from="classInfoById.LONG_TERM_LIABILITY.totalBalanceByTimePeriod[timePeriodId] ?: 0"/>
+                <script>longTermDebtMap.put(timePeriodId, longTermDebt)</script>
+                <set field="equity" from="classInfoById.EQUITY.totalBalanceByTimePeriod[timePeriodId] ?: 0"/>
+                <script>equityMap.put(timePeriodId, equity)</script>
+
+                <set field="accountsReceivable" from="classInfoById.ACCOUNTS_RECEIVABLE.totalBalanceByTimePeriod[timePeriodId] ?: 0"/>
+                <script>accountsReceivableMap.put(timePeriodId, accountsReceivable)</script>
+                <set field="depreciation" from="classInfoById.DEPRECIATION.totalPostedByTimePeriod[timePeriodId] ?: 0"/>
+                <script>depreciationMap.put(timePeriodId, depreciation)</script>
+                <set field="amortization" from="classInfoById.AMORTIZATION.totalPostedByTimePeriod[timePeriodId] ?: 0"/>
+                <script>amortizationMap.put(timePeriodId, amortization)</script>
+                <set field="interestExpense" from="classInfoById.INTEREST_EXPENSE.totalPostedByTimePeriod[timePeriodId] ?: 0"/>
+                <script>interestExpenseMap.put(timePeriodId, interestExpense)</script>
+
+                <!-- ========== Metrics ========== -->
+
+                <!-- Sales = REVENUE - CONTRA_REVENUE -->
+                <set field="sales" from="(classInfoById.REVENUE.totalPostedByTimePeriod[timePeriodId] ?: 0) -
+                        (classInfoById.CONTRA_REVENUE.totalPostedByTimePeriod[timePeriodId] ?: 0)"/>
+                <script>salesMap.put(timePeriodId, sales)</script>
+                <!-- Gross Profit = Sales - COST_OF_SALES -->
+                <set field="grossProfit" from="sales - costOfSales"/>
+                <script>grossProfitMap.put(timePeriodId, grossProfit)</script>
+                <!-- Administrative Expense = SGA_EXPENSE + COMPENSATION
+                <set field="administrativeExpense" from="classInfoById.SGA_EXPENSE.totalPostedByTimePeriod[timePeriodId] +
+                        classInfoById.COMPENSATION.totalPostedByTimePeriod[timePeriodId]"/>
+                <script>administrativeExpenseMap.put(timePeriodId, administrativeExpense)</script>
+                 -->
+
+                <!-- Net Income = (standard Net Income from run#IncomeStatement service) -->
+                <set field="netIncome" from="netIncomeMap[timePeriodId] ?: 0"/>
+                <!-- EBT = Net Income + TAX_EXPENSE -->
+                <set field="ebt" from="netIncome + (classInfoById.TAX_EXPENSE.totalPostedByTimePeriod[timePeriodId] ?: 0)"/>
+                <script>ebtMap.put(timePeriodId, ebt)</script>
+                <!-- IBIE = EBT + INTEREST_EXPENSE -->
+                <set field="ibie" from="ebt + (classInfoById.INTEREST_EXPENSE.totalPostedByTimePeriod[timePeriodId] ?: 0)"/>
+                <script>ibieMap.put(timePeriodId, ibie)</script>
+                <!-- EBIT = IBIE - INTEREST_INCOME -->
+                <set field="ebit" from="ibie - (classInfoById.INTEREST_INCOME.totalPostedByTimePeriod[timePeriodId] ?: 0)"/>
+                <script>ebitMap.put(timePeriodId, ebit)</script>
+                <!-- EBIT + interest income = IBIE; IBIE - interest expense = EBT; EBT - income taxes = Net Income -->
+                <!-- EBIT = Net Income + income taxes + interest expense - interest income -->
+
+                <!-- ========== Add Class Totals and Metrics to values for ALL periods ========== -->
+
+                <iterate list="classMapNames" entry="mapName">
+                    <script>StupidUtilities.addToBigDecimalInMap('ALL', context[mapName][timePeriodId], context[mapName])</script></iterate>
+                <iterate list="metricMapNames" entry="mapName">
+                    <script>StupidUtilities.addToBigDecimalInMap('ALL', context[mapName][timePeriodId], context[mapName])</script></iterate>
+
+                <!-- ========== Ratios ========== -->
+
+                <!-- Liquidity: Ability to meet short-term obligations -->
+                <!-- Current Liquidity = currentAssets / currentLiabilities -->
+                <script>currentLiquidityMap.put(timePeriodId, currentLiabilities ? currentAssets / currentLiabilities : 0)</script>
+                <!-- Quick Liquidity = (currentAssets - inventory) / currentLiabilities -->
+                <script>quickLiquidityMap.put(timePeriodId, currentLiabilities ? (currentAssets - inventory) / currentLiabilities : 0)</script>
+                <!-- Net Working Capital to Total Assets = (currentAssets - inventory) / totalAssets -->
+                <script>netCapitalToAssetsMap.put(timePeriodId, totalAssets ? (currentAssets - inventory) / totalAssets : 0)</script>
+
+                <!-- Activity: Efficiency in generating sales with assets -->
+                <!-- Inventory Turnover = cogs / inventory (NOTE: should be "average" inventory...) -->
+                <script>inventoryTurnoverMap.put(timePeriodId, inventory ? cogs / inventory : 0)</script>
+                <!-- TODO: Collection Period = accountsReceivable / (credit sales per day??? - maybe REVENUE/(days in period)) -->
+                <!-- <script>collectionPeriodMap.put(timePeriodId, )</script> -->
+                <!-- Fixed Asset Turnover = sales / netFixedAssets -->
+                <script>fixedAssetTurnoverMap.put(timePeriodId, netFixedAssets ? sales / netFixedAssets : 0)</script>
+                <!-- Total Assets Turnover = sales / totalAssets -->
+                <script>totalAssetsTurnoverMap.put(timePeriodId, totalAssets ? sales / totalAssets : 0)</script>
+
+                <!-- Leverage: Degree of indebtedness and ability to meet long term obligations -->
+                <!-- Debt Ratio = totalLiabilities / totalAssets -->
+                <script>debtRatioMap.put(timePeriodId, totalAssets ? totalLiabilities / totalAssets : 0)</script>
+                <!-- Debt to Equity = longTermDebt / equity -->
+                <script>debtToEquityMap.put(timePeriodId, equity ? longTermDebt / equity : 0)</script>
+                <!-- Times Interest Earned = ebit / interestExpense -->
+                <script>timesInterestEarnedMap.put(timePeriodId, interestExpense ? ebit / interestExpense : 0)</script>
+                <!-- Cash Coverage = (ebit + depreciation + amortization) / interestExpense -->
+                <script>cashCoverageMap.put(timePeriodId, interestExpense ? (ebit + depreciation + amortization) / interestExpense : 0)</script>
+                <!-- TODO: Fixed Charge Coverage = (ebit + [lease payments]) / (interestExpense + [lease payments]) -->
+                <!-- <script>fixedChargeCoverageMap.put(timePeriodId, )</script> -->
+                <!-- Equity Multiplier = totalAssets / equity -->
+                <script>equityMultiplierMap.put(timePeriodId, equity ? totalAssets / equity : 0)</script>
+
+                <!-- Profitability: Returns on assets and equity -->
+                <!-- Gross Profit Margin = grossProfit / sales -->
+                <script>grossProfitMarginMap.put(timePeriodId, sales ? grossProfit / sales : 0)</script>
+                <!-- Net Profit Margin = netIncome / sales -->
+                <script>netProfitMarginMap.put(timePeriodId, sales ? netIncome / sales : 0)</script>
+                <!-- Return on Assets = netIncome / totalAssets -->
+                <script>returnOnAssetsMap.put(timePeriodId, totalAssets ? netIncome / totalAssets : 0)</script>
+                <!-- Return on Equity = netIncome / equity -->
+                <script>returnOnEquityMap.put(timePeriodId, equity ? netIncome / equity : 0)</script>
+                <!-- NOTE FUTURE need values split by share, count of shares, etc: Price/Earnings, Earnings per Share, Market-to-Book -->
+
+            </iterate>
+
+            <!-- Calculate ratios for ALL periods -->
+            <!-- Liquidity: Ability to meet short-term obligations -->
+            <!-- Current Liquidity = currentAssets / currentLiabilities -->
+            <script>currentLiquidityMap.put('ALL', currentLiabilitiesMap['ALL'] ? currentAssetsMap['ALL'] / currentLiabilitiesMap['ALL'] : 0)</script>
+            <!-- Quick Liquidity = (currentAssets - inventory) / currentLiabilities -->
+            <script>quickLiquidityMap.put('ALL', currentLiabilitiesMap['ALL'] ? (currentAssetsMap['ALL'] - inventoryMap['ALL']) / currentLiabilitiesMap['ALL'] : 0)</script>
+            <!-- Net Working Capital to Total Assets = (currentAssets - inventory) / totalAssets -->
+            <script>netCapitalToAssetsMap.put('ALL', totalAssetsMap['ALL'] ? (currentAssetsMap['ALL'] - inventoryMap['ALL']) / totalAssetsMap['ALL'] : 0)</script>
+
+            <!-- Activity: Efficiency in generating sales with assets -->
+            <!-- Inventory Turnover = cogs / inventory (NOTE: should be "average" inventory...) -->
+            <script>inventoryTurnoverMap.put('ALL', inventoryMap['ALL'] ? cogsMap['ALL'] / inventoryMap['ALL'] : 0)</script>
+            <!-- TODO: Collection Period = accountsReceivable / (credit sales per day??? - maybe REVENUE/(days in period)) -->
+            <!-- <script>collectionPeriodMap.put('ALL', )</script> -->
+            <!-- Fixed Asset Turnover = sales / netFixedAssets -->
+            <script>fixedAssetTurnoverMap.put('ALL', netFixedAssetsMap['ALL'] ? salesMap['ALL'] / netFixedAssetsMap['ALL'] : 0)</script>
+            <!-- Total Assets Turnover = sales / totalAssets -->
+            <script>totalAssetsTurnoverMap.put('ALL', totalAssetsMap['ALL'] ? salesMap['ALL'] / totalAssetsMap['ALL'] : 0)</script>
+
+            <!-- Leverage: Degree of indebtedness and ability to meet long term obligations -->
+            <!-- Debt Ratio = totalLiabilities / totalAssets -->
+            <script>debtRatioMap.put('ALL', totalAssetsMap['ALL'] ? totalLiabilitiesMap['ALL'] / totalAssetsMap['ALL'] : 0)</script>
+            <!-- Debt to Equity = longTermDebt / equity -->
+            <script>debtToEquityMap.put('ALL', equityMap['ALL'] ? longTermDebtMap['ALL'] / equityMap['ALL'] : 0)</script>
+            <!-- Times Interest Earned = ebit / interestExpense -->
+            <script>timesInterestEarnedMap.put('ALL', interestExpenseMap['ALL'] ? ebitMap['ALL'] / interestExpenseMap['ALL'] : 0)</script>
+            <!-- Cash Coverage = (ebit + depreciation + amortization) / interestExpense -->
+            <script>cashCoverageMap.put('ALL', interestExpenseMap['ALL'] ? (ebitMap['ALL'] + depreciationMap['ALL'] + amortizationMap['ALL']) / interestExpenseMap['ALL'] : 0)</script>
+            <!-- TODO: Fixed Charge Coverage = (ebit + [lease payments]) / (interestExpense + [lease payments]) -->
+            <!-- <script>fixedChargeCoverageMap.put('ALL', )</script> -->
+            <!-- Equity Multiplier = totalAssets / equity -->
+            <script>equityMultiplierMap.put('ALL', equityMap['ALL'] ? totalAssetsMap['ALL'] / equityMap['ALL'] : 0)</script>
+
+            <!-- Profitability: Returns on assets and equity -->
+            <!-- Gross Profit Margin = grossProfit / sales -->
+            <script>grossProfitMarginMap.put('ALL', salesMap['ALL'] ? grossProfitMap['ALL'] / salesMap['ALL'] : 0)</script>
+            <!-- Net Profit Margin = netIncome / sales -->
+            <script>netProfitMarginMap.put('ALL', salesMap['ALL'] ? netIncomeMap['ALL'] / salesMap['ALL'] : 0)</script>
+            <!-- Return on Assets = netIncome / totalAssets -->
+            <script>returnOnAssetsMap.put('ALL', totalAssetsMap['ALL'] ? netIncomeMap['ALL'] / totalAssetsMap['ALL'] : 0)</script>
+            <!-- Return on Equity = netIncome / equity -->
+            <script>returnOnEquityMap.put('ALL', equityMap['ALL'] ? netIncomeMap['ALL'] / equityMap['ALL'] : 0)</script>
+            <!-- NOTE FUTURE need values split by share, count of shares, etc: Price/Earnings, Earnings per Share, Market-to-Book -->
+        </actions>
+    </service>
+
+    <service verb="get" noun="GlAccountClassInfoSums">
+        <in-parameters>
+            <parameter name="classInfoById" type="Map" required="true"/>
+            <parameter name="classIdList" type="List" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="totalPosted" type="Map"/>
+            <parameter name="totalBalance" type="Map"/>
+        </out-parameters>
+        <actions>
+            <set field="totalPosted" from="[:]"/>
+            <set field="totalBalance" from="[:]"/>
+            <iterate list="classIdList" entry="classId">
+                <set field="classInfo" from="classInfoById.get(classId)"/>
+                <if condition="!classInfo"><continue/></if>
+                <iterate list="classInfo.totalPostedByTimePeriod" entry="totalPostedVal" key="timePeriodId">
+                    <script>StupidUtilities.addToBigDecimalInMap(timePeriodId, totalPostedVal, totalPosted)</script></iterate>
+                <iterate list="classInfo.totalBalanceByTimePeriod" entry="totalBalanceVal" key="timePeriodId">
+                    <script>StupidUtilities.addToBigDecimalInMap(timePeriodId, totalBalanceVal, totalBalance)</script></iterate>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="get" noun="GlAccountClassReportInfo">
+        <in-parameters>
+            <parameter name="organizationPartyId" required="true"/>
+            <parameter name="timePeriodIdList" type="List" required="true"/>
+            <parameter name="glAccountClassEnumId" required="true"/>
+            <parameter name="negateDebit" type="Boolean" default="false"/>
+            <parameter name="negateCredit" type="Boolean" default="false"/>
+            <parameter name="classInfoById" type="Map"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="classInfoMap" type="Map"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="moqui.basic.Enumeration" value-field="classEnum">
+                <field-map field-name="enumId" from="glAccountClassEnumId"/></entity-find-one>
+            <if condition="!classEnum">
+                <return error="true" message="Enumeration not found for ${glAccountClassEnumId}"/></if>
+
+            <set field="negate" from="false"/>
+            <if condition="negateDebit || negateCredit">
+                <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
+                        in-map="[glAccountClassEnumId:glAccountClassEnumId]"/>
+                <set field="negate" from="(negateDebit &amp;&amp; rootGlAccountClassEnumId == 'DEBIT') ||
+                        (negateCredit &amp;&amp; rootGlAccountClassEnumId == 'CREDIT')"/>
+            </if>
+
+            <!-- lookup accounts, add to glAccountInfoList, sum up classBalance -->
+            <entity-find entity-name="mantle.ledger.report.GlAccountOrgTimePeriodDetail" list="glAccountDetailList">
+                <!-- now one TimePeriod per org, so leave this out to get children too: <econdition field-name="organizationPartyId"/> -->
+                <econdition field-name="timePeriodId" operator="in" from="timePeriodIdList"/>
+                <econdition field-name="glAccountClassEnumId"/>
+            </entity-find>
+            <set field="balanceByTimePeriod" from="[:]"/>
+            <set field="postedByTimePeriod" from="[:]"/>
+            <set field="glAccountInfoMap" from="[:]"/>
+            <iterate list="glAccountDetailList" entry="glAccountDetail">
+                <script>
+                    BigDecimal balance = glAccountDetail.endingBalance ?: 0
+                    BigDecimal posted = balance - (glAccountDetail.beginningBalance ?: 0)
+                    if (negate) { balance = -balance; posted = -posted }
+
+                    StupidUtilities.addToBigDecimalInMap(glAccountDetail.timePeriodId, balance, balanceByTimePeriod)
+                    StupidUtilities.addToBigDecimalInMap(glAccountDetail.timePeriodId, posted, postedByTimePeriod)
+                    StupidUtilities.addToBigDecimalInMap('ALL', balance, balanceByTimePeriod)
+                    StupidUtilities.addToBigDecimalInMap('ALL', posted, postedByTimePeriod)
+
+                    Map glAccountInfo = glAccountInfoMap.get(glAccountDetail.accountCode)
+                    if (!glAccountInfo) {
+                        glAccountInfo = [accountCode:glAccountDetail.accountCode, accountName:glAccountDetail.accountName,
+                                         balanceByTimePeriod:[:], postedByTimePeriod:[:]]
+                        glAccountInfoMap.put(glAccountDetail.accountCode, glAccountInfo)
+                    }
+                    glAccountInfo.balanceByTimePeriod.put(glAccountDetail.timePeriodId, balance)
+                    glAccountInfo.postedByTimePeriod.put(glAccountDetail.timePeriodId, posted)
+                    StupidUtilities.addToBigDecimalInMap('ALL', balance, glAccountInfo.balanceByTimePeriod)
+                    StupidUtilities.addToBigDecimalInMap('ALL', posted, glAccountInfo.postedByTimePeriod)
+                </script>
+            </iterate>
+            <set field="glAccountInfoList" from="new ArrayList(glAccountInfoMap.values())"/>
+            <order-map-list list="glAccountInfoList"><order-by field-name="accountCode"/></order-map-list>
+
+            <!-- find child classes and recurse... -->
+            <set field="childClassInfoList" from="[]"/>
+            <set field="childBalanceByTimePeriod" from="[:]"/>
+            <set field="childPostedByTimePeriod" from="[:]"/>
+            <entity-find entity-name="moqui.basic.Enumeration" list="childEnumList">
+                <econdition field-name="parentEnumId" from="glAccountClassEnumId"/>
+                <order-by field-name="description"/>
+            </entity-find>
+            <iterate list="childEnumList" entry="childEnum">
+                <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo" out-map="childOut"
+                        in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
+                            glAccountClassEnumId:childEnum.enumId, negateDebit:negateDebit, negateCredit:negateCredit,
+                            classInfoById:classInfoById]"/>
+                <script>childClassInfoList.add(childOut.classInfoMap)</script>
+                <!-- add both the class balance and child balance to current class's child balance -->
+                <iterate list="timePeriodIdList" entry="timePeriodId">
+                    <script>
+                        StupidUtilities.addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.balanceByTimePeriod[timePeriodId], childBalanceByTimePeriod)
+                        StupidUtilities.addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.childBalanceByTimePeriod[timePeriodId], childBalanceByTimePeriod)
+                        StupidUtilities.addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.postedByTimePeriod[timePeriodId], childPostedByTimePeriod)
+                        StupidUtilities.addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.childPostedByTimePeriod[timePeriodId], childPostedByTimePeriod)
+
+                        StupidUtilities.addToBigDecimalInMap('ALL', childBalanceByTimePeriod[timePeriodId], childBalanceByTimePeriod)
+                        StupidUtilities.addToBigDecimalInMap('ALL', childPostedByTimePeriod[timePeriodId], childPostedByTimePeriod)
+                    </script>
+                </iterate>
+            </iterate>
+
+            <set field="totalBalanceByTimePeriod" from="[:]"/>
+            <set field="totalPostedByTimePeriod" from="[:]"/>
+            <iterate list="timePeriodIdList" entry="timePeriodId">
+                <script>
+                    StupidUtilities.addToBigDecimalInMap(timePeriodId, balanceByTimePeriod[timePeriodId], totalBalanceByTimePeriod)
+                    StupidUtilities.addToBigDecimalInMap(timePeriodId, childBalanceByTimePeriod[timePeriodId], totalBalanceByTimePeriod)
+                    StupidUtilities.addToBigDecimalInMap(timePeriodId, postedByTimePeriod[timePeriodId], totalPostedByTimePeriod)
+                    StupidUtilities.addToBigDecimalInMap(timePeriodId, childPostedByTimePeriod[timePeriodId], totalPostedByTimePeriod)
+
+                    StupidUtilities.addToBigDecimalInMap('ALL', totalBalanceByTimePeriod[timePeriodId], totalBalanceByTimePeriod)
+                    StupidUtilities.addToBigDecimalInMap('ALL', totalPostedByTimePeriod[timePeriodId], totalPostedByTimePeriod)
+                </script>
+            </iterate>
+
+            <!-- here is the full class info Map for reference in whatever uses the output -->
+            <set field="classInfoMap" from="[glAccountClassEnumId:glAccountClassEnumId, className:classEnum.description,
+                    balanceByTimePeriod:balanceByTimePeriod, childBalanceByTimePeriod:childBalanceByTimePeriod,
+                    postedByTimePeriod:postedByTimePeriod, childPostedByTimePeriod:childPostedByTimePeriod,
+                    totalBalanceByTimePeriod:totalBalanceByTimePeriod, totalPostedByTimePeriod:totalPostedByTimePeriod,
+                    childClassInfoList:childClassInfoList,
+                    glAccountDetailList:glAccountDetailList, glAccountInfoList:glAccountInfoList]"/>
+
+            <if condition="classInfoById != null"><script>classInfoById.put(glAccountClassEnumId, classInfoMap)</script></if>
+        </actions>
+    </service>
+
+    <service verb="run" noun="PostedAmountSummary">
+        <in-parameters>
+            <parameter name="organizationPartyId" required="true"/>
+            <parameter name="fromDate" type="Timestamp"/>
+            <parameter name="thruDate" type="Timestamp"/>
+            <parameter name="amountUomId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="resultList" type="List"><parameter name="resultItem" type="Map"/></parameter>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
+                    in-map="[organizationPartyId:organizationPartyId]"/>
+            <if condition="!amountUomId"><set field="amountUomId" from="partyAcctgPreference.baseCurrencyUomId"/></if>
+
+            <set field="accountResultMap" from="[:]"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#PostedAmountSummarySide" out-map="context"
+                    in-map="context + [debitCreditFlag:'D']"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#PostedAmountSummarySide" out-map="context"
+                    in-map="context + [debitCreditFlag:'C']"/>
+
+            <set field="resultList" from="accountResultMap.values() as List"/>
+            <order-map-list list="resultList"><order-by field-name="accountCode"/></order-map-list>
+        </actions>
+    </service>
+    <service verb="get" noun="PostedAmountSummarySide">
+        <in-parameters>
+            <parameter name="debitCreditFlag" required="true"/>
+            <parameter name="organizationPartyId" required="true"/>
+            <parameter name="fromDate" type="Timestamp"/>
+            <parameter name="thruDate" type="Timestamp"/>
+            <parameter name="amountUomId" required="true"/>
+            <parameter name="accountResultMap" type="Map"/>
+        </in-parameters>
+        <out-parameters><parameter name="accountResultMap" type="Map" required="true"/></out-parameters>
+        <actions>
+            <if condition="accountResultMap == null"><set field="accountResultMap" from="[:]"/></if>
+
+            <entity-find entity-name="mantle.ledger.report.PostedAmountSummary" list="postedAmountSummaryList">
+                <econdition field-name="debitCreditFlag"/>
+                <econdition field-name="transactionDate" operator="greater-equals" from="fromDate" ignore-if-empty="true"/>
+                <econdition field-name="transactionDate" operator="less-equals" from="thruDate" ignore-if-empty="true"/>
+                <econdition field-name="amountUomId"/><econdition field-name="organizationPartyId"/>
+                <select-field field-name="glAccountId"/><select-field field-name="accountName"/>
+                <select-field field-name="accountCode"/><select-field field-name="glAccountClassEnumId"/>
+                <select-field field-name="amount"/>
+            </entity-find>
+            <iterate list="postedAmountSummaryList" entry="postedAmountSummary">
+                <set field="accountResult" from="accountResultMap.get(postedAmountSummary.glAccountId)"/>
+                <if condition="!accountResult">
+                    <set field="accountResult" from="[glAccountId:postedAmountSummary.glAccountId,
+                        accountName:postedAmountSummary.accountName, accountCode:postedAmountSummary.accountCode,
+                        glAccountClassEnumId:postedAmountSummary.glAccountClassEnumId]"/>
+                    <script>accountResultMap.put(postedAmountSummary.glAccountId, accountResult)</script>
+                </if>
+                <if condition="debitCreditFlag == 'D'">
+                    <set field="accountResult.debitAmount" from="postedAmountSummary.amount"/>
+                    <else><set field="accountResult.creditAmount" from="postedAmountSummary.amount"/></else>
+                </if>
+            </iterate>
+        </actions>
+    </service>
+</services>
