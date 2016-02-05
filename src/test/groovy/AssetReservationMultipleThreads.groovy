@@ -33,7 +33,7 @@ import java.util.concurrent.TimeUnit
 
 class AssetReservationMultipleThreads extends Specification {
     @Shared
-    protected final static Logger logger = LoggerFactory.getLogger(OrderTenantAccess.class)
+    protected final static Logger logger = LoggerFactory.getLogger(AssetReservationMultipleThreads.class)
 
     @Shared
     ExecutionContext gec

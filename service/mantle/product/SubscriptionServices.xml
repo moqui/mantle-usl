@@ -17,7 +17,13 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="init" noun="SubscriptionResource" type="interface">
         <in-parameters><parameter name="subscriptionId" required="true"/></in-parameters>
     </service>
+    <service verb="renew" noun="SubscriptionResourceAccess" type="interface">
+        <in-parameters><parameter name="subscriptionId" required="true"/></in-parameters>
+    </service>
     <service verb="revoke" noun="SubscriptionResourceAccess" type="interface">
+        <in-parameters><parameter name="subscriptionId" required="true"/></in-parameters>
+    </service>
+    <service verb="restore" noun="SubscriptionResourceAccess" type="interface">
         <in-parameters><parameter name="subscriptionId" required="true"/></in-parameters>
     </service>
     <service verb="destroy" noun="SubscriptionResource" type="interface">
@@ -115,19 +121,24 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="subscriptionId"/></out-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.product.subscription.SubscriptionResource" value-field="subscriptionResource"/>
             <entity-find-one entity-name="mantle.product.subscription.ProductSubscriptionResource" value-field="psr"/>
             <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/>
             <set field="orderPart" from="orderItem.'mantle.order.OrderPart'"/>
             <set field="customerPartyId" from="orderPart.customerPartyId"/>
 
             <!-- determine fromDate (either last Subscription.thruDate if in future, or nowTimestamp -->
+            <!-- TODO: for renewals of a particular subscription, get resourceInstanceId from somewhere... (maybe OrderItem?) -->
             <entity-find entity-name="mantle.product.subscription.Subscription" list="existingSubscriptionList">
                 <econdition field-name="subscriptionResourceId" from="subscriptionResourceId"/>
                 <econdition field-name="subscriberPartyId" from="customerPartyId"/>
+                <econdition field-name="resourceInstanceId" ignore-if-empty="true"/>
                 <order-by field-name="-thruDate"/>
             </entity-find>
             <set field="fromDate" from="existingSubscriptionList?.first?.thruDate"/>
             <if condition="!fromDate"><set field="fromDate" from="ec.user.nowTimestamp"/></if>
+            <if condition="!resourceInstanceId &amp;&amp; existingSubscriptionList">
+                <set field="resourceInstanceId" from="existingSubscriptionList[0].resourceInstanceId"/></if>
 
             <!-- determine thruDate (fromDate + psr.availableTime given psr.availableTimeUomId) -->
             <script>
@@ -145,18 +156,26 @@ along with this software (see the LICENSE.md file). If not, see
                 in-map="[subscriptionTypeEnumId:'StProduct', subscriptionResourceId:subscriptionResourceId,
                     subscriberPartyId:customerPartyId, deliverToContactMechId:null,
                     orderId:orderId, orderItemSeqId:orderItemSeqId, productId:productId,
-                    fromDate:fromDate, thruDate:thruDate,
+                    fromDate:fromDate, thruDate:thruDate, resourceInstanceId:resourceInstanceId,
                     availableTime:psr.availableTime, availableTimeUomId:psr.availableTimeUomId, useTime:psr.useTime,
                     useTimeUomId:psr.useTimeUomId, useCountLimit:psr.useCountLimit]"/>
 
-            <entity-find entity-name="mantle.product.subscription.Subscription" list="allSub"/>
-
-            <!-- call init service (SubscriptionResource.initServiceName) -->
-            <entity-find-one entity-name="mantle.product.subscription.SubscriptionResource" value-field="subscriptionResource"/>
-            <if condition="subscriptionResource?.initServiceName">
-                <service-call name="${subscriptionResource.initServiceName}" out-map="initOut"
-                        in-map="[subscriptionId:subscriptionId]"/>
-            </if>
+            <!-- if no previous subscription call init service, otherwise call renew and restore services if/as configured -->
+            <if condition="existingSubscriptionList"><then>
+                <if condition="subscriptionResource?.renewServiceName">
+                    <service-call name="${subscriptionResource.renewServiceName}" out-map="renewOut"
+                            in-map="[subscriptionId:subscriptionId]"/>
+                </if>
+                <if condition="subscriptionResource?.restoreAccessServiceName">
+                    <service-call name="${subscriptionResource.restoreAccessServiceName}" out-map="restoreOut"
+                            in-map="[subscriptionId:subscriptionId]"/>
+                </if>
+            </then><else>
+                <if condition="subscriptionResource?.initServiceName">
+                    <service-call name="${subscriptionResource.initServiceName}" out-map="initOut"
+                            in-map="[subscriptionId:subscriptionId]"/>
+                </if>
+            </else></if>
         </actions>
     </service>
 </services>
