@@ -98,26 +98,32 @@ class AssetReservationMultipleThreads extends Specification {
         ec.user.loginUser("joe@public.com", "moqui", null)
         ec.artifactExecution.disableAuthz()
 
-        String productStoreId = "POPC_DEFAULT"
-        EntityValue productStore = ec.entity.find("mantle.product.store.ProductStore").condition("productStoreId", productStoreId).one()
-        String currencyUomId = productStore.defaultCurrencyUomId
-        String customerPartyId = ec.user.userAccount.partyId
+        String cartOrderId = null
+        boolean beganTx = ec.transaction.begin(null)
+        try {
+            String productStoreId = "POPC_DEFAULT"
+            EntityValue productStore = ec.entity.find("mantle.product.store.ProductStore").condition("productStoreId", productStoreId).one()
+            String currencyUomId = productStore.defaultCurrencyUomId
+            String customerPartyId = ec.user.userAccount.partyId
 
-        Map addOut1 = ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
-                .parameters([productId: 'DEMO_1_1', quantity: 60, customerPartyId: customerPartyId,
-                             currencyUomId: currencyUomId, productStoreId: productStoreId]).call()
+            Map addOut1 = ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
+                    .parameters([productId: 'DEMO_1_1', quantity: 60, customerPartyId: customerPartyId,
+                                 currencyUomId: currencyUomId, productStoreId: productStoreId]).call()
 
-        String cartOrderId = addOut1.orderId
-        String orderPartSeqId = addOut1.orderPartSeqId
+            cartOrderId = addOut1.orderId
+            // String orderPartSeqId = addOut1.orderPartSeqId
 
-        ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
-                .parameters([orderId: cartOrderId, paymentMethodId:'CustJqpCc', paymentInstrumentEnumId:'PiCreditCard',
-                             shippingPostalContactMechId: 'CustJqpAddr', shippingTelecomContactMechId: 'CustJqpTeln',
-                             carrierPartyId: '_NA_', shipmentMethodEnumId: 'ShMthGround']).call()
-        ec.service.sync().name("mantle.order.OrderServices.place#Order").parameters([orderId: cartOrderId]).call()
+            ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
+                    .parameters([orderId: cartOrderId, paymentMethodId:'CustJqpCc', paymentInstrumentEnumId:'PiCreditCard',
+                                 shippingPostalContactMechId: 'CustJqpAddr', shippingTelecomContactMechId: 'CustJqpTeln',
+                                 carrierPartyId: '_NA_', shipmentMethodEnumId: 'ShMthGround']).call()
+            ec.service.sync().name("mantle.order.OrderServices.place#Order").parameters([orderId: cartOrderId]).call()
 
-        ec.user.logoutUser()
-        ec.destroy()
+            ec.user.logoutUser()
+        } finally {
+            ec.transaction.commit(beganTx)
+            ec.destroy()
+        }
 
         return cartOrderId
     }
