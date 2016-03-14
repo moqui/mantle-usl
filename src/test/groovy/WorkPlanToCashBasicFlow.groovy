@@ -318,7 +318,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 .call()
         // assign Joe Developer to TEST project as Programmer (necessary for determining RateAmount, etc)
         ec.service.sync().name("create#mantle.work.effort.WorkEffortParty")
-                .parameters([workEffortId:'TEST', partyId:workerResult.partyId, roleTypeId:'Worker', emplPositionClassId:'Programmer',
+                .parameters([workEffortId:'TEST', partyId:workerResult.partyId, roleTypeId:'Assignee', emplPositionClassId:'Programmer',
                     fromDate:'2013-11-01', statusId:'WeptAssigned']).call()
 
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
@@ -326,7 +326,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="EX_JOHN_DOE" roleTypeId="Manager" fromDate="${effectiveTime}" statusId="WeptAssigned"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${clientResult.partyId}" roleTypeId="CustomerBillTo" fromDate="${effectiveTime}"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${vendorResult.partyId}" roleTypeId="VendorBillFrom" fromDate="${effectiveTime}"/>
-            <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${workerResult.partyId}" roleTypeId="Worker"
+            <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${workerResult.partyId}" roleTypeId="Assignee"
                 fromDate="1383282000000" statusId="WeptAssigned" emplPositionClassId="Programmer"/>
 
             <moqui.entity.EntityAuditLog auditHistorySeqId="55909" changedEntityName="mantle.work.effort.WorkEffort"
@@ -341,7 +341,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55912" changedEntityName="mantle.work.effort.WorkEffortParty"
                 changedFieldName="statusId" pkPrimaryValue="TEST" pkSecondaryValue="${workerResult.partyId}"
-                pkRestCombinedValue="roleTypeId:'Worker',fromDate:'1383282000000'" newValueText="WeptAssigned"
+                pkRestCombinedValue="roleTypeId:'Assignee',fromDate:'1383282000000'" newValueText="WeptAssigned"
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
 
             </entity-facade-xml>""").check()
@@ -406,7 +406,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 purposeEnumId="WepTask" resolutionEnumId="WerUnresolved" statusId="WeApproved" priority="3"
                 workEffortName="Test Task 1" description="Will be really great when it's done"
                 estimatedCompletionDate="1384495200000" estimatedWorkTime="10" remainingWorkTime="10" timeUomId="TF_hr"/>
-            <mantle.work.effort.WorkEffortParty workEffortId="TEST-001" partyId="${workerResult.partyId}" roleTypeId="Worker"
+            <mantle.work.effort.WorkEffortParty workEffortId="TEST-001" partyId="${workerResult.partyId}" roleTypeId="Assignee"
                 fromDate="${effectiveTime}" statusId="WeptAssigned"/>
             <mantle.work.effort.WorkEffortAssoc workEffortId="TEST-MS-01" toWorkEffortId="TEST-001"
                 workEffortAssocTypeEnumId="WeatMilestone" fromDate="${effectiveTime}"/>
@@ -415,7 +415,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 workEffortTypeEnumId="WetTask" purposeEnumId="WepNewFeature" resolutionEnumId="WerUnresolved"
                 statusId="WeInPlanning" priority="4" workEffortName="Test Task 1A" description="One piece of the puzzle"
                 estimatedCompletionDate="1384495200000" estimatedWorkTime="2" remainingWorkTime="2" timeUomId="TF_hr"/>
-            <mantle.work.effort.WorkEffortParty workEffortId="TEST-001A" partyId="${workerResult.partyId}" roleTypeId="Worker"
+            <mantle.work.effort.WorkEffortParty workEffortId="TEST-001A" partyId="${workerResult.partyId}" roleTypeId="Assignee"
                 fromDate="${effectiveTime}" statusId="WeptAssigned"/>
             <mantle.work.effort.WorkEffortAssoc workEffortId="TEST-MS-01" toWorkEffortId="TEST-001A"
                 workEffortAssocTypeEnumId="WeatMilestone" fromDate="${effectiveTime}"/>
@@ -424,7 +424,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 workEffortTypeEnumId="WetTask" purposeEnumId="WepFix" resolutionEnumId="WerUnresolved" statusId="WeApproved"
                 priority="4" workEffortName="Test Task 1B" description="Broken piece of the puzzle"
                 estimatedCompletionDate="1384495200000" estimatedWorkTime="2" remainingWorkTime="2" timeUomId="TF_hr"/>
-            <mantle.work.effort.WorkEffortParty workEffortId="TEST-001B" partyId="${workerResult.partyId}" roleTypeId="Worker"
+            <mantle.work.effort.WorkEffortParty workEffortId="TEST-001B" partyId="${workerResult.partyId}" roleTypeId="Assignee"
                 fromDate="${effectiveTime}" statusId="WeptAssigned"/>
             <mantle.work.effort.WorkEffortAssoc workEffortId="TEST-MS-01" toWorkEffortId="TEST-001B"
                 workEffortAssocTypeEnumId="WeatMilestone" fromDate="${effectiveTime}"/>
@@ -434,21 +434,21 @@ class WorkPlanToCashBasicFlow extends Specification {
                 changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55916" changedEntityName="mantle.work.effort.WorkEffortParty"
                 changedFieldName="statusId" pkPrimaryValue="TEST-001" pkSecondaryValue="${workerResult.partyId}"
-                pkRestCombinedValue="roleTypeId:'Worker',fromDate:'${effectiveTime}'" newValueText="WeptAssigned"
+                pkRestCombinedValue="roleTypeId:'Assignee',fromDate:'${effectiveTime}'" newValueText="WeptAssigned"
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55917" changedEntityName="mantle.work.effort.WorkEffort"
                 changedFieldName="statusId" pkPrimaryValue="TEST-001A" newValueText="WeInPlanning"
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55918" changedEntityName="mantle.work.effort.WorkEffortParty"
                 changedFieldName="statusId" pkPrimaryValue="TEST-001A" pkSecondaryValue="${workerResult.partyId}"
-                pkRestCombinedValue="roleTypeId:'Worker',fromDate:'${effectiveTime}'" newValueText="WeptAssigned"
+                pkRestCombinedValue="roleTypeId:'Assignee',fromDate:'${effectiveTime}'" newValueText="WeptAssigned"
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55919" changedEntityName="mantle.work.effort.WorkEffort"
                 changedFieldName="statusId" pkPrimaryValue="TEST-001B" newValueText="WeApproved"
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55920" changedEntityName="mantle.work.effort.WorkEffortParty"
                 changedFieldName="statusId" pkPrimaryValue="TEST-001B" pkSecondaryValue="${workerResult.partyId}"
-                pkRestCombinedValue="roleTypeId:'Worker',fromDate:'${effectiveTime}'" newValueText="WeptAssigned"
+                pkRestCombinedValue="roleTypeId:'Assignee',fromDate:'${effectiveTime}'" newValueText="WeptAssigned"
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
 
             </entity-facade-xml>""").check()
@@ -558,7 +558,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.request.RequestWorkEffort requestId="${createReqResult.requestId}"
                 workEffortId="${createReqTskResult.workEffortId}"/>
             <mantle.request.RequestParty requestId="${createReqResult.requestId}" partyId="${workerResult.partyId}"
-                roleTypeId="Worker" fromDate="${effectiveTime}"/>
+                roleTypeId="Assignee" fromDate="${effectiveTime}"/>
             <mantle.request.RequestParty requestId="${createReqResult.requestId}" partyId="${clientResult.partyId}"
                 roleTypeId="CustomerBillTo" fromDate="${effectiveTime}"/>
             <mantle.work.effort.WorkEffort workEffortId="${createReqTskResult.workEffortId}" rootWorkEffortId="TEST"
@@ -566,7 +566,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 priority="7" workEffortName="Test Request 1 Task" estimatedCompletionDate="1384495200000"
                 estimatedWorkTime="2" remainingWorkTime="2" timeUomId="TF_hr"/>
             <mantle.work.effort.WorkEffortParty workEffortId="${createReqTskResult.workEffortId}" partyId="${workerResult.partyId}"
-                roleTypeId="Worker" fromDate="${effectiveTime}" statusId="WeptAssigned"/>
+                roleTypeId="Assignee" fromDate="${effectiveTime}" statusId="WeptAssigned"/>
 
             <moqui.entity.EntityAuditLog auditHistorySeqId="55927" changedEntityName="mantle.request.Request"
                 changedFieldName="statusId" pkPrimaryValue="55900" newValueText="ReqSubmitted"
@@ -581,7 +581,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <moqui.entity.EntityAuditLog auditHistorySeqId="55930" changedEntityName="mantle.work.effort.WorkEffortParty"
                 changedFieldName="statusId" pkPrimaryValue="${createReqTskResult.workEffortId}"
                 pkSecondaryValue="${workerResult.partyId}"
-                pkRestCombinedValue="roleTypeId:'Worker',fromDate:'${effectiveTime}'" newValueText="WeptAssigned"
+                pkRestCombinedValue="roleTypeId:'Assignee',fromDate:'${effectiveTime}'" newValueText="WeptAssigned"
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55931" changedEntityName="mantle.work.effort.WorkEffort"
                 changedFieldName="statusId" pkPrimaryValue="${createReqTskResult.workEffortId}" oldValueText="WeApproved"
