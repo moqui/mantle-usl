@@ -173,6 +173,158 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="get" noun="ProjectMilestoneSummary">
+        <description>Gets statistics for project milestones</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"><description>Project WorkEffort ID</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="milestoneStatsList" type="List"><parameter name="listEntry" type="Map">
+                <parameter name="workEffortId"/>
+                <parameter name="workEffortName"/>
+                <parameter name="estimatedStartDate"/>
+
+                <parameter name="estimatedWorkTime" type="BigDecimal"/>
+                <parameter name="estimatedSetupTime" type="BigDecimal"/>
+                <parameter name="remainingWorkTime" type="BigDecimal"/>
+                <parameter name="actualWorkTime" type="BigDecimal"/>
+                <parameter name="actualSetupTime" type="BigDecimal"/>
+                <parameter name="totalTimeAllowed" type="BigDecimal"/>
+                <parameter name="workTimePercentComplete" type="BigDecimal"><description>(estimatedWorkTime-remainingWorkTime)/estimatedWorkTime</description></parameter>
+                <parameter name="workRemainingPercent" type="BigDecimal"><description>remainingWorkTime/estimatedWorkTime</description></parameter>
+                <parameter name="workActualPercent" type="BigDecimal"><description>actualWorkTime/estimatedWorkTime</description></parameter>
+
+                <parameter name="actualCost" type="BigDecimal"/>
+                <parameter name="actualClientCost" type="BigDecimal"/>
+                <parameter name="totalClientCostAllowed" type="BigDecimal"/>
+            </parameter></parameter>
+        </out-parameters>
+        <actions>
+            <entity-find entity-name="mantle.work.effort.WorkEffort" list="milestoneList">
+                <econdition field-name="rootWorkEffortId" from="workEffortId"/>
+                <econdition field-name="workEffortTypeEnumId" value="WetMilestone"/>
+                <order-by field-name="estimatedStartDate,workEffortName"/>
+            </entity-find>
+            <set field="milestoneStatsList" from="[]"/>
+            <iterate list="milestoneList" entry="milestone">
+                <set field="milestoneStats" from="[:]"/>
+                <entity-find entity-name="mantle.work.effort.MilestoneSummary" list="msSummaryList">
+                    <date-filter/><econdition field-name="workEffortId" from="milestone.workEffortId"/>
+                    <select-field field-name="estimatedWorkTime,estimatedSetupTime,remainingWorkTime,actualWorkTime,actualSetupTime,totalTimeAllowed,actualCost,actualClientCost,totalClientCostAllowed"/>
+                </entity-find>
+                <if condition="msSummaryList"><script>
+                    milestoneStats.putAll(msSummaryList.get(0))
+                    milestoneStats.putAll([workEffortId:milestone.workEffortId, workEffortName:milestone.workEffortName,
+                                           estimatedStartDate:milestone.estimatedStartDate])
+
+                    milestoneStats.workTimePercentComplete = ((milestoneStats.estimatedWorkTime - milestoneStats.remainingWorkTime) / milestoneStats.estimatedWorkTime) * 100
+                    milestoneStats.workRemainingPercent = (milestoneStats.remainingWorkTime / milestoneStats.estimatedWorkTime) * 100
+                    milestoneStats.workActualPercent = (milestoneStats.actualWorkTime / milestoneStats.estimatedWorkTime) * 100
+
+                    milestoneStatsList.add(milestoneStats)
+                </script></if>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="get" noun="WorkEffortChildStats">
+        <description>Gets statistics for direct children WorkEfforts plus their descendants</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="childStatsList" type="List"><parameter name="listEntry" type="Map">
+                <parameter name="workEffortId"/>
+                <parameter name="workEffortName"/>
+                <parameter name="priority"/>
+
+                <parameter name="estimatedWorkTime" type="BigDecimal"/>
+                <parameter name="estimatedSetupTime" type="BigDecimal"/>
+                <parameter name="remainingWorkTime" type="BigDecimal"/>
+                <parameter name="actualWorkTime" type="BigDecimal"/>
+                <parameter name="actualSetupTime" type="BigDecimal"/>
+                <parameter name="totalTimeAllowed" type="BigDecimal"/>
+                <parameter name="workTimePercentComplete" type="BigDecimal"><description>(estimatedWorkTime-remainingWorkTime)/estimatedWorkTime</description></parameter>
+                <parameter name="workRemainingPercent" type="BigDecimal"><description>remainingWorkTime/estimatedWorkTime</description></parameter>
+                <parameter name="workActualPercent" type="BigDecimal"><description>actualWorkTime/estimatedWorkTime</description></parameter>
+
+                <parameter name="actualCost" type="BigDecimal"/>
+                <parameter name="actualClientCost" type="BigDecimal"/>
+                <parameter name="totalClientCostAllowed" type="BigDecimal"/>
+            </parameter></parameter>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="mainWorkEffort"/>
+            <if condition="!mainWorkEffort"><return error="true" message="Could not find WorkEffort with ID ${workEffortId}"/></if>
+            <!-- Direct children -->
+            <if condition="mainWorkEffort.workEffortTypeEnumId == 'WetProject'"><then>
+                <set field="rootWorkEffortId" from="mainWorkEffort.workEffortId"/>
+                <entity-find entity-name="mantle.work.effort.WorkEffort" list="directChildren">
+                    <econdition field-name="rootWorkEffortId" from="workEffortId"/>
+                    <econdition field-name="parentWorkEffortId" operator="is-null"/>
+                    <econdition field-name="workEffortTypeEnumId" value="WetTask"/>
+                    <order-by field-name="priority,workEffortName"/>
+                </entity-find>
+            </then><else>
+                <set field="rootWorkEffortId" from="mainWorkEffort.rootWorkEffortId"/>
+                <entity-find entity-name="mantle.work.effort.WorkEffort" list="directChildren">
+                    <econdition field-name="parentWorkEffortId" from="workEffortId"/>
+                    <order-by field-name="priority,workEffortName"/>
+                </entity-find>
+            </else></if>
+            <!-- To speed things up a little find all tasks used as a parent -->
+            <entity-find entity-name="mantle.work.effort.WorkEffort" list="allUsedAsParent" distinct="true">
+                <econdition field-name="rootWorkEffortId"/>
+                <econdition field-name="parentWorkEffortId" operator="is-not-null"/>
+                <select-field field-name="parentWorkEffortId"/>
+            </entity-find>
+            <set field="withChildrenIdSet" from="new HashSet(allUsedAsParent.parentWorkEffortId)"/>
+            <!-- <log message="========= withChildrenIdSet: ${withChildrenIdSet}"/> -->
+
+            <script><![CDATA[
+                import org.moqui.entity.EntityList
+                import org.moqui.entity.EntityValue
+                import org.moqui.impl.context.ExecutionContextImpl
+
+                childStatsList = new ArrayList<>(directChildren.size())
+                for (EntityValue directChild in directChildren) {
+                    Map topLevelStats = [workEffortId: directChild.workEffortId, workEffortName: directChild.workEffortName,
+                            priority: directChild.priority, estimatedWorkTime:0, estimatedSetupTime:0, remainingWorkTime:0,
+                            actualWorkTime:0, actualSetupTime:0, totalTimeAllowed:0, actualCost:0, actualClientCost:0,
+                            totalClientCostAllowed:0]
+                    addChildStats(directChild, topLevelStats, ec)
+
+                    // calc derived values
+                    topLevelStats.workTimePercentComplete = topLevelStats.estimatedWorkTime ? ((topLevelStats.estimatedWorkTime - topLevelStats.remainingWorkTime) / topLevelStats.estimatedWorkTime) * 100 : 0
+                    topLevelStats.workRemainingPercent = topLevelStats.estimatedWorkTime ? (topLevelStats.remainingWorkTime / topLevelStats.estimatedWorkTime) * 100 : 0
+                    topLevelStats.workActualPercent = topLevelStats.estimatedWorkTime ? (topLevelStats.actualWorkTime / topLevelStats.estimatedWorkTime) * 100 : 0
+
+                    // all done, add to the list
+                    childStatsList.add(topLevelStats)
+                }
+
+                void addChildStats(EntityValue current, Map stats, ExecutionContextImpl ec) {
+                    if (current == null || current.statusId == "WeCancelled") return
+                    // add current values
+                    if (current.estimatedWorkTime) stats.estimatedWorkTime += current.estimatedWorkTime
+                    if (current.estimatedSetupTime) stats.estimatedSetupTime += current.estimatedSetupTime
+                    if (current.remainingWorkTime) stats.remainingWorkTime += current.remainingWorkTime
+                    if (current.actualWorkTime) stats.actualWorkTime += current.actualWorkTime
+                    if (current.actualSetupTime) stats.actualSetupTime += current.actualSetupTime
+                    if (current.totalTimeAllowed) stats.totalTimeAllowed += current.totalTimeAllowed
+                    if (current.actualCost) stats.actualCost += current.actualCost
+                    if (current.actualClientCost) stats.actualClientCost += current.actualClientCost
+                    if (current.totalClientCostAllowed) stats.totalClientCostAllowed += current.totalClientCostAllowed
+
+                    // recurse for each child
+                    if (!withChildrenIdSet.contains(current.workEffortId)) return
+                    EntityList childList = ec.entity.find("mantle.work.effort.WorkEffort")
+                            .condition("parentWorkEffortId", current.workEffortId).list()
+                    if (childList) for (EntityValue child in childList) addChildStats(child, stats, ec)
+                }
+                ]]></script>
+        </actions>
+    </service>
+
     <service verb="get" noun="ProjectParties">
         <in-parameters>
             <parameter name="rootWorkEffortId" default="workEffortId"/>
