@@ -943,6 +943,8 @@ class OrderProcureToPayBasicFlow extends Specification {
         Map afterTotalOut = ec.service.sync().name("mantle.account.InvoiceServices.get#InvoiceTotal")
                 .parameters([invoiceId:invoiceId]).call()
 
+        def tpList = ec.entity.find("mantle.party.time.TimePeriod").condition("partyId", "ORG_ZIZI_RETAIL").orderBy("timePeriodId").list()
+        for (EntityValue tp in tpList) logger.info("====== ${tp.toString()}")
         def gaotpList = ec.entity.find("mantle.ledger.account.GlAccountOrgTimePeriod").condition("organizationPartyId", "ORG_ZIZI_RETAIL").orderBy("glAccountId").list()
         for (EntityValue gaotp in gaotpList) logger.info("====== ${gaotp.toString()}")
 
