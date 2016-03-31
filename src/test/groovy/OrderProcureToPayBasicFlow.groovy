@@ -15,6 +15,7 @@
 import org.moqui.Moqui
 import org.moqui.context.ExecutionContext
 import org.moqui.entity.EntityList
+import org.moqui.entity.EntityValue
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import spock.lang.Shared
@@ -941,6 +942,9 @@ class OrderProcureToPayBasicFlow extends Specification {
 
         Map afterTotalOut = ec.service.sync().name("mantle.account.InvoiceServices.get#InvoiceTotal")
                 .parameters([invoiceId:invoiceId]).call()
+
+        def gaotpList = ec.entity.find("mantle.ledger.account.GlAccountOrgTimePeriod").condition("organizationPartyId", "ORG_ZIZI_RETAIL").orderBy("glAccountId").list()
+        for (EntityValue gaotp in gaotpList) logger.info("====== ${gaotp.toString()}")
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
