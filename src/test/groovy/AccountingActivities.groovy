@@ -111,16 +111,6 @@ class AccountingActivities extends Specification {
                 .parameters([acctgTransId:acctgTransId, glAccountId:'332000000', debitCreditFlag:'C', amount:150000]).call()
         ec.service.sync().name("mantle.ledger.LedgerServices.post#AcctgTrans").parameters([acctgTransId:acctgTransId]).call()
 
-        def tpList = ec.entity.find("mantle.party.time.TimePeriod").condition("partyId", organizationPartyId).orderBy("timePeriodId").list()
-        for (EntityValue tp in tpList) logger.info("====== ${tp.toString()}")
-        def gaotpList = ec.entity.find("mantle.ledger.account.GlAccountOrgTimePeriod").condition("organizationPartyId", organizationPartyId).orderBy("glAccountId").list()
-        for (EntityValue gaotp in gaotpList) logger.info("====== ${gaotp.toString()}")
-
-        tpList = ec.entity.find("mantle.party.time.TimePeriod").condition("partyId", organizationPartyId2).orderBy("timePeriodId").list()
-        for (EntityValue tp in tpList) logger.info("====== ${tp.toString()}")
-        gaotpList = ec.entity.find("mantle.ledger.account.GlAccountOrgTimePeriod").condition("organizationPartyId", organizationPartyId2).orderBy("glAccountId").list()
-        for (EntityValue gaotp in gaotpList) logger.info("====== ${gaotp.toString()}")
-
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="111100000" timePeriodId="${timePeriodId}"
