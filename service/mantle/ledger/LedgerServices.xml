@@ -384,6 +384,8 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="acctgTrans" for-update="true"/>
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTransEntry" list="acctgTransEntryList">
+                <econdition field-name="acctgTransId"/><order-by field-name="acctgTransEntrySeqId"/></entity-find>
 
             <!-- make sure the AcctgTrans has not already been posted -->
             <if condition="acctgTrans.isPosted == 'Y'">
@@ -393,7 +395,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- check the scheduled posting date, but only if it's set -->
             <if condition="acctgTrans.scheduledPostingDate != null &amp;&amp; ec.user.nowTimestamp.before(acctgTrans.scheduledPostingDate)">
-                <message>Not posting transaction [${acctgTransId}], before scheduled posting date.</message>
+                <message>Not posting transaction ${acctgTransId}, before scheduled posting date.</message>
                 <set field="useErrorJournal" from="true"/>
             </if>
 
@@ -401,27 +403,23 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.LedgerServices.calculate#AcctgTransTrialBalance" out-map="context"
                     in-map="[acctgTransId:acctgTransId]"/>
             <if condition="debitTotal != creditTotal">
-                <message>Not posting transaction [${acctgTransId}], credit total (${creditTotal}) and debit total (${debitTotal}) not equal.</message>
+                <message>Not posting transaction ${acctgTransId}, credit total ${creditTotal} and debit total ${debitTotal} not equal.</message>
                 <set field="useErrorJournal" from="true"/>
             </if>
 
-            <!-- do a for-update query on each GlAccount, make sure accounts allow posting -->
-            <set field="glAccountById" from="[:]"/>
-            <entity-find entity-name="mantle.ledger.transaction.AcctgTransEntry" list="acctgTransEntryList">
-                <econdition field-name="acctgTransId"/>
-                <order-by field-name="acctgTransEntrySeqId"/>
-            </entity-find>
+            <!-- get GlAccount records, make sure accounts allow posting -->
+            <set field="glAccountById" from="new TreeMap()"/>
             <iterate list="acctgTransEntryList" entry="acctgTransEntry">
                 <set field="glAccount" from="glAccountById.get(acctgTransEntry.glAccountId)"/>
                 <if condition="!glAccount">
-                    <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" for-update="true">
+                    <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" cache="true">
                         <field-map field-name="glAccountId" from="acctgTransEntry.glAccountId"/></entity-find-one>
                     <script>glAccountById.put(acctgTransEntry.glAccountId, glAccount)</script>
                 </if>
 
                 <if condition="glAccount.disallowPosting == 'Y'">
                     <message>GL Account ${glAccount.glAccountId} does not allow posting</message>
-                    <log level="info" message="In AcctgTransEntry [${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId}] GL Account ${glAccount.glAccountId} does not allow posting"/>
+                    <log level="info" message="In AcctgTransEntry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} GL Account ${glAccount.glAccountId} does not allow posting"/>
                     <set field="useErrorJournal" from="true"/>
                 </if>
             </iterate>
@@ -432,7 +430,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="partyAcctgPreference?.errorGlJournalId">
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
                             in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
-                    <message>Accounting transaction [${acctgTransId}] has been saved in the Error Journal [${partyAcctgPreference.errorGlJournalId}].</message>
+                    <message>Accounting transaction ${acctgTransId} has been saved in Error Journal ${partyAcctgPreference.errorGlJournalId}.</message>
                     <return/>
 
                     <!-- if no errorGlJournalId return error -->
@@ -450,20 +448,19 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod" for-update="true">
                     <field-map field-name="timePeriodId" from="timePeriodFromList.timePeriodId"/></entity-find-one>
                 <if condition="timePeriod.isClosed == 'Y'">
-                    <message error="true">Not posting transaction [${acctgTransId}], time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message></if>
+                    <message error="true">Not posting transaction ${acctgTransId}, time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message></if>
             </iterate>
 
             <!-- make sure the glAccountId and amount fields are set -->
             <iterate entry="acctgTransEntry" list="acctgTransEntryList">
                 <if condition="!acctgTransEntry.glAccountId">
-                    <message error="true">Accounting transaction [${acctgTransId}] entry [${acctgTransEntry.acctgTransEntrySeqId}] has no glAccountId.</message></if>
+                    <message error="true">Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no glAccountId.</message></if>
                 <if condition="acctgTransEntry.amount == null">
-                    <message error="true">Accounting transaction [${acctgTransId}] entry [${acctgTransEntry.acctgTransEntrySeqId}] has no amount.</message></if>
+                    <message error="true">Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no amount.</message></if>
             </iterate>
 
             <if condition="verifyOnly">
-                <if condition="!ec.message.hasError()">
-                    <message>Accounting transaction [${acctgTransId}] is verified for posting.</message></if>
+                <if condition="!ec.message.hasError()"><message>Accounting transaction ${acctgTransId} is verified for posting.</message></if>
                 <return/>
             </if>
 
@@ -473,7 +470,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="partyAcctgPreference?.errorGlJournalId"><then>
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
                             in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
-                    <message>Accounting transaction [${acctgTransId}] has been saved in the Error Journal [${partyAcctgPreference.errorGlJournalId}].</message>
+                    <message>Accounting transaction ${acctgTransId} has been saved in Error Journal ${partyAcctgPreference.errorGlJournalId}.</message>
                     <script>ec.message.clearErrors()</script>
                     <return/>
                 </then><else>
@@ -482,22 +479,35 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
             </if>
 
-            <!-- for each entry update posted balance -->
-            <iterate list="acctgTransEntryList" entry="acctgTransEntry">
-                <!-- have already iterated through the entry list once, all GlAccount records should be there -->
-                <set field="glAccount" from="glAccountById.get(acctgTransEntry.glAccountId)"/>
+            <!-- FUTURE: use some approach to move this to a separate thread (async persisted? keep a registry of
+                GlAccount, Org, TimePeriod that need refresh and do in a scheduled job?); both options less reliable,
+                but would better handle large volumes and potential lock conflicts -->
 
-                <entity-find-one entity-name="mantle.ledger.account.GlAccountOrganization" value-field="glAccountOrganization" for-update="true">
-                    <field-map field-name="glAccountId" from="acctgTransEntry.glAccountId"/>
+            <!-- get and lock the GlAccountOrganization (for update); iterate over glAccountById which is a TreeMap so
+                IDs are sorted for consistent lock order (avoid deadlocks) -->
+            <set field="glAccountOrganizationById" from="[:]"/>
+            <iterate list="glAccountById.keySet()" entry="glAccountId">
+                <entity-find-one entity-name="mantle.ledger.account.GlAccountOrganization"
+                        value-field="glAccountOrganization" for-update="true">
+                    <field-map field-name="glAccountId"/>
                     <field-map field-name="organizationPartyId" from="acctgTrans.organizationPartyId"/>
                 </entity-find-one>
                 <if condition="!glAccountOrganization">
                     <entity-make-value entity-name="mantle.ledger.account.GlAccountOrganization" value-field="glAccountOrganization"
-                            map="[glAccountId:acctgTransEntry.glAccountId,  organizationPartyId:acctgTrans.organizationPartyId]"/>
+                            map="[glAccountId:glAccountId, organizationPartyId:acctgTrans.organizationPartyId]"/>
+                    <entity-create value-field="glAccountOrganization"/>
                 </if>
+                <script>glAccountOrganizationById.put(glAccountId, glAccountOrganization)</script>
+            </iterate>
+
+            <!-- for each entry update posted balance -->
+            <iterate list="acctgTransEntryList" entry="acctgTransEntry">
+                <set field="glAccountOrganization" from="glAccountOrganizationById.get(acctgTransEntry.glAccountId)"/>
 
                 <!-- Debits add to debit accounts and subtract from credit accounts. Credits add to credit accounts and subtract from debit accounts. -->
                 <set field="postingAmount" from="0.0"/>
+                <!-- have already iterated through the entry list once, all GlAccount records should be there -->
+                <set field="glAccount" from="glAccountById.get(acctgTransEntry.glAccountId)"/>
                 <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
                         in-map="[glAccountClassEnumId:glAccount.glAccountClassEnumId]"/>
 
@@ -510,9 +520,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- FUTURE: do anything with RESOURCE or potentially other root GL account classes? -->
 
                 <set field="glAccountOrganization.postedBalance" from="(glAccountOrganization.postedBalance ?: 0) + postingAmount"/>
-                <entity-create value-field="glAccountOrganization" or-update="true"/>
-                
-                
+                <entity-update value-field="glAccountOrganization"/>
+
                 <!-- create or update GlAccountOrgTimePeriod records -->
                 <iterate list="timePeriodList" entry="timePeriod">
                     <entity-find-one entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="glAccountOrgTimePeriod" for-update="true">
