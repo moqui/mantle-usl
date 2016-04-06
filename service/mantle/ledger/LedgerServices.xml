@@ -442,14 +442,33 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.LedgerServices.get#OrganizationFiscalTimePeriods" out-map="context"
                     in-map="[organizationPartyId:acctgTrans.organizationPartyId, filterDate:acctgTrans.transactionDate]"/>
             <if condition="!timePeriodList">
-                <message error="true">Not posting transaction [${acctgTransId}], could not find time period.</message></if>
-            <!-- lock each time period and make sure it's not closed -->
-            <iterate entry="timePeriodFromList" list="timePeriodList">
-                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod" for-update="true">
+                <message error="true">Not posting transaction ${acctgTransId}, could not find time current period for organization ${acctgTrans.organizationPartyId}.</message></if>
+            <set field="subsequentPeriodListArray" from="new ArrayList()"/>
+            <iterate entry="timePeriod" list="timePeriodList">
+                <!-- DEJ 20160406 don't lock TimePeriod, shouldn't be needed
+                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="lockTimePeriod" for-update="true">
                     <field-map field-name="timePeriodId" from="timePeriodFromList.timePeriodId"/></entity-find-one>
+                -->
+
+                <!-- make sure the TimePeriod isn't closed -->
                 <if condition="timePeriod.isClosed == 'Y'">
                     <message error="true">Not posting transaction ${acctgTransId}, time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message></if>
+
+                <!-- get any existing subsequent time periods to update those as well -->
+                <script>
+                    List subsequentPeriodIds = []
+                    subsequentPeriodListArray.add(subsequentPeriodIds)
+                    String curSubPeriodId = timePeriod.timePeriodId
+                    while (curSubPeriodId) {
+                        Map subNextResult = ec.service.sync().name("mantle.party.TimeServices.get#NextTimePeriod")
+                                .parameter("timePeriodId", curSubPeriodId).call()
+                        curSubPeriodId = subNextResult.nextTimePeriodId
+                        if (curSubPeriodId) subsequentPeriodIds.add(curSubPeriodId)
+                    }
+                </script>
             </iterate>
+
+
 
             <!-- make sure the glAccountId and amount fields are set -->
             <iterate entry="acctgTransEntry" list="acctgTransEntryList">
@@ -541,11 +560,36 @@ along with this software (see the LICENSE.md file). If not, see
                         <set field="glAccountOrgTimePeriod.postedCredits" from="(glAccountOrgTimePeriod.postedCredits ?: 0) + acctgTransEntry.amount"/>
                     </else></if>
 
-                    <!-- TODO update period begin and end balances on posting, not just on closing (recalc and reset on period close) -->
-
                     <set field="glAccountOrgTimePeriod.endingBalance" from="(glAccountOrgTimePeriod.endingBalance ?: 0) + postingAmount"/>
 
                     <entity-create value-field="glAccountOrgTimePeriod" or-update="true"/>
+
+                    <!-- update period begin and end balances on posting, not just on closing (recalc and reset on period close) -->
+                    <set field="subsequentPeriodList" from="subsequentPeriodListArray.get(timePeriod_index)"/>
+                    <set field="lastGlAccountOrgTimePeriod" from="glAccountOrgTimePeriod"/>
+                    <!-- NOTE: this iterate block very similar to one in recalculate#GlAccountOrgTimePeriodAmounts, perhaps refactor into service -->
+                    <iterate list="subsequentPeriodList" entry="subsequentPeriodId">
+                        <!-- for each GlAccountOrgTimePeriod record for current period, set beginning balance for next period
+                            (creating new records if they don't exist) -->
+                        <entity-find-one entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="nextGlAccountOrgTimePeriod" for-update="true">
+                            <field-map field-name="glAccountId" from="acctgTransEntry.glAccountId"/>
+                            <field-map field-name="organizationPartyId" from="timePeriod.partyId"/>
+                            <field-map field-name="timePeriodId" from="subsequentPeriodId"/>
+                        </entity-find-one>
+                        <if condition="nextGlAccountOrgTimePeriod == null">
+                            <entity-make-value entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="nextGlAccountOrgTimePeriod"
+                                map="[glAccountId:glAccountOrgTimePeriod.glAccountId,  organizationPartyId:timePeriod.partyId,
+                                    timePeriodId:subsequentPeriodId, beginningBalance:0, postedDebits:0, postedCredits:0, endingBalance:0]"/>
+                        </if>
+                        <!-- add endingBalance to both just in case something has already been posted and added to next endingBalance -->
+                        <set field="nextGlAccountOrgTimePeriod.endingBalance"
+                                from="((nextGlAccountOrgTimePeriod.endingBalance ?: 0) - (nextGlAccountOrgTimePeriod.beginningBalance ?: 0)) +
+                                    lastGlAccountOrgTimePeriod.endingBalance"/>
+                        <!-- set next beginningBalance from current endingBalance; do after set next endingBalance because it uses next beginningBalance if there is a value -->
+                        <set field="nextGlAccountOrgTimePeriod.beginningBalance" from="lastGlAccountOrgTimePeriod.endingBalance"/>
+
+                        <entity-create value-field="nextGlAccountOrgTimePeriod" or-update="true"/>
+                    </iterate>
                 </iterate>
             </iterate>
 
