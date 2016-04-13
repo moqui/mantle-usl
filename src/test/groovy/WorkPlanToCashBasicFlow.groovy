@@ -484,20 +484,20 @@ class WorkPlanToCashBasicFlow extends Specification {
         // NOTE: this has sequenced IDs so is sensitive to run order!
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.work.effort.WorkEffort workEffortId="TEST-001" resolutionEnumId="WerCompleted" statusId="WeComplete"
-                estimatedWorkTime="10" remainingWorkTime="4" actualWorkTime="6"/>
+                estimatedWorkTime="10" remainingWorkTime="3" actualWorkTime="6"/>
             <mantle.work.time.TimeEntry timeEntryId="55900" partyId="${workerResult.partyId}" rateTypeEnumId="RatpStandard"
                 rateAmountId="${clientRateResult.rateAmountId}" vendorRateAmountId="${vendorRateResult.rateAmountId}"
                 fromDate="${effectiveThruDate.time-(6*60*60*1000)}" thruDate="${effectiveThruDate.time}" hours="6" workEffortId="TEST-001"/>
 
             <mantle.work.effort.WorkEffort workEffortId="TEST-001A" resolutionEnumId="WerCompleted" statusId="WeComplete"
-                estimatedWorkTime="2" remainingWorkTime="0.5" actualWorkTime="1.5"/>
+                estimatedWorkTime="2" remainingWorkTime="1" actualWorkTime="1.5"/>
             <mantle.work.time.TimeEntry timeEntryId="55901" partyId="${workerResult.partyId}" rateTypeEnumId="RatpStandard"
                 rateAmountId="${clientRateResult.rateAmountId}" vendorRateAmountId="${vendorRateResult.rateAmountId}"
                 fromDate="${effectiveThruDate.time-(2*60*60*1000)}" thruDate="${effectiveThruDate.time}" hours="1.5"
                 breakHours="0.5" workEffortId="TEST-001A"/>
 
             <mantle.work.effort.WorkEffort workEffortId="TEST-001B" resolutionEnumId="WerCompleted" statusId="WeComplete"
-                estimatedWorkTime="2" remainingWorkTime="0" actualWorkTime="2"/>
+                estimatedWorkTime="2" remainingWorkTime="0.5" actualWorkTime="2"/>
             <mantle.work.time.TimeEntry timeEntryId="55902" partyId="${workerResult.partyId}" rateTypeEnumId="RatpStandard"
                 rateAmountId="${clientRateResult.rateAmountId}" vendorRateAmountId="${vendorRateResult.rateAmountId}"
                 fromDate="1383501600000" thruDate="1383512400000" hours="2" breakHours="1" workEffortId="TEST-001B"/>
