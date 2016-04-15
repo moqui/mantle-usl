@@ -384,6 +384,8 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="acctgTrans" for-update="true"/>
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTransEntry" list="acctgTransEntryList">
+                <econdition field-name="acctgTransId"/><order-by field-name="acctgTransEntrySeqId"/></entity-find>
 
             <!-- make sure the AcctgTrans has not already been posted -->
             <if condition="acctgTrans.isPosted == 'Y'">
@@ -393,7 +395,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- check the scheduled posting date, but only if it's set -->
             <if condition="acctgTrans.scheduledPostingDate != null &amp;&amp; ec.user.nowTimestamp.before(acctgTrans.scheduledPostingDate)">
-                <message>Not posting transaction [${acctgTransId}], before scheduled posting date.</message>
+                <message>Not posting transaction ${acctgTransId}, before scheduled posting date.</message>
                 <set field="useErrorJournal" from="true"/>
             </if>
 
@@ -401,27 +403,23 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.LedgerServices.calculate#AcctgTransTrialBalance" out-map="context"
                     in-map="[acctgTransId:acctgTransId]"/>
             <if condition="debitTotal != creditTotal">
-                <message>Not posting transaction [${acctgTransId}], credit total (${creditTotal}) and debit total (${debitTotal}) not equal.</message>
+                <message>Not posting transaction ${acctgTransId}, credit total ${creditTotal} and debit total ${debitTotal} not equal.</message>
                 <set field="useErrorJournal" from="true"/>
             </if>
 
-            <!-- do a for-update query on each GlAccount, make sure accounts allow posting -->
-            <set field="glAccountById" from="[:]"/>
-            <entity-find entity-name="mantle.ledger.transaction.AcctgTransEntry" list="acctgTransEntryList">
-                <econdition field-name="acctgTransId"/>
-                <order-by field-name="acctgTransEntrySeqId"/>
-            </entity-find>
+            <!-- get GlAccount records, make sure accounts allow posting -->
+            <set field="glAccountById" from="new TreeMap()"/>
             <iterate list="acctgTransEntryList" entry="acctgTransEntry">
                 <set field="glAccount" from="glAccountById.get(acctgTransEntry.glAccountId)"/>
                 <if condition="!glAccount">
-                    <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" for-update="true">
+                    <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" cache="true">
                         <field-map field-name="glAccountId" from="acctgTransEntry.glAccountId"/></entity-find-one>
                     <script>glAccountById.put(acctgTransEntry.glAccountId, glAccount)</script>
                 </if>
 
                 <if condition="glAccount.disallowPosting == 'Y'">
                     <message>GL Account ${glAccount.glAccountId} does not allow posting</message>
-                    <log level="info" message="In AcctgTransEntry [${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId}] GL Account ${glAccount.glAccountId} does not allow posting"/>
+                    <log level="info" message="In AcctgTransEntry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} GL Account ${glAccount.glAccountId} does not allow posting"/>
                     <set field="useErrorJournal" from="true"/>
                 </if>
             </iterate>
@@ -432,7 +430,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="partyAcctgPreference?.errorGlJournalId">
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
                             in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
-                    <message>Accounting transaction [${acctgTransId}] has been saved in the Error Journal [${partyAcctgPreference.errorGlJournalId}].</message>
+                    <message>Accounting transaction ${acctgTransId} has been saved in Error Journal ${partyAcctgPreference.errorGlJournalId}.</message>
                     <return/>
 
                     <!-- if no errorGlJournalId return error -->
@@ -444,31 +442,44 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.LedgerServices.get#OrganizationFiscalTimePeriods" out-map="context"
                     in-map="[organizationPartyId:acctgTrans.organizationPartyId, filterDate:acctgTrans.transactionDate]"/>
             <if condition="!timePeriodList">
-                <message error="true">Not posting transaction [${acctgTransId}], could not find time period.</message>
-            </if>
-            <!-- lock each time period and make sure it's not closed -->
-            <iterate entry="timePeriodFromList" list="timePeriodList">
-                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod" for-update="true">
+                <message error="true">Not posting transaction ${acctgTransId}, could not find time current period for organization ${acctgTrans.organizationPartyId}.</message></if>
+            <set field="subsequentPeriodListArray" from="new ArrayList()"/>
+            <iterate entry="timePeriod" list="timePeriodList">
+                <!-- DEJ 20160406 don't lock TimePeriod, shouldn't be needed
+                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="lockTimePeriod" for-update="true">
                     <field-map field-name="timePeriodId" from="timePeriodFromList.timePeriodId"/></entity-find-one>
+                -->
+
+                <!-- make sure the TimePeriod isn't closed -->
                 <if condition="timePeriod.isClosed == 'Y'">
-                    <message error="true">Not posting transaction [${acctgTransId}], time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message>
-                </if>
+                    <message error="true">Not posting transaction ${acctgTransId}, time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message></if>
+
+                <!-- get any existing subsequent time periods to update those as well -->
+                <script>
+                    List subsequentPeriodIds = []
+                    subsequentPeriodListArray.add(subsequentPeriodIds)
+                    String curSubPeriodId = timePeriod.timePeriodId
+                    while (curSubPeriodId) {
+                        Map subNextResult = ec.service.sync().name("mantle.party.TimeServices.get#NextTimePeriod")
+                                .parameter("timePeriodId", curSubPeriodId).call()
+                        curSubPeriodId = subNextResult.nextTimePeriodId
+                        if (curSubPeriodId) subsequentPeriodIds.add(curSubPeriodId)
+                    }
+                </script>
             </iterate>
+
+
 
             <!-- make sure the glAccountId and amount fields are set -->
             <iterate entry="acctgTransEntry" list="acctgTransEntryList">
                 <if condition="!acctgTransEntry.glAccountId">
-                    <message error="true">Accounting transaction [${acctgTransId}] entry [${acctgTransEntry.acctgTransEntrySeqId}] has no glAccountId.</message>
-                </if>
+                    <message error="true">Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no glAccountId.</message></if>
                 <if condition="acctgTransEntry.amount == null">
-                    <message error="true">Accounting transaction [${acctgTransId}] entry [${acctgTransEntry.acctgTransEntrySeqId}] has no amount.</message>
-                </if>
+                    <message error="true">Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no amount.</message></if>
             </iterate>
 
             <if condition="verifyOnly">
-                <if condition="!ec.message.hasError()">
-                    <message>Accounting transaction [${acctgTransId}] is verified for posting.</message>
-                </if>
+                <if condition="!ec.message.hasError()"><message>Accounting transaction ${acctgTransId} is verified for posting.</message></if>
                 <return/>
             </if>
 
@@ -478,7 +489,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="partyAcctgPreference?.errorGlJournalId"><then>
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
                             in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
-                    <message>Accounting transaction [${acctgTransId}] has been saved in the Error Journal [${partyAcctgPreference.errorGlJournalId}].</message>
+                    <message>Accounting transaction ${acctgTransId} has been saved in Error Journal ${partyAcctgPreference.errorGlJournalId}.</message>
                     <script>ec.message.clearErrors()</script>
                     <return/>
                 </then><else>
@@ -487,23 +498,35 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
             </if>
 
+            <!-- FUTURE: use some approach to move this to a separate thread (async persisted? keep a registry of
+                GlAccount, Org, TimePeriod that need refresh and do in a scheduled job?); both options less reliable,
+                but would better handle large volumes and potential lock conflicts -->
 
-            <!-- for each entry update posted balance -->
-            <iterate list="acctgTransEntryList" entry="acctgTransEntry">
-                <!-- have already iterated through the entry list once, all GlAccount records should be there -->
-                <set field="glAccount" from="glAccountById.get(acctgTransEntry.glAccountId)"/>
-
-                <entity-find-one entity-name="mantle.ledger.account.GlAccountOrganization" value-field="glAccountOrganization" for-update="true">
-                    <field-map field-name="glAccountId" from="acctgTransEntry.glAccountId"/>
+            <!-- get and lock the GlAccountOrganization (for update); iterate over glAccountById which is a TreeMap so
+                IDs are sorted for consistent lock order (avoid deadlocks) -->
+            <set field="glAccountOrganizationById" from="[:]"/>
+            <iterate list="glAccountById.keySet()" entry="glAccountId">
+                <entity-find-one entity-name="mantle.ledger.account.GlAccountOrganization"
+                        value-field="glAccountOrganization" for-update="true">
+                    <field-map field-name="glAccountId"/>
                     <field-map field-name="organizationPartyId" from="acctgTrans.organizationPartyId"/>
                 </entity-find-one>
                 <if condition="!glAccountOrganization">
                     <entity-make-value entity-name="mantle.ledger.account.GlAccountOrganization" value-field="glAccountOrganization"
-                            map="[glAccountId:acctgTransEntry.glAccountId,  organizationPartyId:acctgTrans.organizationPartyId]"/>
+                            map="[glAccountId:glAccountId, organizationPartyId:acctgTrans.organizationPartyId]"/>
+                    <entity-create value-field="glAccountOrganization"/>
                 </if>
+                <script>glAccountOrganizationById.put(glAccountId, glAccountOrganization)</script>
+            </iterate>
+
+            <!-- for each entry update posted balance -->
+            <iterate list="acctgTransEntryList" entry="acctgTransEntry">
+                <set field="glAccountOrganization" from="glAccountOrganizationById.get(acctgTransEntry.glAccountId)"/>
 
                 <!-- Debits add to debit accounts and subtract from credit accounts. Credits add to credit accounts and subtract from debit accounts. -->
                 <set field="postingAmount" from="0.0"/>
+                <!-- have already iterated through the entry list once, all GlAccount records should be there -->
+                <set field="glAccount" from="glAccountById.get(acctgTransEntry.glAccountId)"/>
                 <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
                         in-map="[glAccountClassEnumId:glAccount.glAccountClassEnumId]"/>
 
@@ -513,15 +536,12 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="postingAmount" from="acctgTransEntry.debitCreditFlag == 'D' ? -acctgTransEntry.amount : acctgTransEntry.amount"/>
                 </else></if>
 
-                <!-- TODO: do anything with RESOURCE or potentially other root GL account classes? -->
+                <!-- FUTURE: do anything with RESOURCE or potentially other root GL account classes? -->
 
-                <set field="glAccount.postedBalance" from="(glAccount.postedBalance ?: 0) + postingAmount"/>
-                <entity-update value-field="glAccount"/>
                 <set field="glAccountOrganization.postedBalance" from="(glAccountOrganization.postedBalance ?: 0) + postingAmount"/>
-                <entity-create value-field="glAccountOrganization" or-update="true"/>
-                
-                
-                <!-- create or update GlAccountHistory records -->
+                <entity-update value-field="glAccountOrganization"/>
+
+                <!-- create or update GlAccountOrgTimePeriod records -->
                 <iterate list="timePeriodList" entry="timePeriod">
                     <entity-find-one entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="glAccountOrgTimePeriod" for-update="true">
                         <field-map field-name="glAccountId" from="acctgTransEntry.glAccountId"/>
@@ -539,9 +559,37 @@ along with this software (see the LICENSE.md file). If not, see
                     </then><else>
                         <set field="glAccountOrgTimePeriod.postedCredits" from="(glAccountOrgTimePeriod.postedCredits ?: 0) + acctgTransEntry.amount"/>
                     </else></if>
+
                     <set field="glAccountOrgTimePeriod.endingBalance" from="(glAccountOrgTimePeriod.endingBalance ?: 0) + postingAmount"/>
 
                     <entity-create value-field="glAccountOrgTimePeriod" or-update="true"/>
+
+                    <!-- update period begin and end balances on posting, not just on closing (recalc and reset on period close) -->
+                    <set field="subsequentPeriodList" from="subsequentPeriodListArray.get(timePeriod_index)"/>
+                    <set field="lastGlAccountOrgTimePeriod" from="glAccountOrgTimePeriod"/>
+                    <!-- NOTE: this iterate block very similar to one in recalculate#GlAccountOrgTimePeriodAmounts, perhaps refactor into service -->
+                    <iterate list="subsequentPeriodList" entry="subsequentPeriodId">
+                        <!-- for each GlAccountOrgTimePeriod record for current period, set beginning balance for next period
+                            (creating new records if they don't exist) -->
+                        <entity-find-one entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="nextGlAccountOrgTimePeriod" for-update="true">
+                            <field-map field-name="glAccountId" from="acctgTransEntry.glAccountId"/>
+                            <field-map field-name="organizationPartyId" from="timePeriod.partyId"/>
+                            <field-map field-name="timePeriodId" from="subsequentPeriodId"/>
+                        </entity-find-one>
+                        <if condition="nextGlAccountOrgTimePeriod == null">
+                            <entity-make-value entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="nextGlAccountOrgTimePeriod"
+                                map="[glAccountId:glAccountOrgTimePeriod.glAccountId,  organizationPartyId:timePeriod.partyId,
+                                    timePeriodId:subsequentPeriodId, beginningBalance:0, postedDebits:0, postedCredits:0, endingBalance:0]"/>
+                        </if>
+                        <!-- add endingBalance to both just in case something has already been posted and added to next endingBalance -->
+                        <set field="nextGlAccountOrgTimePeriod.endingBalance"
+                                from="((nextGlAccountOrgTimePeriod.endingBalance ?: 0) - (nextGlAccountOrgTimePeriod.beginningBalance ?: 0)) +
+                                    lastGlAccountOrgTimePeriod.endingBalance"/>
+                        <!-- set next beginningBalance from current endingBalance; do after set next endingBalance because it uses next beginningBalance if there is a value -->
+                        <set field="nextGlAccountOrgTimePeriod.beginningBalance" from="lastGlAccountOrgTimePeriod.endingBalance"/>
+
+                        <entity-create value-field="nextGlAccountOrgTimePeriod" or-update="true"/>
+                    </iterate>
                 </iterate>
             </iterate>
 
@@ -890,6 +938,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="nextMonthPeriodId" from="nextMonthOut.nextTimePeriodId"/>
         </actions>
     </service>
+
     <service verb="close" noun="FinancialTimePeriod">
         <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
         <actions>
@@ -910,6 +959,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, child period ${ec.resource.expand('TimePeriodNameTemplate','',childTimePeriod)} not closed.</message>
             </if></iterate>
 
+            <!-- don't allow a period to close if the previous period is not closed -->
+            <set field="previousTimePeriod" from="timePeriod.previous"/>
+            <if condition="previousTimePeriod &amp;&amp; previousTimePeriod.isClosed != 'Y'">
+                <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, previous period ${ec.resource.expand('TimePeriodNameTemplate','',previousTimePeriod)} not closed.</message></if>
+
             <!-- make sure there are no unposted transactions within the time period -->
             <entity-find-count entity-name="mantle.ledger.transaction.AcctgTrans" count-field="unpostedTransCount">
                 <econdition field-name="isPosted" operator="not-equals" value="Y" or-null="true"/>
@@ -926,25 +980,35 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="timePeriod.isClosed" value="Y"/>
             <entity-update value-field="timePeriod"/>
 
-            <!-- find the next TimePeriod (gets nextTimePeriodId, nextTimePeriod) -->
-            <service-call name="mantle.party.TimeServices.getOrCreate#NextTimePeriod" out-map="context"
-                    in-map="[timePeriodId:timePeriodId]"/>
-
             <!-- recalculate postedDebits, postedCredits, endingBalance on GlAccountOrgTimePeriod records for this time period -->
             <service-call name="mantle.ledger.LedgerServices.recalculate#GlAccountOrgTimePeriodAmounts"
-                    in-map="[timePeriodId:timePeriodId, nextTimePeriodId:nextTimePeriodId]"/>
+                    in-map="[timePeriodId:timePeriodId]"/>
         </actions>
     </service>
     <service verb="recalculate" noun="GlAccountOrgTimePeriodAmounts">
         <description>Recalculate postedDebits, postedCredits, endingBalance on GlAccountOrgTimePeriod records for a time period</description>
-        <in-parameters>
-            <parameter name="timePeriodId" required="true"/>
-            <parameter name="nextTimePeriodId"><description>If specified updated record for next time period too (done on closing)</description></parameter>
-        </in-parameters>
+        <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod" for-update="true"/>
-            <set field="fromTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.fromDate} 00:00:00.000&quot;, '')"/>
-            <set field="thruTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.thruDate} 23:59:59.999&quot;, '')"/>
+            <set field="fromTimestamp" from="ec.l10n.parseTimestamp(timePeriod.fromDate.toString() + ' 00:00:00.000', '')"/>
+            <set field="thruTimestamp" from="ec.l10n.parseTimestamp(timePeriod.thruDate.toString() + ' 23:59:59.999', '')"/>
+
+            <!-- get or create the next TimePeriod (gets nextTimePeriodId, nextTimePeriod); always set its begin balance
+                from this period's end balance -->
+            <service-call name="mantle.party.TimeServices.getOrCreate#NextTimePeriod" out-map="context"
+                    in-map="[timePeriodId:timePeriodId]"/>
+
+            <!-- get any existing subsequent time periods to update those as well (unlike next get only, no create) -->
+            <set field="subsequentPeriodIds" from="[nextTimePeriodId]"/>
+            <set field="curSubPeriodId" from="nextTimePeriodId"/>
+            <script>
+            while (curSubPeriodId) {
+                Map subNextResult = ec.service.sync().name("mantle.party.TimeServices.get#NextTimePeriod")
+                        .parameter("timePeriodId", curSubPeriodId).call()
+                curSubPeriodId = subNextResult.nextTimePeriodId
+                if (curSubPeriodId) subsequentPeriodIds.add(curSubPeriodId)
+            }
+            </script>
 
             <entity-find entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" list="glAccountOrgTimePeriodList" for-update="true">
                 <econdition field-name="organizationPartyId" from="timePeriod.partyId"/>
@@ -991,32 +1055,63 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- update the record -->
                     <entity-update value-field="glAccountOrgTimePeriod"/>
 
-                    <!-- TODO: also update postedBalance on GlAccount and GlAccountOrganization when we find a difference? -->
+                    <!-- TODO: also update postedBalance on GlAccountOrganization when we find a difference? -->
                 </if>
 
-                <!-- for each GlAccountOrgTimePeriod record for current period, set beginning balance for next period
-                    (creating new records if they don't exist) -->
-                <if condition="nextTimePeriodId">
+                <!-- update balances for all existing subsequent periods -->
+                <set field="lastGlAccountOrgTimePeriod" from="glAccountOrgTimePeriod"/>
+                <iterate list="subsequentPeriodIds" entry="subsequentPeriodId">
+                    <!-- for each GlAccountOrgTimePeriod record for current period, set beginning balance for next period
+                        (creating new records if they don't exist) -->
                     <entity-find-one entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="nextGlAccountOrgTimePeriod" for-update="true">
                         <field-map field-name="glAccountId" from="glAccountOrgTimePeriod.glAccountId"/>
                         <field-map field-name="organizationPartyId" from="timePeriod.partyId"/>
-                        <field-map field-name="timePeriodId" from="nextTimePeriodId"/>
+                        <field-map field-name="timePeriodId" from="subsequentPeriodId"/>
                     </entity-find-one>
                     <if condition="nextGlAccountOrgTimePeriod == null">
                         <entity-make-value entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="nextGlAccountOrgTimePeriod"
                             map="[glAccountId:glAccountOrgTimePeriod.glAccountId,  organizationPartyId:timePeriod.partyId,
-                                timePeriodId:nextTimePeriodId, beginningBalance:0, postedDebits:0, postedCredits:0, endingBalance:0]"/>
+                                timePeriodId:subsequentPeriodId, beginningBalance:0, postedDebits:0, postedCredits:0, endingBalance:0]"/>
                     </if>
                     <!-- add endingBalance to both just in case something has already been posted and added to next endingBalance -->
                     <set field="nextGlAccountOrgTimePeriod.endingBalance"
                             from="((nextGlAccountOrgTimePeriod.endingBalance ?: 0) - (nextGlAccountOrgTimePeriod.beginningBalance ?: 0)) +
-                                glAccountOrgTimePeriod.endingBalance"/>
+                                lastGlAccountOrgTimePeriod.endingBalance"/>
                     <!-- set next beginningBalance from current endingBalance; do after set next endingBalance because it uses next beginningBalance if there is a value -->
-                    <set field="nextGlAccountOrgTimePeriod.beginningBalance" from="glAccountOrgTimePeriod.endingBalance"/>
+                    <set field="nextGlAccountOrgTimePeriod.beginningBalance" from="lastGlAccountOrgTimePeriod.endingBalance"/>
 
                     <entity-create value-field="nextGlAccountOrgTimePeriod" or-update="true"/>
-                </if>
+                </iterate>
             </iterate>
+        </actions>
+    </service>
+    <service verb="reopen" noun="FinancialTimePeriod">
+        <description>Service for period re-open (with special permission?); don't allow reopening a period if the
+            following period is closed</description>
+        <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
+        <actions>
+            <if condition="!ec.user.hasPermission('FISCAL_REOPEN')">
+                <return error="true" message="Fiscal Period Reopen permission required"/></if>
+
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod" for-update="true"/>
+
+            <if condition="timePeriod.isClosed != 'Y'">
+                <message error="true">Period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)} is not closed, not reopening.</message></if>
+
+            <!-- don't allow reopening a period if the following period is closed -->
+            <entity-find entity-name="mantle.party.time.TimePeriod" list="nextPeriodList">
+                <econdition field-name="previousPeriodId" from="timePeriodId"/></entity-find>
+            <iterate list="nextPeriodList" entry="nextPeriod">
+                <if condition="nextPeriod.isClosed == 'Y'">
+                    <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, next period ${ec.resource.expand('TimePeriodNameTemplate','',nextPeriod)} is closed.</message></if>
+            </iterate>
+
+            <!-- check errors before continuing -->
+            <check-errors/>
+
+            <!-- reopen the TimePeriod -->
+            <set field="timePeriod.isClosed" value="N"/>
+            <entity-update value-field="timePeriod"/>
         </actions>
     </service>
 

@@ -205,8 +205,8 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="create" noun="Invoice">
-        <description>Create an invoice manually (as opposed to for an order part, shipment, project/work, etc). Initial
-            status is InvoiceInProcess unless toPartyId is has the OrgInternal role, then it is InvoiceIncoming.</description>
+        <description>Create an invoice manually (also used for an order part, shipment, project/work, etc). Initial
+            status is InvoiceIncoming unless fromPartyId is has the OrgInternal role, then it is InvoiceInProcess.</description>
         <in-parameters>
             <auto-parameters entity-name="mantle.account.invoice.Invoice" include="nonpk">
                 <exclude field-name="statusId"/></auto-parameters>
@@ -219,23 +219,63 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="invoiceId"/></out-parameters>
         <actions>
+            <entity-find entity-name="mantle.party.PartyRole" list="fromOrgInternalList">
+                <econdition field-name="partyId" from="fromPartyId"/>
+                <econdition field-name="roleTypeId" value="OrgInternal"/></entity-find>
+            <set field="isFromPartyOrgInternal" from="fromOrgInternalList as boolean"/>
+            <set field="organizationPartyId" from="isFromPartyOrgInternal ? fromPartyId : toPartyId"/>
+            <set field="otherPartyId" from="isFromPartyOrgInternal ? toPartyId : fromPartyId"/>
+
+            <!-- set the initial statusId based on which party is OrgInternal -->
+            <set field="statusId" from="isFromPartyOrgInternal ? 'InvoiceInProcess' : 'InvoiceIncoming'"/>
+
+            <!-- get configured currency for org if none specified -->
             <if condition="!currencyUomId">
                 <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
-                        in-map="[organizationPartyId:fromPartyId]"/>
-                <if condition="partyAcctgPreference"><then>
-                    <set field="currencyUomId" from="partyAcctgPreference.baseCurrencyUomId"/>
-                </then><else>
-                    <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
-                            in-map="[organizationPartyId:toPartyId]"/>
-                    <if condition="partyAcctgPreference">
-                        <set field="currencyUomId" from="partyAcctgPreference.baseCurrencyUomId"/></if>
-                </else></if>
+                        in-map="[organizationPartyId:organizationPartyId]"/>
+                <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId"/>
             </if>
             <if condition="!currencyUomId"><set field="currencyUomId" value="USD"/></if>
 
-            <entity-find-one entity-name="mantle.party.PartyRole" value-field="toOrgInternal">
-                <field-map field-name="partyId" from="toPartyId"/><field-map field-name="roleTypeId" value="OrgInternal"/></entity-find-one>
-            <set field="statusId" from="toOrgInternal ? 'InvoiceIncoming' : 'InvoiceInProcess'"/>
+            <!-- get agreed on settlement term if none specified -->
+            <if condition="!settlementTermId">
+                <!-- find an AgreementTerm with a settlementTermId -->
+                <entity-find entity-name="mantle.party.agreement.AgreementAndTerm" list="agreementAndTermList">
+                    <date-filter/>
+                    <econdition field-name="organizationPartyId"/><econdition field-name="otherPartyId"/>
+                    <!-- agreement roles a little funny, anything other than Customer is a vendor of some sort so look for Customer or other -->
+                    <econdition field-name="otherRoleTypeId" operator="equals" value="Customer" ignore="!isFromPartyOrgInternal"/>
+                    <econdition field-name="otherRoleTypeId" operator="not-equals" value="Customer" ignore="isFromPartyOrgInternal"/>
+                    <econdition field-name="settlementTermId" operator="is-not-null"/>
+                    <order-by field-name="-fromDate"/>
+                </entity-find>
+                <if condition="agreementAndTermList"><set field="settlementTermId" from="agreementAndTermList[0].settlementTermId"/></if>
+            </if>
+
+            <!-- if no dueDate specified calculate based on invoiceDate and SettlementTerm -->
+            <if condition="dueDate == null &amp;&amp; settlementTermId">
+                <entity-find-one entity-name="mantle.account.invoice.SettlementTerm" value-field="settlementTerm"/>
+                <script><![CDATA[
+                    def dueDateDt = new org.joda.time.MutableDateTime(invoiceDate.time,
+                            org.joda.time.DateTimeZone.forTimeZone(ec.entity.databaseTimeZone))
+
+                    switch (settlementTerm.termTypeEnumId) {
+                        case 'TtFinPaymentDayNextMonth':
+                            dueDateDt.addMonths(1)
+                        case 'TtFinPaymentDayCurMonth':
+                            int dayOfMonth = settlementTerm.termValue ?: 1
+                            if (dayOfMonth > dueDateDt.dayOfMonth().getMaximumValue())
+                                dayOfMonth = dueDateDt.dayOfMonth().getMaximumValue()
+                            dueDateDt.setDayOfMonth(dayOfMonth)
+                            break
+                        default:
+                            dueDateDt.addDays((settlementTerm.termValue as int) ?: 0)
+                    }
+                    dueDate = new java.sql.Timestamp(dueDateDt.getMillis())
+                    // could happen for TtFinPaymentDayCurMonth with a day less than today; handle differently?
+                    if (dueDate < invoiceDate) dueDate = invoiceDate
+                ]]></script>
+            </if>
 
             <service-call name="create#mantle.account.invoice.Invoice" in-map="context" out-map="context"/>
         </actions>
@@ -377,15 +417,9 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
 
-            <!-- is this an outgoing (use InvoiceIncoming) or incoming (use InvoiceInProcess) order based on internal org? -->
-            <!-- TODO: what to do if both are internal orgs? need a flag or something for which side we're dealing with... just for initial statusId... -->
-            <entity-find-one entity-name="mantle.party.PartyRole" value-field="customerOrgInternal">
-                <field-map field-name="partyId" from="orderPart.customerPartyId"/><field-map field-name="roleTypeId" value="OrgInternal"/></entity-find-one>
-            <set field="initialStatusId" from="customerOrgInternal ? 'InvoiceIncoming' : 'InvoiceInProcess'"/>
-
             <set field="description" value="Invoice for Order ${orderId} part ${orderPartSeqId}"/>
-            <service-call name="create#mantle.account.invoice.Invoice" out-map="context"
-                    in-map="[invoiceTypeEnumId:'InvoiceSales', statusId:initialStatusId,
+            <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="context"
+                    in-map="[invoiceTypeEnumId:'InvoiceSales',
                         fromPartyId:orderPart.vendorPartyId, toPartyId:orderPart.customerPartyId,
                         invoiceDate:invoiceDate, currencyUomId:orderHeader.currencyUomId,
                         description:description, systemMessageRemoteId:orderHeader.systemMessageRemoteId]"/>
@@ -455,7 +489,6 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- for reuse for purchase orders, represent the differences between sales and purchase order shipments -->
             <parameter name="handleIssuances" type="Boolean" default="true"/>
             <parameter name="handleReceipts" type="Boolean" default="false"/>
-            <parameter name="initialStatusId" default-value="InvoiceInProcess"/>
             <parameter name="applyPayments" type="Boolean" default="true"/>
         </in-parameters>
         <out-parameters><parameter name="invoiceIdByOrderPartIdMap" type="Map"/></out-parameters>
@@ -484,8 +517,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="orderPart" from="orderItem.'mantle.order.OrderPart'"/>
                     <if condition="orderPart">
                         <set field="description" value="Invoice for Order ${orderItem.orderId} part ${orderItem.orderPartSeqId} and Shipment ${shipmentId}"/>
-                        <service-call name="create#mantle.account.invoice.Invoice" out-map="invOut"
-                                in-map="[invoiceTypeEnumId:'InvoiceSales', statusId:initialStatusId,
+                        <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="invOut"
+                                in-map="[invoiceTypeEnumId:'InvoiceSales',
                                     fromPartyId:orderPart.vendorPartyId, toPartyId:orderPart.customerPartyId,
                                     invoiceDate:invoiceDate, currencyUomId:orderHeader.currencyUomId,
                                     description:description, systemMessageRemoteId:orderHeader.systemMessageRemoteId]"/>
@@ -708,7 +741,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="handleIssuances" from="false"/>
                 <set field="handleReceipts" from="true"/>
                 <set field="applyPayments" from="false"/>
-                <set field="initialStatusId" value="InvoiceIncoming"/>
                 <service-call name="mantle.account.InvoiceServices.create#SalesShipmentInvoices" in-map="context"
                         out-map="context"/>
             </if>
@@ -722,7 +754,6 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="fromPartyId" required="true"/>
             <parameter name="toPartyId"/>
             <parameter name="invoiceTypeEnumId" default-value="InvoiceSales"/>
-            <parameter name="statusId" default-value="InvoiceIncoming"/>
             <parameter name="invoiceDate" type="Timestamp" default="ec.user.nowTimestamp"/>
             <parameter name="currencyUomId"/>
         </in-parameters>
@@ -733,11 +764,6 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!workEffortId &amp;&amp; !toPartyId">
                 <return error="true" message="Must specify either Project (workEffortId) or To Party (toPartyId)"/></if>
 
-            <if condition="!currencyUomId">
-                <entity-find-one entity-name="mantle.ledger.config.PartyAcctgPreference" value-field="partyAcctgPreference">
-                    <field-map field-name="organizationPartyId" from="toPartyId"/></entity-find-one>
-                <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId ?: 'USD'"/>
-            </if>
             <if condition="!toPartyId">
                 <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="vendorWepList">
                     <date-filter/><econdition field-name="workEffortId"/>
@@ -746,7 +772,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="toPartyId" from="vendorWep.partyId"/>
             </if>
 
-            <service-call name="create#mantle.account.invoice.Invoice" in-map="context" out-map="context"/>
+            <service-call name="mantle.account.InvoiceServices.create#Invoice" in-map="context" out-map="context"/>
 
             <if condition="workEffortId">
                 <service-call name="create#mantle.work.effort.WorkEffortInvoice" in-map="context" out-map="context"/></if>
@@ -794,13 +820,13 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
                 <set field="description" value="Invoice for${workEffort ? ' project ' + ec.resource.expand('WorkEffortNameTemplate','') : ''}${workerParty ? ' worker ' + ec.resource.expand('PartyNameTemplate','',workerParty) : ''}"/>
                 <if condition="ratePurposeEnumId == 'RaprClient'"><then>
-                    <service-call name="create#mantle.account.invoice.Invoice" out-map="context"
-                            in-map="[invoiceTypeEnumId:'InvoiceSales', statusId:'InvoiceInProcess',
+                    <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="context"
+                            in-map="[invoiceTypeEnumId:'InvoiceSales',
                                 fromPartyId:billFromWep?.partyId, toPartyId:billToWep?.partyId,
                                 invoiceDate:invoiceDate, currencyUomId:currencyUomId, description:description]"/>
                 </then><else>
-                    <service-call name="create#mantle.account.invoice.Invoice" out-map="context"
-                            in-map="[invoiceTypeEnumId:'InvoiceSales', statusId:'InvoiceIncoming',
+                    <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="context"
+                            in-map="[invoiceTypeEnumId:'InvoiceSales',
                                 fromPartyId:workerPartyId, toPartyId:billFromWep?.partyId,
                                 invoiceDate:invoiceDate, currencyUomId:currencyUomId, description:description]"/>
                 </else></if>

@@ -58,6 +58,10 @@ h2. General Order Placement and eCommerce Usage
             <parameter name="orderItemBillingList" type="List"><parameter name="oib" type="Map">
                 <auto-parameters entity-name="mantle.order.OrderItemBilling"/></parameter></parameter>
             <parameter name="invoiceIdSet" type="Set"><parameter name="invoiceId"/></parameter>
+            <parameter name="quantityNotBilledByItem" type="Map">
+                <description>Key is orderItemSeqId, value is quantity not billed for item.</description></parameter>
+            <parameter name="quantityNotBilledByPart" type="Map">
+                <description>Key is orderPartSeqId, value is quantity not billed for all items in part.</description></parameter>
 
             <parameter name="returnItemList" type="List"><parameter name="returnItem" type="Map">
                 <auto-parameters entity-name="mantle.order.return.ReturnItem"/></parameter></parameter>
@@ -79,6 +83,7 @@ h2. General Order Placement and eCommerce Usage
                     <auto-parameters entity-name="mantle.order.OrderItem"/></parameter></parameter>
                 <parameter name="partNoParentOrderItemList" type="List"><parameter name="partOrderItem" type="Map">
                     <auto-parameters entity-name="mantle.order.OrderItem"/></parameter></parameter>
+                <parameter name="hasShippableItems" type="Boolean"/>
                 <parameter name="shipmentMethodEnum" type="Map">
                     <auto-parameters entity-name="moqui.basic.Enumeration"/></parameter>
                 <parameter name="partPaymentList" type="List"><parameter name="partPayment" type="Map">
@@ -144,7 +149,6 @@ h2. General Order Placement and eCommerce Usage
             </parameter></parameter>
         </out-parameters>
         <actions>
-
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <!--
             <set field="headerMaster" from="orderHeader.getMasterValueMap('default')"/>
@@ -180,8 +184,19 @@ h2. General Order Placement and eCommerce Usage
             <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
                 <econdition field-name="orderId"/><order-by field-name="orderItemSeqId"/></entity-find>
             <set field="invoiceIdSet" from="new TreeSet()"/>
-            <iterate list="orderItemBillingList" entry="orderItemBilling">
-                <script>invoiceIdSet.add(orderItemBilling.invoiceId)</script></iterate>
+            <set field="quantityNotBilledByItem" from="[:]"/>
+            <set field="quantityNotBilledByPart" from="[:]"/>
+            <iterate list="orderItemList" entry="orderItem"><script>
+                def orderItemQuantity = (orderItem.quantity ?: 1) * (orderItem.selectedAmount ?: 1)
+                StupidUtilities.addToBigDecimalInMap(orderItem.orderItemSeqId, orderItemQuantity, quantityNotBilledByItem)
+                StupidUtilities.addToBigDecimalInMap(orderItem.orderPartSeqId, orderItemQuantity, quantityNotBilledByPart)
+            </script></iterate>
+            <iterate list="orderItemBillingList" entry="orderItemBilling"><script>
+                def curOrderItem = orderItemList.find({ it.orderItemSeqId == orderItemBilling.orderItemSeqId })
+                invoiceIdSet.add(orderItemBilling.invoiceId)
+                StupidUtilities.addToBigDecimalInMap(curOrderItem.orderItemSeqId, -orderItemBilling.quantity, quantityNotBilledByItem)
+                StupidUtilities.addToBigDecimalInMap(curOrderItem.orderPartSeqId, -orderItemBilling.quantity, quantityNotBilledByPart)
+            </script></iterate>
 
             <entity-find entity-name="mantle.order.return.ReturnItem" list="returnItemList">
                 <econdition field-name="orderId"/>
@@ -216,8 +231,10 @@ h2. General Order Placement and eCommerce Usage
 
             orderPartInfoList = []
             for (EntityValue orderPart in orderPartList) {
-                partOrderItemList = orderItemList.cloneList().filterByAnd([orderPartSeqId:orderPart.orderPartSeqId])
-                partNoParentOrderItemList = partOrderItemList.cloneList().filterByAnd([parentItemSeqId:null])
+                partOrderItemList = orderItemList.findAll({ it.orderPartSeqId == orderPart.orderPartSeqId })
+                partNoParentOrderItemList = partOrderItemList.findAll({ it.parentItemSeqId == null })
+                hasShippableItems = orderItemList.find({ it.product?.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse'] })
+
                 partPaymentList = paymentList.cloneList().filterByAnd([orderPartSeqId:orderPart.orderPartSeqId])
                 partPaymentInfoList = []
                 BigDecimal paymentsTotal = 0
@@ -280,7 +297,7 @@ h2. General Order Placement and eCommerce Usage
                         .parameters([orderId:orderPart.orderId, orderPartSeqId:orderPart.orderPartSeqId]).call()
 
                 orderPartInfoList.add([orderPart:orderPart, partOrderItemList:partOrderItemList,
-                        partNoParentOrderItemList:partNoParentOrderItemList,
+                        partNoParentOrderItemList:partNoParentOrderItemList, hasShippableItems:hasShippableItems,
                         shipmentMethodEnum:orderPart."ShipmentMethod#moqui.basic.Enumeration",
                         partPaymentList:partPaymentList, partPaymentInfoList:partPaymentInfoList,
                         paymentsTotal:paymentsTotal, partTotalUnpaid:partTotalUnpaid,
@@ -322,6 +339,7 @@ h2. General Order Placement and eCommerce Usage
                 <description>The initial statusId for both header and part.</description></parameter>
             <parameter name="entryDate" type="Timestamp" default="ec.user.nowTimestamp"/>
             <parameter name="visitId" default="ec.user.visitId"/>
+            <parameter name="enteredByPartyId" default="ec.user.userAccount.partyId"/>
             <parameter name="currencyUomId"><description>Defaults to PartyAcctgPreference.baseCurrencyUomId for whichever
                 Party (customer or vendor) is an internal organization with an accounting preference record.</description></parameter>
             <parameter name="orderRevision" type="Integer" default="1"/>
@@ -348,7 +366,7 @@ h2. General Order Placement and eCommerce Usage
                             in-map="[organizationPartyId:vendorPartyId]"/></if>
                 <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId"/>
             </if>
-            <!-- TODO: get this from configuration somewhere, perhaps Tenant.defaultCurrencyUomId? -->
+            <!-- MAYBE: get this from configuration somewhere, needed beyond PartyAcctgPreference? -->
             <if condition="!currencyUomId"><set field="currencyUomId" value="USD"/></if>
 
             <service-call name="create#mantle.order.OrderHeader" in-map="context" out-map="context"/>
@@ -944,8 +962,13 @@ h2. General Order Placement and eCommerce Usage
         <actions><service-call name="mantle.order.OrderServices.update#OrderStatus" out-map="context" in-map="context + [statusId:'OrderPlaced', placedDate:ec.user.nowTimestamp]"/></actions>
     </service>
     <service verb="approve" noun="Order">
+        <description>For manual order approval, requires ORDER_APPROVE permission.</description>
         <implements service="mantle.order.OrderServices.change#OrderStatusInterface"/>
-        <actions><service-call name="mantle.order.OrderServices.update#OrderStatus" out-map="context" in-map="context + [statusId:'OrderApproved']"/></actions>
+        <actions>
+            <if condition="!ec.user.hasPermission('ORDER_APPROVE')">
+                <return error="true" message="Order Approve permission required"/></if>
+            <service-call name="mantle.order.OrderServices.update#OrderStatus" out-map="context" in-map="context + [statusId:'OrderApproved']"/>
+        </actions>
     </service>
 
     <service verb="checkComplete" noun="OrderPart">
