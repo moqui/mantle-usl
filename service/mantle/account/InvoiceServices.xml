@@ -205,8 +205,8 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="create" noun="Invoice">
-        <description>Create an invoice manually (as opposed to for an order part, shipment, project/work, etc). Initial
-            status is InvoiceInProcess unless toPartyId is has the OrgInternal role, then it is InvoiceIncoming.</description>
+        <description>Create an invoice manually (also used for an order part, shipment, project/work, etc). Initial
+            status is InvoiceIncoming unless fromPartyId is has the OrgInternal role, then it is InvoiceInProcess.</description>
         <in-parameters>
             <auto-parameters entity-name="mantle.account.invoice.Invoice" include="nonpk">
                 <exclude field-name="statusId"/></auto-parameters>
@@ -226,6 +226,9 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="organizationPartyId" from="isFromPartyOrgInternal ? fromPartyId : toPartyId"/>
             <set field="otherPartyId" from="isFromPartyOrgInternal ? toPartyId : fromPartyId"/>
 
+            <!-- set the initial statusId based on which party is OrgInternal -->
+            <set field="statusId" from="isFromPartyOrgInternal ? 'InvoiceInProcess' : 'InvoiceIncoming'"/>
+
             <!-- get configured currency for org if none specified -->
             <if condition="!currencyUomId">
                 <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
@@ -241,19 +244,40 @@ along with this software (see the LICENSE.md file). If not, see
                     <date-filter/>
                     <econdition field-name="organizationPartyId"/><econdition field-name="otherPartyId"/>
                     <!-- agreement roles a little funny, anything other than Customer is a vendor of some sort so look for Customer or other -->
-                    <econdition field-name="otherRoleTypeId" operator="equals" value="Customer" ignore="isFromPartyOrgInternal"/>
-                    <econdition field-name="otherRoleTypeId" operator="not-equals" value="Customer" ignore="!isFromPartyOrgInternal"/>
+                    <econdition field-name="otherRoleTypeId" operator="equals" value="Customer" ignore="!isFromPartyOrgInternal"/>
+                    <econdition field-name="otherRoleTypeId" operator="not-equals" value="Customer" ignore="isFromPartyOrgInternal"/>
                     <econdition field-name="settlementTermId" operator="is-not-null"/>
                     <order-by field-name="-fromDate"/>
                 </entity-find>
+                <log message="agreementAndTermList: ${agreementAndTermList}"/>
+                <log message="agreementAndTermList_xafind: ${agreementAndTermList_xafind}"/>
                 <if condition="agreementAndTermList"><set field="settlementTermId" from="agreementAndTermList[0].settlementTermId"/></if>
             </if>
 
-            <!-- TODO: if no dueDate specified calculate based on invoiceDate and SettlementTerm -->
+            <!-- if no dueDate specified calculate based on invoiceDate and SettlementTerm -->
+            <if condition="dueDate == null &amp;&amp; settlementTermId">
+                <entity-find-one entity-name="mantle.account.invoice.SettlementTerm" value-field="settlementTerm"/>
+                <script><![CDATA[
+                    def dueDateDt = new org.joda.time.MutableDateTime(invoiceDate.time,
+                            org.joda.time.DateTimeZone.forTimeZone(ec.entity.databaseTimeZone))
 
-            <entity-find-one entity-name="mantle.party.PartyRole" value-field="toOrgInternal">
-                <field-map field-name="partyId" from="toPartyId"/><field-map field-name="roleTypeId" value="OrgInternal"/></entity-find-one>
-            <set field="statusId" from="toOrgInternal ? 'InvoiceIncoming' : 'InvoiceInProcess'"/>
+                    switch (settlementTerm.termTypeEnumId) {
+                        case 'TtFinPaymentDayNextMonth':
+                            dueDateDt.addMonths(1)
+                        case 'TtFinPaymentDayCurMonth':
+                            int dayOfMonth = settlementTerm.termValue ?: 1
+                            if (dayOfMonth > dueDateDt.dayOfMonth().getMaximumValue())
+                                dayOfMonth = dueDateDt.dayOfMonth().getMaximumValue()
+                            dueDateDt.setDayOfMonth(dayOfMonth)
+                            break
+                        default:
+                            dueDateDt.addDays((settlementTerm.termValue as int) ?: 0)
+                    }
+                    dueDate = new java.sql.Timestamp(dueDateDt.getMillis())
+                    // could happen for TtFinPaymentDayCurMonth with a day less than today; handle differently?
+                    if (dueDate < invoiceDate) dueDate = invoiceDate
+                ]]></script>
+            </if>
 
             <service-call name="create#mantle.account.invoice.Invoice" in-map="context" out-map="context"/>
         </actions>
