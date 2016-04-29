@@ -250,108 +250,104 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-set value-field="shipmentItem"/>
             <entity-update value-field="shipmentItem"/>
 
-            <if condition="shipmentItemSourceId">
+            <if condition="shipmentItemSourceId"><then>
                 <!-- if shipmentItemSourceId passed in, update that one -->
                 <entity-find-one entity-name="mantle.shipment.ShipmentItemSource" value-field="sis"/>
                 <entity-set value-field="sis"/>
                 <set field="sis.quantity" from="(sis.quantity ?: 0) + quantityChange"/>
                 <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) + quantityChange"/>
                 <entity-update value-field="sis"/>
+            </then><else>
+                <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="sisList">
+                    <econdition field-name="shipmentId"/><econdition field-name="productId"/></entity-find>
+                <set field="sisQuantity" from="0"/>
 
-                <else>
-                    <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="sisList">
-                        <econdition field-name="shipmentId"/><econdition field-name="productId"/></entity-find>
-                    <set field="sisQuantity" from="0"/>
+                <filter-map-list list="sisList" to-list="noOrderSisList"><field-map field-name="orderId" from="null"/></filter-map-list>
+                <set field="orderSisList" from="[]"/>
+                <iterate list="sisList" entry="sis"><script>if (sis.orderId) orderSisList.add(sis)</script></iterate>
 
-                    <filter-map-list list="sisList" to-list="noOrderSisList"><field-map field-name="orderId" from="null"/></filter-map-list>
-                    <set field="orderSisList" from="[]"/>
-                    <iterate list="sisList" entry="sis"><script>if (sis.orderId) orderSisList.add(sis)</script></iterate>
+                <!-- use a different quantityChange for SIS based on current ShipmentItem.quantity so they match -->
+                <iterate list="sisList" entry="sis"><set field="sisQuantity" from="sisQuantity + sis.quantity"/></iterate>
+                <set field="quantityChange" from="quantity - sisQuantity"/>
 
-                    <!-- use a different quantityChange for SIS based on current ShipmentItem.quantity so they match -->
-                    <iterate list="sisList" entry="sis"><set field="sisQuantity" from="sisQuantity + sis.quantity"/></iterate>
-                    <set field="quantityChange" from="quantity - sisQuantity"/>
+                <if condition="quantityChange &gt; 0">
+                    <!-- quantity increase, first find SIS records for OrderItems with quantity not already on a
+                            shipment, then find SIS with no orderId and update that one, if none create on -->
+                    <set field="increaseRemaining" from="quantityChange"/>
 
-                    <if condition="quantityChange &gt; 0">
-                        <!-- quantity increase, first find SIS records for OrderItems with quantity not already on a
-                                shipment, then find SIS with no orderId and update that one, if none create on -->
-                        <set field="increaseRemaining" from="quantityChange"/>
+                    <iterate list="orderSisList" entry="sis">
+                        <!-- get quantity for all ShipmentItemSource records for the order item -->
+                        <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="itemSisList">
+                            <econdition field-name="orderId" from="sis.orderId"/>
+                            <econdition field-name="orderItemSeqId" from="sis.orderItemSeqId"/>
+                            <select-field field-name="quantity"/>
+                        </entity-find>
+                        <set field="itemShipmentQuantity" from="0"/>
+                        <iterate list="itemSisList" entry="itemSis"><set field="itemShipmentQuantity"
+                                from="itemShipmentQuantity + itemSis.quantity"/></iterate>
 
-                        <iterate list="orderSisList" entry="sis">
-                            <!-- get quantity for all ShipmentItemSource records for the order item -->
-                            <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="itemSisList">
-                                <econdition field-name="orderId" from="sis.orderId"/>
-                                <econdition field-name="orderItemSeqId" from="sis.orderItemSeqId"/>
-                                <select-field field-name="quantity"/>
-                            </entity-find>
-                            <set field="itemShipmentQuantity" from="0"/>
-                            <iterate list="itemSisList" entry="itemSis"><set field="itemShipmentQuantity"
-                                    from="itemShipmentQuantity + itemSis.quantity"/></iterate>
+                        <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem">
+                            <field-map field-name="orderId" from="sis.orderId"/>
+                            <field-map field-name="orderItemSeqId" from="sis.orderItemSeqId"/>
+                        </entity-find-one>
 
-                            <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem">
-                                <field-map field-name="orderId" from="sis.orderId"/>
-                                <field-map field-name="orderItemSeqId" from="sis.orderItemSeqId"/>
-                            </entity-find-one>
+                        <set field="itemQuantityRemaining" from="orderItem.quantity - itemShipmentQuantity"/>
 
-                            <set field="itemQuantityRemaining" from="orderItem.quantity - itemShipmentQuantity"/>
-
-                            <set field="currentChange" from="increaseRemaining &gt; itemQuantityRemaining ?
-                                    itemQuantityRemaining : increaseRemaining"/>
-                            <if condition="currentChange">
-                                <set field="sis.quantity" from="(sis.quantity ?: 0) + currentChange"/>
-                                <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) + currentChange"/>
-                                <entity-update value-field="sis"/>
-                                <set field="increaseRemaining" from="increaseRemaining - currentChange"/>
-                                <if condition="increaseRemaining == 0"><break/></if>
-                            </if>
-                        </iterate>
-
-                        <if condition="increaseRemaining &amp;&amp; noOverQuantity">
-                            <return error="true" message="For outgoing shipments cannot increase quantity above what is on related order items (${increaseRemaining} too many)"/>
-                        </if>
-
-                        <if condition="increaseRemaining &amp;&amp; noOrderSisList">
-                            <set field="sis" from="noOrderSisList[0]"/>
-                            <set field="sis.quantity" from="(sis.quantity ?: 0) + increaseRemaining"/>
-                            <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) + increaseRemaining"/>
+                        <set field="currentChange" from="increaseRemaining &gt; itemQuantityRemaining ?
+                                itemQuantityRemaining : increaseRemaining"/>
+                        <if condition="currentChange">
+                            <set field="sis.quantity" from="(sis.quantity ?: 0) + currentChange"/>
+                            <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) + currentChange"/>
                             <entity-update value-field="sis"/>
-
-                            <else-if condition="increaseRemaining">
-                                <service-call name="create#mantle.shipment.ShipmentItemSource"
-                                        in-map="context + [quantity:increaseRemaining, quantityNotHandled:increaseRemaining, statusId:'SisPending']"/>
-                            </else-if>
+                            <set field="increaseRemaining" from="increaseRemaining - currentChange"/>
+                            <if condition="increaseRemaining == 0"><break/></if>
                         </if>
-                    </if>
-                    <if condition="quantityChange &lt; 0">
-                        <!-- quantity reduce, find SIS records with no orderId and update those first, if any left pull from those from orders -->
-                        <set field="reduceRemaining" from="-quantityChange"/>
-                        <iterate list="noOrderSisList" entry="sis">
-                            <set field="currentChange" from="reduceRemaining &gt; (sis.quantityNotHandled?:0) ?
-                                    (sis.quantityNotHandled?:0) : reduceRemaining"/>
-                            <if condition="currentChange">
-                                <set field="sis.quantity" from="(sis.quantity ?: 0) - currentChange"/>
-                                <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) - currentChange"/>
-                                <if condition="sis.quantity == 0 &amp;&amp; !sis.orderId">
-                                    <entity-delete value-field="sis"/>
-                                    <else><entity-update value-field="sis"/></else>
-                                </if>
-                                <set field="reduceRemaining" from="reduceRemaining - currentChange"/>
-                                <if condition="reduceRemaining == 0"><break/></if>
-                            </if>
-                        </iterate>
-                        <iterate list="orderSisList" entry="sis">
-                            <set field="currentChange" from="reduceRemaining &gt; (sis.quantityNotHandled?:0) ?
-                                    (sis.quantityNotHandled?:0) : reduceRemaining"/>
-                            <if condition="currentChange">
-                                <set field="sis.quantity" from="(sis.quantity ?: 0) - currentChange"/>
-                                <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) - currentChange"/>
+                    </iterate>
+
+                    <if condition="increaseRemaining &amp;&amp; noOverQuantity">
+                        <return error="true" message="For outgoing shipments cannot increase quantity above what is on related order items (${increaseRemaining} too many)"/></if>
+
+                    <if condition="increaseRemaining &amp;&amp; noOrderSisList"><then>
+                        <set field="sis" from="noOrderSisList[0]"/>
+                        <set field="sis.quantity" from="(sis.quantity ?: 0) + increaseRemaining"/>
+                        <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) + increaseRemaining"/>
+                        <entity-update value-field="sis"/>
+                    </then><else-if condition="increaseRemaining">
+                        <service-call name="create#mantle.shipment.ShipmentItemSource"
+                                in-map="context + [quantity:increaseRemaining, quantityNotHandled:increaseRemaining, statusId:'SisPending']"/>
+                    </else-if></if>
+                </if>
+                <if condition="quantityChange &lt; 0">
+                    <!-- quantity reduce, find SIS records with no orderId and update those first, if any left pull from those from orders -->
+                    <set field="reduceRemaining" from="-quantityChange"/>
+                    <iterate list="noOrderSisList" entry="sis">
+                        <set field="currentChange" from="reduceRemaining &gt; (sis.quantityNotHandled?:0) ?
+                                (sis.quantityNotHandled?:0) : reduceRemaining"/>
+                        <if condition="currentChange">
+                            <set field="sis.quantity" from="(sis.quantity ?: 0) - currentChange"/>
+                            <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) - currentChange"/>
+                            <if condition="sis.quantity == 0 &amp;&amp; !sis.orderId"><then>
+                                <entity-delete value-field="sis"/>
+                            </then><else>
                                 <entity-update value-field="sis"/>
-                                <set field="reduceRemaining" from="reduceRemaining - currentChange"/>
-                                <if condition="reduceRemaining == 0"><break/></if>
-                            </if>
-                        </iterate>
-                    </if>
-                </else>
-            </if>
+                            </else></if>
+                            <set field="reduceRemaining" from="reduceRemaining - currentChange"/>
+                            <if condition="reduceRemaining == 0"><break/></if>
+                        </if>
+                    </iterate>
+                    <iterate list="orderSisList" entry="sis">
+                        <set field="currentChange" from="reduceRemaining &gt; (sis.quantityNotHandled?:0) ?
+                                (sis.quantityNotHandled?:0) : reduceRemaining"/>
+                        <if condition="currentChange">
+                            <set field="sis.quantity" from="(sis.quantity ?: 0) - currentChange"/>
+                            <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) - currentChange"/>
+                            <entity-update value-field="sis"/>
+                            <set field="reduceRemaining" from="reduceRemaining - currentChange"/>
+                            <if condition="reduceRemaining == 0"><break/></if>
+                        </if>
+                    </iterate>
+                </if>
+            </else></if>
         </actions>
     </service>
     <service verb="ensure" noun="ShipmentItemQuantityRemaining">
@@ -361,7 +357,7 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem"/>
-            <if condition="shipmentItem">
+            <if condition="shipmentItem"><then>
                 <entity-find-one entity-name="mantle.shipment.ShipmentItemDetail" value-field="shipmentItemDetail">
                     <field-map field-name="shipmentId"/><field-map field-name="productId"/>
                 </entity-find-one>
@@ -372,13 +368,11 @@ along with this software (see the LICENSE.md file). If not, see
                             in-map="[shipmentId:shipmentId, productId:productId,
                                 quantity:(shipmentItem.quantity + incrementQuantity)]"/>
                 </if>
-
-                <else>
-                    <!-- no ShipmentItem at all, create one -->
-                    <service-call name="mantle.shipment.ShipmentServices.create#ShipmentItem"
-                            in-map="[shipmentId:shipmentId, productId:productId, quantity:newQuantityRemaining]"/>
-                </else>
-            </if>
+            </then><else>
+                <!-- no ShipmentItem at all, create one -->
+                <service-call name="mantle.shipment.ShipmentServices.create#ShipmentItem"
+                        in-map="[shipmentId:shipmentId, productId:productId, quantity:newQuantityRemaining]"/>
+            </else></if>
         </actions>
     </service>
 
@@ -398,7 +392,6 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[shipmentId:shipmentId, shipmentPackageSeqId:shipmentPackageSeqId,
                                 shipmentRouteSegmentSeqId:srs.shipmentRouteSegmentSeqId]"/>
             </iterate>
-
         </actions>
     </service>
 
@@ -629,17 +622,14 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find-one entity-name="mantle.facility.Facility" value-field="dockFacility">
                 <field-map field-name="facilityId" from="workEffort.facilityId"/></entity-find-one>
-            <if condition="dockFacility &amp;&amp; dockFacility.facilityTypeEnumId != 'FcTpWarehouse'">
-                <!-- for any of these alternatives originFacilityId may still be null -->
-                <then>
-                    <entity-find-one entity-name="mantle.facility.Facility" value-field="warehouseFacility">
-                        <field-map field-name="facilityId" from="dockFacility.parentFacilityId"/></entity-find-one>
-                </then>
-                <else-if condition="dockFacility?.facilityTypeEnumId == 'FcTpWarehouse'">
-                    <set field="warehouseFacility" from="dockFacility"/>
-                    <set field="dockFacility" from="null"/>
-                </else-if>
-            </if>
+            <!-- for any of these alternatives originFacilityId may still be null -->
+            <if condition="dockFacility &amp;&amp; dockFacility.facilityTypeEnumId != 'FcTpWarehouse'"><then>
+                <entity-find-one entity-name="mantle.facility.Facility" value-field="warehouseFacility">
+                    <field-map field-name="facilityId" from="dockFacility.parentFacilityId"/></entity-find-one>
+            </then><else-if condition="dockFacility?.facilityTypeEnumId == 'FcTpWarehouse'">
+                <set field="warehouseFacility" from="dockFacility"/>
+                <set field="dockFacility" from="null"/>
+            </else-if></if>
 
             <entity-find entity-name="mantle.work.effort.WorkEffortAssetAndAssign" list="assignedAssetList">
                 <date-filter/><econdition field-name="workEffortId"/><order-by field-name="assetName"/></entity-find>
@@ -663,77 +653,72 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <iterate list="pickInfoOut.productInfoList" entry="curProductInfo">
                     <set field="productInfo" from="productInfoMap.get(curProductInfo.productId)"/>
-                    <if condition="productInfo">
-                        <then>
-                            <!-- merge curProductInfo into productInfo -->
-                            <set field="productInfo.quantity" from="productInfo.quantity + curProductInfo.quantity"/>
+                    <if condition="productInfo"><then>
+                        <!-- merge curProductInfo into productInfo -->
+                        <set field="productInfo.quantity" from="productInfo.quantity + curProductInfo.quantity"/>
 
-                            <iterate list="curProductInfo.productReservedLocationInfoMap" entry="curLocationInfo" key="assetLocKey">
-                                <set field="locationInfo" from="productInfo.productReservedLocationInfoMap.get(assetLocKey)"/>
-                                <if condition="locationInfo">
-                                    <then>
-                                        <iterate list="curLocationInfo.quantityByBin" entry="quantity" key="binLocationNumber">
-                                            <script>StupidUtilities.addToBigDecimalInMap(binLocationNumber, quantity, locationInfo.quantityByBin)</script>
-                                        </iterate>
-                                    </then>
-                                    <else><script>productInfo.productReservedLocationInfoMap.put(assetLocKey, curLocationInfo)</script></else>
-                                </if>
-                            </iterate>
-                            <iterate list="curProductInfo.productOtherLocationInfoMap" entry="curLocationInfo" key="assetLocKey">
-                                <set field="locationInfo" from="productInfo.productOtherLocationInfoMap.get(assetLocKey)"/>
-                                <if condition="locationInfo">
-                                    <then>
-                                        <iterate list="curLocationInfo.quantityByBin" entry="quantity" key="binLocationNumber">
-                                            <script>StupidUtilities.addToBigDecimalInMap(binLocationNumber, quantity, locationInfo.quantityByBin)</script>
-                                        </iterate>
-                                    </then>
-                                    <else><script>productInfo.productReservedLocationInfoMap.put(assetLocKey, curLocationInfo)</script></else>
-                                </if>
-                            </iterate>
-                        </then>
-                        <else><script>productInfoMap.put(curProductInfo.productId, curProductInfo)</script></else>
-                    </if>
+                        <iterate list="curProductInfo.productReservedLocationInfoMap" entry="curLocationInfo" key="assetLocKey">
+                            <set field="locationInfo" from="productInfo.productReservedLocationInfoMap.get(assetLocKey)"/>
+                            <if condition="locationInfo"><then>
+                                <iterate list="curLocationInfo.quantityByBin" entry="quantity" key="binLocationNumber">
+                                    <script>StupidUtilities.addToBigDecimalInMap(binLocationNumber, quantity, locationInfo.quantityByBin)</script>
+                                </iterate>
+                            </then><else>
+                                <script>productInfo.productReservedLocationInfoMap.put(assetLocKey, curLocationInfo)</script>
+                            </else></if>
+                        </iterate>
+                        <iterate list="curProductInfo.productOtherLocationInfoMap" entry="curLocationInfo" key="assetLocKey">
+                            <set field="locationInfo" from="productInfo.productOtherLocationInfoMap.get(assetLocKey)"/>
+                            <if condition="locationInfo"><then>
+                                <iterate list="curLocationInfo.quantityByBin" entry="quantity" key="binLocationNumber">
+                                    <script>StupidUtilities.addToBigDecimalInMap(binLocationNumber, quantity, locationInfo.quantityByBin)</script>
+                                </iterate>
+                            </then><else>
+                                <script>productInfo.productReservedLocationInfoMap.put(assetLocKey, curLocationInfo)</script>
+                            </else></if>
+                        </iterate>
+                    </then><else>
+                        <script>productInfoMap.put(curProductInfo.productId, curProductInfo)</script>
+                    </else></if>
                 </iterate>
 
                 <iterate list="pickInfoOut.reservedLocationInfoMap" entry="curLocationInfo" key="assetLocKey">
                     <set field="locationInfo" from="reservedLocationInfoMap.get(assetLocKey)"/>
-                    <if condition="locationInfo">
-                        <then>
-                            <!-- merge curLocationInfo into locationInfo -->
-                            <iterate list="curLocationInfo.productInfoMap" entry="curProductInfo" key="productId">
-                                <set field="productInfo" from="locationInfo.productInfoMap.get(productId)"/>
-                                <if condition="productInfo">
-                                    <then>
-                                        <iterate list="curProductInfo.quantityByBin" entry="quantity" key="binLocationNumber">
-                                            <script>StupidUtilities.addToBigDecimalInMap(binLocationNumber, quantity, productInfo.quantityByBin)</script>
-                                        </iterate>
-                                    </then>
-                                    <else><script>locationInfo.productInfoMap.put(productId, curProductInfo)</script></else>
-                                </if>
-                            </iterate>
-                        </then>
-                        <else><script>reservedLocationInfoMap.put(assetLocKey, curLocationInfo)</script></else>
-                    </if>
+                    <if condition="locationInfo"><then>
+                        <!-- merge curLocationInfo into locationInfo -->
+                        <iterate list="curLocationInfo.productInfoMap" entry="curProductInfo" key="productId">
+                            <set field="productInfo" from="locationInfo.productInfoMap.get(productId)"/>
+                            <if condition="productInfo">
+                                <then>
+                                    <iterate list="curProductInfo.quantityByBin" entry="quantity" key="binLocationNumber">
+                                        <script>StupidUtilities.addToBigDecimalInMap(binLocationNumber, quantity, productInfo.quantityByBin)</script>
+                                    </iterate>
+                                </then>
+                                <else><script>locationInfo.productInfoMap.put(productId, curProductInfo)</script></else>
+                            </if>
+                        </iterate>
+                    </then><else>
+                        <script>reservedLocationInfoMap.put(assetLocKey, curLocationInfo)</script>
+                    </else></if>
                 </iterate>
                 <iterate list="pickInfoOut.otherLocationInfoMap" entry="curLocationInfo" key="assetLocKey">
                     <set field="locationInfo" from="otherLocationInfoMap.get(assetLocKey)"/>
-                    <if condition="locationInfo">
-                        <then>
-                            <!-- merge curLocationInfo into locationInfo -->
-                            <iterate list="curLocationInfo.productInfoMap" entry="curProductInfo" key="productId">
-                                <set field="productInfo" from="locationInfo.productInfoMap.get(productId)"/>
-                                <if condition="productInfo">
-                                    <then>
-                                        <iterate list="curProductInfo.quantityByBin" entry="quantity" key="binLocationNumber">
-                                            <script>StupidUtilities.addToBigDecimalInMap(binLocationNumber, quantity, productInfo.quantityByBin)</script>
-                                        </iterate>
-                                    </then>
-                                    <else><script>locationInfo.productInfoMap.put(productId, curProductInfo)</script></else>
-                                </if>
-                            </iterate>
-                        </then>
-                        <else><script>otherLocationInfoMap.put(assetLocKey, curLocationInfo)</script></else>
-                    </if>
+                    <if condition="locationInfo"><then>
+                        <!-- merge curLocationInfo into locationInfo -->
+                        <iterate list="curLocationInfo.productInfoMap" entry="curProductInfo" key="productId">
+                            <set field="productInfo" from="locationInfo.productInfoMap.get(productId)"/>
+                            <if condition="productInfo">
+                                <then>
+                                    <iterate list="curProductInfo.quantityByBin" entry="quantity" key="binLocationNumber">
+                                        <script>StupidUtilities.addToBigDecimalInMap(binLocationNumber, quantity, productInfo.quantityByBin)</script>
+                                    </iterate>
+                                </then>
+                                <else><script>locationInfo.productInfoMap.put(productId, curProductInfo)</script></else>
+                            </if>
+                        </iterate>
+                    </then><else>
+                        <script>otherLocationInfoMap.put(assetLocKey, curLocationInfo)</script>
+                    </else></if>
                 </iterate>
             </iterate>
 
@@ -1052,19 +1037,16 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="quantityRemaining" from="quantity"/>
 
             <!-- first issue based on AssetReservation records if available -->
-            <if condition="assetReservation">
-                <then>
-                    <set field="assetReservationList" from="[assetReservation]"/>
-                </then>
-                <else-if condition="!assetReservationList">
-                    <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetReservationList">
-                        <econdition field-name="orderId" from="shipmentItemSource.orderId"/>
-                        <econdition field-name="orderItemSeqId" from="shipmentItemSource.orderItemSeqId"/>
-                        <econdition field-name="quantityNotIssued" operator="greater" from="0"/>
-                        <econdition field-name="assetId" ignore-if-empty="true"/>
-                    </entity-find>
-                </else-if>
-            </if>
+            <if condition="assetReservation"><then>
+                <set field="assetReservationList" from="[assetReservation]"/>
+            </then><else-if condition="!assetReservationList">
+                <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetReservationList">
+                    <econdition field-name="orderId" from="shipmentItemSource.orderId"/>
+                    <econdition field-name="orderItemSeqId" from="shipmentItemSource.orderItemSeqId"/>
+                    <econdition field-name="quantityNotIssued" operator="greater" from="0"/>
+                    <econdition field-name="assetId" ignore-if-empty="true"/>
+                </entity-find>
+            </else-if></if>
             <if condition="assetReservationList">
                 <!-- issue based on reservations -->
                 <iterate list="assetReservationList" entry="assetReservation">
@@ -1104,8 +1086,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- quantityRemaining? something didn't work, wasn't able to get all so return an error and roll back -->
             <if condition="quantityRemaining">
-                <return error="true" message="Unable to issue ${quantityRemaining} out of quantity specified (${quantity}) for Shipment Item Source [${shipmentItemSourceId}], not packing"/>
-            </if>
+                <return error="true" message="Unable to issue ${quantityRemaining} out of quantity specified (${quantity}) for Shipment Item Source [${shipmentItemSourceId}], not packing"/></if>
 
             <!-- if no shipmentPackageSeqId find the first package -->
             <if condition="!shipmentPackageSeqId">
@@ -1126,22 +1107,19 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="productId" from="shipmentItemSource.productId"/>
                 <field-map field-name="shipmentPackageSeqId"/>
             </entity-find-one>
-            <if condition="shipmentPackageContent">
+            <if condition="shipmentPackageContent"><then>
                 <set field="shipmentPackageContent.quantity" from="shipmentPackageContent.quantity + quantity"/>
                 <entity-update value-field="shipmentPackageContent"/>
-
-                <else>
-                    <service-call name="create#mantle.shipment.ShipmentPackageContent"
-                            in-map="[shipmentId:shipmentItemSource.shipmentId, productId:shipmentItemSource.productId,
-                                shipmentPackageSeqId:shipmentPackageSeqId, quantity:quantity]"/>
-                </else>
-            </if>
+            </then><else>
+                <service-call name="create#mantle.shipment.ShipmentPackageContent"
+                        in-map="[shipmentId:shipmentItemSource.shipmentId, productId:shipmentItemSource.productId,
+                            shipmentPackageSeqId:shipmentPackageSeqId, quantity:quantity]"/>
+            </else></if>
 
             <!-- update quantityNotHandled to get ready for the next pack call -->
             <set field="shipmentItemSource.quantityNotHandled" from="shipmentItemSource.quantityNotHandled - quantity"/>
             <if condition="shipmentItemSource.quantityNotHandled &lt;= 0">
-                <set field="shipmentItemSource.statusId" value="SisPacked"/>
-            </if>
+                <set field="shipmentItemSource.statusId" value="SisPacked"/></if>
             <entity-update value-field="shipmentItemSource"/>
 
             <!-- on Shipment Item Packed mark Order as Completed (IF all order part items are completed) -->
@@ -1232,8 +1210,7 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <!-- update quantityNotHandled and status -->
                 <if condition="shipmentItemSource.quantityNotHandled &lt;= 0">
-                    <set field="shipmentItemSource.statusId" value="SisReceived"/>
-                </if>
+                    <set field="shipmentItemSource.statusId" value="SisReceived"/></if>
                 <entity-update value-field="shipmentItemSource"/>
 
                 <!-- on Shipment Item Received mark Order as Completed (IF all order part items are completed) -->
