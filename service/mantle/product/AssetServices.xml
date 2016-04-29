@@ -61,19 +61,38 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true"/>
+
             <!-- <log message="========== start update#AssetFromDetail ${assetId}: ${availableToPromiseDiff}/${quantityOnHandDiff} :: ${asset.availableToPromiseTotal}/${asset.quantityOnHandTotal}"/> -->
-            <!-- view-entity with sum function approach, doesn't work with TransactionCache:
-            <entity-find-one entity-name="AssetDetailSummary" value-field="assetDetailSummary"/>
-            <set field="asset.availableToPromiseTotal" from="assetDetailSummary.availableToPromiseTotal ?: 0"/>
-            <set field="asset.quantityOnHandTotal" from="assetDetailSummary.quantityOnHandTotal ?: 0"/>
-            -->
-            <set field="asset.availableToPromiseTotal" from="(asset.availableToPromiseTotal ?: 0) + (availableToPromiseDiff ?: 0)"/>
-            <set field="asset.quantityOnHandTotal" from="(asset.quantityOnHandTotal ?: 0) + (quantityOnHandDiff ?: 0)"/>
+
+            <!-- View queries won't work with transaction cache (for data updated within the tx), so if active use different approach -->
+            <if condition="ec.transaction.isTransactionCacheActive()"><then>
+                <!-- incremental update -->
+                <set field="asset.availableToPromiseTotal" from="(asset.availableToPromiseTotal ?: 0) + (availableToPromiseDiff ?: 0)"/>
+                <set field="asset.quantityOnHandTotal" from="(asset.quantityOnHandTotal ?: 0) + (quantityOnHandDiff ?: 0)"/>
+            </then><else>
+                <!-- sum all records, update with new totals -->
+                <entity-find-one entity-name="mantle.product.asset.AssetDetailSummary" value-field="assetDetailSummary"/>
+                <if condition="assetDetailSummary != null"><then>
+                    <set field="asset.availableToPromiseTotal" from="assetDetailSummary.availableToPromiseTotal ?: 0"/>
+                    <set field="asset.quantityOnHandTotal" from="assetDetailSummary.quantityOnHandTotal ?: 0"/>
+                </then><else>
+                    <set field="asset.availableToPromiseTotal" from="(asset.availableToPromiseTotal ?: 0) + (availableToPromiseDiff ?: 0)"/>
+                    <set field="asset.quantityOnHandTotal" from="(asset.quantityOnHandTotal ?: 0) + (quantityOnHandDiff ?: 0)"/>
+                </else></if>
+            </else></if>
+
             <entity-update value-field="asset"/>
-            <!--
-            <set field="message" from="'========== end update#AssetFromDetail ' + assetId + ': ' + availableToPromiseDiff + '/' + quantityOnHandDiff + ' :: ' + asset.availableToPromiseTotal + '/' + asset.quantityOnHandTotal"/>
-            <log message="${message}"/>
-            -->
+
+            <!-- never let quantityOnHandTotal stay negative, do a physical inventory found for the difference -->
+            <!-- NOTE: this may be better to do at a higher level in some cases, but this will make sure -->
+            <if condition="asset.quantityOnHandTotal &lt; 0">
+                <service-call name="mantle.product.AssetServices.record#PhysicalInventoryChange"
+                        in-map="[productId:asset.productId, facilityId:asset.facilityId, locationSeqId:asset.locationSeqId,
+                            quantityChange:-asset.quantityOnHandTotal, varianceReasonEnumId:'InVrFound',
+                            assetList:[asset]]"/>
+            </if>
+
+            <!-- <set field="message" from="'========== end update#AssetFromDetail ' + assetId + ': ' + availableToPromiseDiff + '/' + quantityOnHandDiff + ' :: ' + asset.availableToPromiseTotal + '/' + asset.quantityOnHandTotal"/><log message="${message}"/> -->
         </actions>
     </service>
 
@@ -1149,7 +1168,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
             </if>
             <!-- <log level="warn" message="======= Changing product [${productId}] in facility [${facilityId}:${locationSeqId}] by ${quantityChange}; assetList: ${assetList}"/> -->
-            <if condition="quantityChange &gt; 0">
+            <if condition="quantityChange &gt; 0"><then>
                 <set field="quantityRemaining" from="quantityChange"/>
                 <iterate list="assetList" entry="asset">
                     <!-- NOTE: no real reason for iterating here, will always add it all to the first Asset record; leaving it for now to make more complex logic easier in the future -->
@@ -1159,19 +1178,17 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="quantityRemaining" from="quantityRemaining - quantityDiff"/>
                     <if condition="quantityRemaining == 0"><break/></if>
                 </iterate>
-
-                <else-if condition="quantityChange &lt; 0">
-                    <set field="quantityRemaining" from="-quantityChange"/>
-                    <iterate list="assetList" entry="asset">
-                        <set field="quantityDiff" from="quantityRemaining &gt; asset.quantityOnHandTotal ? asset.quantityOnHandTotal : quantityRemaining"/>
-                        <if condition="quantityDiff != 0">
-                            <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="context +
-                                    [assetId:asset.assetId, quantityDiff:-quantityDiff]"/></if>
-                        <set field="quantityRemaining" from="quantityRemaining - quantityDiff"/>
-                        <if condition="quantityRemaining == 0"><break/></if>
-                    </iterate>
-                </else-if>
-            </if>
+            </then><else-if condition="quantityChange &lt; 0">
+                <set field="quantityRemaining" from="-quantityChange"/>
+                <iterate list="assetList" entry="asset">
+                    <set field="quantityDiff" from="quantityRemaining &gt; asset.quantityOnHandTotal ? asset.quantityOnHandTotal : quantityRemaining"/>
+                    <if condition="quantityDiff != 0">
+                        <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="context +
+                                [assetId:asset.assetId, quantityDiff:-quantityDiff]"/></if>
+                    <set field="quantityRemaining" from="quantityRemaining - quantityDiff"/>
+                    <if condition="quantityRemaining == 0"><break/></if>
+                </iterate>
+            </else-if></if>
         </actions>
     </service>
 </services>
