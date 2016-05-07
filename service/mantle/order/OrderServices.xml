@@ -55,6 +55,11 @@ h2. General Order Placement and eCommerce Usage
             <parameter name="shipmentItemSourceList" type="List"><parameter name="sis" type="Map">
                 <auto-parameters entity-name="mantle.shipment.ShipmentItemSource"/></parameter></parameter>
             <parameter name="shipmentIdSet" type="Set"><parameter name="shipmentId"/></parameter>
+            <parameter name="quantityNotShippedByItem" type="Map">
+                <description>Key is orderItemSeqId, value is quantity not shipped for item.</description></parameter>
+            <parameter name="quantityNotShippedByPart" type="Map">
+                <description>Key is orderPartSeqId, value is quantity not shipped for all items in part.</description></parameter>
+
             <parameter name="orderItemBillingList" type="List"><parameter name="oib" type="Map">
                 <auto-parameters entity-name="mantle.order.OrderItemBilling"/></parameter></parameter>
             <parameter name="invoiceIdSet" type="Set"><parameter name="invoiceId"/></parameter>
@@ -170,17 +175,34 @@ h2. General Order Placement and eCommerce Usage
                                 orderItemList.indexMatching([orderItemSeqId:orderItem.parentItemSeqId])+1)
                     }
                 }
-                ]]></script>
+            ]]></script>
 
             <entity-find-related value-field="orderHeader" relationship-name="mantle.account.payment.Payment"
                     list="paymentList" order-by-list="['paymentId']"/>
-            
-            <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList">
-                <econdition field-name="orderId"/></entity-find>
-            <set field="shipmentIdSet" from="new TreeSet()"/>
-            <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
-                <script>shipmentIdSet.add(shipmentItemSource.shipmentId)</script></iterate>
 
+            <!-- get ShipmentItemSource list and derived data -->
+            <entity-find entity-name="mantle.shipment.ShipmentAndItemSource" list="shipmentItemSourceList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="shipmentStatusId" operator="not-in" value="ShipRejected,ShipCancelled"/>
+                <econdition field-name="statusId" operator="not-equals" value="SisCancelled"/>
+            </entity-find>
+            <set field="shipmentIdSet" from="new TreeSet()"/>
+            <set field="quantityNotShippedByItem" from="[:]"/>
+            <set field="quantityNotShippedByPart" from="[:]"/>
+            <iterate list="orderItemList" entry="orderItem"><script>
+                def orderItemQuantity = (orderItem.quantity ?: 1) * (orderItem.selectedAmount ?: 1)
+                StupidUtilities.addToBigDecimalInMap(orderItem.orderItemSeqId, orderItemQuantity, quantityNotShippedByItem)
+                StupidUtilities.addToBigDecimalInMap(orderItem.orderPartSeqId, orderItemQuantity, quantityNotShippedByPart)
+            </script></iterate>
+            <iterate list="shipmentItemSourceList" entry="shipmentItemSource"><script>
+                def curOrderItem = orderItemList.find({ it.orderItemSeqId == shipmentItemSource.orderItemSeqId })
+                shipmentIdSet.add(shipmentItemSource.shipmentId)
+                StupidUtilities.addToBigDecimalInMap(curOrderItem.orderItemSeqId, -shipmentItemSource.quantity, quantityNotShippedByItem)
+                StupidUtilities.addToBigDecimalInMap(curOrderItem.orderPartSeqId, -shipmentItemSource.quantity, quantityNotShippedByPart)
+            </script></iterate>
+
+            <!-- get OrderItemBilling list and derived data -->
+            <!-- TODO: exclude OrderItemBilling records for cancelled invoices -->
             <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
                 <econdition field-name="orderId"/><order-by field-name="orderItemSeqId"/></entity-find>
             <set field="invoiceIdSet" from="new TreeSet()"/>
@@ -198,18 +220,21 @@ h2. General Order Placement and eCommerce Usage
                 StupidUtilities.addToBigDecimalInMap(curOrderItem.orderPartSeqId, -orderItemBilling.quantity, quantityNotBilledByPart)
             </script></iterate>
 
+            <!-- get ReturnItem list -->
             <entity-find entity-name="mantle.order.return.ReturnItem" list="returnItemList">
                 <econdition field-name="orderId"/>
                 <econdition field-name="statusId" operator="not-equals" value="ReturnCancelled"/>
                 <order-by field-name="orderItemSeqId"/>
             </entity-find>
 
+            <!-- get RequestItemOrder list and derived data -->
             <entity-find entity-name="mantle.request.RequestItemOrder" list="requestItemOrderList">
                 <econdition field-name="orderId"/></entity-find>
             <set field="requestIdSet" from="new TreeSet()"/>
             <iterate list="requestItemOrderList" entry="requestItemOrder">
                 <script>requestIdSet.add(requestItemOrder.requestId)</script></iterate>
 
+            <!-- get order status history from EntityAuditLog -->
             <entity-find entity-name="moqui.entity.EntityAuditLog" list="statusHistoryList">
                 <econdition field-name="changedEntityName" value="mantle.order.OrderHeader"/>
                 <econdition field-name="changedFieldName" value="statusId"/>
@@ -526,7 +551,7 @@ h2. General Order Placement and eCommerce Usage
 
             <parameter name="orderPartSeqId" required="true"/>
             <parameter name="itemTypeEnumId" default-value="ItemProduct"/>
-            <parameter name="quantity" type="BigDecimal" default-value="1"/>
+            <parameter name="quantity" type="BigDecimal" default="1"/>
         </in-parameters>
         <out-parameters>
             <parameter name="orderItemSeqId" required="true"/>
@@ -653,7 +678,7 @@ h2. General Order Placement and eCommerce Usage
 
             <parameter name="productId" required="true"/>
             <parameter name="description"/>
-            <parameter name="quantity" type="BigDecimal" default-value="1"/>
+            <parameter name="quantity" type="BigDecimal" default="1"/>
             <parameter name="itemTypeEnumId" default-value="ItemProduct"/>
             <parameter name="unitAmount" type="BigDecimal"/>
             <parameter name="requiredByDate" type="Timestamp"/>
