@@ -286,13 +286,17 @@ class OrderToCashBasicFlow extends Specification {
                 productId="DEMO_3_1" assetIssuanceId="55501"/>
 
             <!-- this is an auto-created Asset based on the inventory issuance -->
-            <mantle.product.asset.Asset assetId="55500" quantityOnHandTotal="-7" availableToPromiseTotal="-7"/>
+            <mantle.product.asset.Asset assetId="55500" quantityOnHandTotal="0" availableToPromiseTotal="0"/>
             <mantle.product.issuance.AssetIssuance assetIssuanceId="55502" assetId="55500" assetReservationId="55502"
                 orderId="${cartOrderId}" orderItemSeqId="03" shipmentId="${shipResult.shipmentId}" productId="DEMO_2_1"
                 quantity="7"/>
             <mantle.product.asset.AssetDetail assetDetailId="55505" assetId="55500" effectiveDate="${effectiveTime}"
                 quantityOnHandDiff="-7" assetReservationId="55502" shipmentId="${shipResult.shipmentId}"
                 productId="DEMO_2_1" assetIssuanceId="55502"/>
+            <!-- the automatic physical inventory found record because QOH went below zero -->
+            <mantle.product.asset.AssetDetail assetDetailId="55506" assetId="55500" physicalInventoryId="100000"
+                availableToPromiseDiff="7" quantityOnHandDiff="7" productId="DEMO_2_1" varianceReasonEnumId="InVrFound"
+                acctgTransResultEnumId="AtrNoAcquireCost"/>
         </entity-facade-xml>""").check()
         logger.info("validate Asset Issuance data check results: ")
         for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)

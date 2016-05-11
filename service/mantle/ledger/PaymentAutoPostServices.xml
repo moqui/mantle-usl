@@ -12,7 +12,7 @@ You should have received a copy of the CC0 Public Domain Dedication
 along with this software (see the LICENSE.md file). If not, see
 <http://creativecommons.org/publicdomain/zero/1.0/>.
 -->
-<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-1.6.xsd">
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.0.xsd">
 
     <service verb="post" noun="Payment">
         <in-parameters><parameter name="paymentId" required="true"/></in-parameters>
@@ -73,25 +73,24 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- get applied and unapplied totals, are posted differently -->
             <set field="appliedTotal" from="0"/>
             <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
-                <econdition field-name="paymentId"/>
-            </entity-find>
+                <econdition field-name="paymentId"/></entity-find>
             <iterate list="paymentApplicationList" entry="paymentApplication">
-                <set field="appliedTotal" from="appliedTotal + paymentApplication.amountApplied"/>
-            </iterate>
+                <set field="appliedTotal" from="appliedTotal + paymentApplication.amountApplied"/></iterate>
             <set field="unappliedTotal" from="payment.amount - appliedTotal"/>
 
             <!-- create entries for applied and unapplied totals, as applicable, based on Payment type -->
 
             <!-- Payment Type entry for from Party (outgoing) -->
             <if condition="fromPartyAcctgPreference">
-                <if condition="appliedTotal">
+                <iterate list="paymentApplicationList" entry="paymentApplication">
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:fromPartyAcctgPreference,
                                 acctgTrans:fromAcctgTrans, amount:appliedTotal,
                                 organizationPartyId:payment.fromPartyId, otherPartyId:payment.toPartyId,
-                                isApplied:'Y', debitCreditFlag:'D', useErrorJournal:useErrorJournal]"
+                                isApplied:'Y', paymentApplication:paymentApplication,
+                                debitCreditFlag:'D', useErrorJournal:useErrorJournal]"
                             out-map="context"/>
-                </if>
+                </iterate>
                 <if condition="unappliedTotal">
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:fromPartyAcctgPreference,
@@ -103,14 +102,15 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <!-- Payment Type entry for to Party (incoming) -->
             <if condition="toPartyAcctgPreference">
-                <if condition="appliedTotal">
+                <iterate list="paymentApplicationList" entry="paymentApplication">
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:toPartyAcctgPreference,
                                 acctgTrans:toAcctgTrans, amount:appliedTotal,
                                 organizationPartyId:payment.toPartyId, otherPartyId:payment.fromPartyId,
-                                isApplied:'Y', debitCreditFlag:'C', useErrorJournal:useErrorJournal]"
+                                isApplied:'Y', paymentApplication:paymentApplication,
+                                debitCreditFlag:'C', useErrorJournal:useErrorJournal]"
                             out-map="context"/>
-                </if>
+                </iterate>
                 <if condition="unappliedTotal">
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:toPartyAcctgPreference,
@@ -265,6 +265,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="organizationPartyId" required="true"/>
             <parameter name="otherPartyId" required="true"/>
             <parameter name="isApplied" required="true"/>
+            <parameter name="paymentApplication" type="EntityValue"/>
             <parameter name="debitCreditFlag" required="true"/>
             <parameter name="useErrorJournal" type="Boolean" required="true"/>
         </in-parameters>
@@ -274,7 +275,7 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <service-call name="mantle.ledger.PaymentAutoPostServices.get#PaymentTypeGlAccount"
                     in-map="[paymentId:payment.paymentId, organizationPartyId:organizationPartyId,
-                        otherPartyId:otherPartyId, isApplied:isApplied]"
+                        otherPartyId:otherPartyId, isApplied:isApplied, paymentApplication:paymentApplication]"
                     out-map="paymentGlAccountOut"/>
             <set field="paymentGlAccountId" from="paymentGlAccountOut?.glAccountId"/>
             <set field="paymentGlAccountTypeEnumId" from="paymentGlAccountOut?.glAccountTypeEnumId"/>
@@ -292,6 +293,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="organizationPartyId" required="true"/>
             <parameter name="otherPartyId"/>
             <parameter name="isApplied" required="true"/>
+            <parameter name="paymentApplication" type="EntityValue"/>
         </in-parameters>
         <out-parameters>
             <parameter name="glAccountId"/>
@@ -301,24 +303,48 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
             <service-call name="mantle.ledger.LedgerServices.expand#ParentOrganizationList" out-map="context"
                     in-map="[organizationPartyId:organizationPartyId]"/>
-
             <set field="isPayable" from="organizationPartyId == payment.fromPartyId ? 'Y' : 'N'"/>
-            <entity-find entity-name="mantle.ledger.config.PaymentTypeGlAccount" list="paymentTypeGlAccountList" cache="true">
-                <econdition field-name="organizationPartyId" operator="in" from="orgPartyIdList"/>
-                <econdition field-name="paymentTypeEnumId" from="payment.paymentTypeEnumId"/>
-                <econdition field-name="isApplied"/>
-                <econdition field-name="isPayable"/>
-            </entity-find>
-            <if condition="!paymentTypeGlAccountList">
-                <!-- try isApplied=E -->
+
+            <!-- if we have a paymentApplication with a corresponding Invoice determine the GL account from the invoice
+                type; this is essentially the same code as in post#Invoice -->
+            <if condition="paymentApplication != null &amp;&amp; paymentApplication.invoiceId">
+                <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice">
+                    <field-map field-name="invoiceId" from="paymentApplication.invoiceId"/></entity-find-one>
+                <service-call name="mantle.ledger.InvoiceAutoPostServices.get#InvoiceTypeTransType" out-map="invoiceTypeTransTypeOut"
+                        in-map="[invoiceTypeEnumId:invoice.invoiceTypeEnumId, organizationPartyId:organizationPartyId, isPayable:isPayable]"/>
+
+                <set field="glAccountId" from="invoiceTypeTransTypeOut.glAccountId"/>
+                <if condition="!glAccountId">
+                    <set field="glAccountTypeEnumId" from="isPayable == 'Y' ? 'GatAccountsPayable' : 'GatAccountsReceivable'"/>
+                    <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType"
+                            out-map="invoiceBalanceGlAccountOut" out-map-add-to-existing="false"
+                            in-map="[glAccountTypeEnumId:glAccountTypeEnumId,
+                                acctgTransTypeEnumId:invoiceTypeTransTypeOut.acctgTransTypeEnumId,
+                                organizationPartyId:organizationPartyId, otherPartyId:otherPartyId]"/>
+                    <set field="glAccountId" from="invoiceBalanceGlAccountOut.glAccountId"/>
+                </if>
+            </if>
+
+            <!-- otherwise find glAccountId by PaymentTypeGlAccount record -->
+            <if condition="!glAccountId">
                 <entity-find entity-name="mantle.ledger.config.PaymentTypeGlAccount" list="paymentTypeGlAccountList" cache="true">
                     <econdition field-name="organizationPartyId" operator="in" from="orgPartyIdList"/>
                     <econdition field-name="paymentTypeEnumId" from="payment.paymentTypeEnumId"/>
-                    <econdition field-name="isApplied" value="E"/>
+                    <econdition field-name="isApplied"/>
                     <econdition field-name="isPayable"/>
                 </entity-find>
+                <if condition="!paymentTypeGlAccountList">
+                    <!-- try isApplied=E -->
+                    <entity-find entity-name="mantle.ledger.config.PaymentTypeGlAccount" list="paymentTypeGlAccountList" cache="true">
+                        <econdition field-name="organizationPartyId" operator="in" from="orgPartyIdList"/>
+                        <econdition field-name="paymentTypeEnumId" from="payment.paymentTypeEnumId"/>
+                        <econdition field-name="isApplied" value="E"/>
+                        <econdition field-name="isPayable"/>
+                    </entity-find>
+                </if>
+                <set field="glAccountId" from="paymentTypeGlAccountList.first?.glAccountId"/>
             </if>
-            <set field="glAccountId" from="paymentTypeGlAccountList.first?.glAccountId"/>
+
             <if condition="glAccountId">
                 <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" cache="true">
                     <field-map field-name="glAccountId"/></entity-find-one>
@@ -473,7 +499,8 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[payment:payment, partyAcctgPreference:fromPartyAcctgPreference,
                             acctgTrans:fromAcctgTrans, amount:paymentApplication.amountApplied,
                             organizationPartyId:payment.fromPartyId, otherPartyId:payment.toPartyId,
-                            isApplied:'Y', debitCreditFlag:'D', useErrorJournal:useErrorJournal]"
+                            isApplied:'Y', paymentApplication:paymentApplication,
+                            debitCreditFlag:'D', useErrorJournal:useErrorJournal]"
                         out-map="context"/>
                 <!-- credit unapplied account (was previously debited) -->
                 <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
@@ -490,7 +517,8 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[payment:payment, partyAcctgPreference:toPartyAcctgPreference,
                             acctgTrans:toAcctgTrans, amount:paymentApplication.amountApplied,
                             organizationPartyId:payment.toPartyId, otherPartyId:payment.fromPartyId,
-                            isApplied:'Y', debitCreditFlag:'C', useErrorJournal:useErrorJournal]"
+                            isApplied:'Y', paymentApplication:paymentApplication,
+                            debitCreditFlag:'C', useErrorJournal:useErrorJournal]"
                         out-map="context"/>
                 <!-- debit unapplied account (was previously credited) -->
                 <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
