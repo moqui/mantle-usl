@@ -41,12 +41,15 @@ class ReturnToResponseBasicFlow extends Specification {
     long effectiveTime = System.currentTimeMillis()
     @Shared
     long totalFieldsChecked = 0
+    @Shared
+    boolean kieEnabled = false
 
     def setupSpec() {
         // init the framework, get the ec
         ec = Moqui.getExecutionContext()
         // set an effective date so data check works, etc
         ec.user.setEffectiveTime(new Timestamp(effectiveTime))
+        kieEnabled = ec.factory.getToolFactory("KIE") != null
 
         ec.entity.tempSetSequencedIdPrimary("mantle.account.invoice.Invoice", 55700, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.account.financial.FinancialAccount", 55700, 10)
@@ -448,36 +451,36 @@ class ReturnToResponseBasicFlow extends Specification {
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
-            <financialAccounts finAccountId="55700" negativeBalanceLimit="0" availableBalance="22.59" actualBalance="22.59"
-                    ownerPartyId="CustJqp" organizationPartyId="ORG_ZIZI_RETAIL">
+            <financialAccounts finAccountId="55700" negativeBalanceLimit="0" availableBalance="${kieEnabled ? '22.59' : '28.59'}"
+                    actualBalance="${kieEnabled ? '22.59' : '28.59'}" ownerPartyId="CustJqp" organizationPartyId="ORG_ZIZI_RETAIL">
                 <!-- NOTE: expireDate is set to now when payment is captured, so not in the future as when created -->
-                <mantle.account.financial.FinancialAccountAuth finAccountAuthId="55700" amount="13.77" paymentId="55701"
+                <mantle.account.financial.FinancialAccountAuth finAccountAuthId="55700" amount="${kieEnabled ? '13.77' : '7.77'}" paymentId="55701"
                         authorizationDate="${effectiveTime}" expireDate="${effectiveTime}"/>
                 <mantle.account.method.PaymentGatewayResponse paymentGatewayResponseId="55700"
                         paymentGatewayConfigId="FinancialAccountLocal" amountUomId="USD" paymentId="55701"
-                        paymentOperationEnumId="PgoAuthorize" amount="13.77" resultDeclined="N" resultError="N"
+                        paymentOperationEnumId="PgoAuthorize" amount="${kieEnabled ? '13.77' : '7.77'}" resultDeclined="N" resultError="N"
                         transactionDate="${effectiveTime}" resultNsf="N" referenceNum="55700" resultSuccess="Y"/>
                 <mantle.account.financial.FinancialAccountTrans finAccountTransId="55701" fromPartyId="CustJqp"
                         toPartyId="ORG_ZIZI_RETAIL" finAccountTransTypeEnumId="FattWithdraw" reasonEnumId="FatrDisbursement"
-                        amount="-13.77" entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"
-                        transactionDate="${effectiveTime}" postBalance="22.59" finAccountAuthId="55700" performedByUserId="EX_JOHN_DOE"/>
+                        amount="${kieEnabled ? '-13.77' : '-7.77'}" entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"
+                        transactionDate="${effectiveTime}" postBalance="${kieEnabled ? '22.59' : '28.59'}" finAccountAuthId="55700" performedByUserId="EX_JOHN_DOE"/>
                 <mantle.account.method.PaymentGatewayResponse approvalCode="55701" paymentGatewayConfigId="FinancialAccountLocal"
                         responseCode="success" amountUomId="USD" resultDeclined="N" paymentGatewayResponseId="55701" paymentId="55701"
-                        paymentOperationEnumId="PgoCapture" amount="13.77" resultError="N" resultNsf="N" referenceNum="55701"
+                        paymentOperationEnumId="PgoCapture" amount="${kieEnabled ? '13.77' : '7.77'}" resultError="N" resultNsf="N" referenceNum="55701"
                         resultSuccess="Y" transactionDate="${effectiveTime}"/>
                 <mantle.account.payment.Payment paymentId="55701" fromPartyId="CustJqp" paymentGatewayConfigId="FinancialAccountLocal"
-                        amountUomId="USD" paymentTypeEnumId="PtInvoicePayment" finAccountTransId="55701" amount="13.77"
+                        amountUomId="USD" paymentTypeEnumId="PtInvoicePayment" finAccountTransId="55701" amount="${kieEnabled ? '13.77' : '7.77'}"
                         reconcileStatusId="PmtrNot" acctgTransResultEnumId="AtrSuccess" finAccountAuthId="55700" statusId="PmntDelivered"
                         paymentInstrumentEnumId="PiFinancialAccount" toPartyId="ORG_ZIZI_RETAIL" orderId="55701" orderPartSeqId="01">
                     <mantle.ledger.transaction.AcctgTrans acctgTransId="55705" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                             amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttIncomingPayment" glFiscalTypeEnumId="GLFT_ACTUAL"
                             transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
-                        <entries acctgTransEntrySeqId="01" amount="13.77" glAccountId="121000000" reconcileStatusId="AterNot"
+                        <entries acctgTransEntrySeqId="01" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="121000000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="GatAccountsReceivable" debitCreditFlag="C"/>
-                        <entries acctgTransEntrySeqId="02" amount="13.77" glAccountId="251100000" reconcileStatusId="AterNot"
+                        <entries acctgTransEntrySeqId="02" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="251100000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="GatCustomerCredits" debitCreditFlag="D"/>
                     </mantle.ledger.transaction.AcctgTrans>
-                    <applications amountApplied="13.77" appliedDate="${effectiveTime}" acctgTransResultEnumId="AtrPaymentNotPosted"
+                    <applications amountApplied="${kieEnabled ? '13.77' : '7.77'}" appliedDate="${effectiveTime}" acctgTransResultEnumId="AtrPaymentNotPosted"
                             paymentApplicationId="55700" invoiceId="55700"/>
                 </mantle.account.payment.Payment>
             </financialAccounts>
