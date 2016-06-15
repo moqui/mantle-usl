@@ -132,6 +132,140 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="get" noun="RollupOrganizationInfo">
+        <description>
+            Get rollup organizations a party (person or organization, in default current user's party) related to till
+            top of organzation structure.
+        </description>
+        <in-parameters><parameter name="partyId" default="ec.user.userAccount.partyId"/></in-parameters>
+        <out-parameters>
+            <parameter name="orgList" type="List"><parameter name="org" type="Map">
+                <auto-parameters entity-name="mantle.party.PartyDetail"/></parameter></parameter>
+            <parameter name="orgIds" type="List"><parameter name="orgId"/></parameter>
+        </out-parameters>
+        <actions>
+            <if condition="!partyId">
+                <log level="warn" message="Cannot get#RollupOrganizationInfo, no partyId is passed in or no user with partyId logged in"/>
+                <return/>
+            </if>
+
+            <set field="orgList" from="[]"/>
+            <set field="orgIdsHashSet" from="new HashSet()"/>
+
+            <entity-find-one entity-name="mantle.party.Party" value-field="pty"/>
+
+            <if condition="pty.partyTypeEnumId == 'PtyPerson'">
+                <!-- get person organization ids -->
+                <entity-find entity-name="mantle.party.PartyRelationship" list="orgRelList" cache="true">
+                    <date-filter/>
+                    <econdition field-name="relationshipTypeEnumId" operator="in" value="PrtAgent,PrtEmployee,PrtMember"/>
+                    <econdition field-name="toRoleTypeId" value="OrgInternal"/>
+                    <econdition field-name="fromPartyId" from="ec.user.userAccount.partyId"/>
+                </entity-find>
+                <iterate list="orgRelList" entry="orgRel">
+                    <script>orgIdsHashSet.add(orgRel.toPartyId)</script>
+                </iterate>
+            <else-if condition="pty.partyTypeEnumId == 'PtyOrganization'">
+                <script>orgIdsHashSet.add(partyId)</script>
+            </else-if></if>
+
+            <set field="orgIdsHashSetCopy" from="orgIdsHashSet.clone()"/>
+            <iterate list="orgIdsHashSetCopy" entry="orgId">
+                <set field="outMap" from="[:]"/>
+                <service-call name="mantle.party.PartyServices.get#RollupOrgs" in-map="[partyId: orgId]" out-map="outMap"/>
+                <script>orgIdsHashSet.addAll(outMap.orgIds)</script>
+            </iterate>
+
+            <set field="orgIds" from="new ArrayList(orgIdsHashSet)"/>
+            <iterate list="orgIds" entry="orgId">
+                <entity-find-one entity-name="mantle.party.PartyDetail" value-field="org" cache="true">
+                    <field-map field-name="partyId" from="orgId"/>
+                </entity-find-one>
+                <script>orgList.add(org)</script>
+            </iterate>
+
+        </actions>
+    </service>
+
+    <service verb="get" noun="RollupOrgs">
+        <in-parameters><parameter name="partyId" required="true"/></in-parameters>
+        <out-parameters><parameter name="orgIds" type="HashSet"/></out-parameters>
+        <actions>
+            <set field="orgIds" from="new HashSet()"/>
+            <entity-find entity-name="mantle.party.PartyRelationship" list="rollupOrgList">
+                <date-filter/>
+                <econdition field-name="relationshipTypeEnumId" value="PrtOrgRollup"/>
+                <econdition field-name="fromPartyId" from="partyId"/>
+            </entity-find>
+            <iterate list="rollupOrgList" entry="rollupOrg">
+                <set field="outMap" from="[:]"/>
+                <service-call name="mantle.party.PartyServices.get#RollupOrgs" in-map="[partyId: rollupOrg.toPartyId]" out-map="outMap"/>
+                <script>orgIds.add(rollupOrg.toPartyId); orgIds.addAll(outMap.orgIds)</script>
+            </iterate>
+        </actions>
+    </service>
+
+    <service verb="get" noun="UserRollupOrganizationInfo">
+        <description>
+            Get current user's rollup organizations till top of organization structure. And result is cached in
+            ${tenant_id}__USER__${ec.user.userAccount.partyId} with items
+            userOrgList, userOrgIds, activeOrgId, activeOrg, filterOrgIds
+        </description>
+        <out-parameters>
+            <parameter name="userOrgList" type="List"><parameter name="userOrg" type="Map">
+                <auto-parameters entity-name="mantle.party.PartyDetail"/></parameter></parameter>
+            <parameter name="userOrgIds" type="List"><parameter name="userOrgId"/></parameter>
+
+            <parameter name="activeOrgId"/>
+            <parameter name="activeOrg" type="Map"><auto-parameters entity-name="mantle.party.PartyDetail"/></parameter>
+
+            <parameter name="filterOrgIds" type="List"><parameter name="userOrgId"/></parameter>
+        </out-parameters>
+        <actions>
+            <set field="partyId" from="ec.user.userAccount.partyId"/>
+            <if condition="!partyId">
+                <log level="warn" message="Cannot get#LoggedUserOrganizationInfo, no user with partyId logged in"/>
+                <return/>
+            </if>
+            <script>
+                def loggedUserCache = ec.cache.getCache('__USER__' + partyId)
+                activeOrgId = (String) loggedUserCache.get('activeOrgId')
+                activeOrg = (Map) loggedUserCache.get('activeOrg')
+                filterOrgIds = (List) loggedUserCache.get('filterOrgIds')
+                userOrgList = (List) loggedUserCache.get('userOrgList')
+                userOrgIds = (List) loggedUserCache.get('userOrgIds')
+            </script>
+            <if condition="userOrgIds">
+                <log message="get#UserRollupOrganizationInfo -- return"/>
+                <return/></if>
+
+            <service-call name="mantle.party.PartyServices.get#RollupOrganizationInfo" in-map="[partyId: partyId]" out-map="context"/>
+
+            <!-- active org -->
+            <set field="activeOrgId" from="ec.user.getPreference('ACTIVE_ORGANIZATION')"/>
+            <!-- if active org is not valid for the user ignore it -->
+            <if condition="!orgIds.contains(activeOrgId)">
+                <set field="activeOrgId" from="null"/>
+            </if>
+            <!-- get the active org detail for display, etc -->
+            <if condition="activeOrgId">
+                <entity-find-one entity-name="mantle.party.PartyDetail" value-field="activeOrg" cache="true">
+                    <field-map field-name="partyId" from="activeOrgId"/>
+                </entity-find-one>
+            </if>
+
+            <!-- get org ids to filter by (for queries, etc) -->
+            <set field="filterOrgIds" from="activeOrgId ? [activeOrgId] : orgIds"/>
+            <script>
+                loggedUserCache.put('userOrgList', orgList)
+                loggedUserCache.put('userOrgIds', orgIds)
+                loggedUserCache.put('activeOrgId', activeOrgId)
+                loggedUserCache.put('activeOrg', activeOrg)
+                loggedUserCache.put('filterOrgIds', filterOrgIds)
+            </script>
+        </actions>
+    </service>
+
     <!-- ========================================= -->
     <!-- ========== Party CrUD Services ========== -->
     <!-- ========================================= -->
