@@ -53,28 +53,25 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- what is the party's emplPositionClassId? try WorkEffortParty with task first, then root/project, then try EmplPositionClassParty -->
-            <if condition="!emplPositionClassId &amp;&amp; workEffortId">
+            <if condition="workEffortId">
                 <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="taskWorkEffort">
                     <field-map field-name="workEffortId"/></entity-find-one>
-
-                <entity-find entity-name="WorkEffortParty" list="workEffortPartyList">
-                    <date-filter valid-date="fromDate"/>
-                    <econdition field-name="workEffortId" operator="in"
-                            from="[taskWorkEffort.workEffortId, taskWorkEffort.rootWorkEffortId, null]"/>
-                    <econdition field-name="partyId"/>
+            </if>
+            <if condition="!emplPositionClassId &amp;&amp; taskWorkEffort != null">
+                <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="taskWorkEffortPartyList">
+                    <date-filter valid-date="fromDate"/><econdition field-name="partyId"/><econdition field-name="workEffortId"/>
                     <order-by field-name="fromDate"/>
                 </entity-find>
-                <filter-map-list list="workEffortPartyList" to-list="taskWorkEffortPartyList">
-                    <field-map field-name="workEffortId" from="taskWorkEffort.workEffortId"/>
-                </filter-map-list>
                 <iterate list="taskWorkEffortPartyList" entry="taskWorkEffortParty">
                     <if condition="taskWorkEffortParty.emplPositionClassId">
                         <set field="emplPositionClassId" from="taskWorkEffortParty.emplPositionClassId"/></if>
                 </iterate>
                 <if condition="!emplPositionClassId">
-                    <filter-map-list list="workEffortPartyList" to-list="projectWorkEffortPartyList">
-                        <field-map field-name="workEffortId" from="taskWorkEffort.rootWorkEffortId"/>
-                    </filter-map-list>
+                    <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="projectWorkEffortPartyList">
+                        <date-filter valid-date="fromDate"/><econdition field-name="partyId"/>
+                        <econdition field-name="workEffortId" from="taskWorkEffort.rootWorkEffortId"/>
+                        <order-by field-name="fromDate"/>
+                    </entity-find>
                     <iterate list="projectWorkEffortPartyList" entry="projectWorkEffortParty">
                         <if condition="projectWorkEffortParty.emplPositionClassId">
                             <set field="emplPositionClassId" from="projectWorkEffortParty.emplPositionClassId"/></if>
@@ -107,6 +104,29 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
              -->
             <!-- at this point if there is no emplPositionClassId we'll consider it null and not applicable -->
+
+            <!-- if no workTypeEnumId lookup from WorkEffortParty -->
+            <if condition="!workTypeEnumId &amp;&amp; taskWorkEffort != null">
+                <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="taskWorkEffortPartyList">
+                    <date-filter valid-date="fromDate"/><econdition field-name="partyId"/><econdition field-name="workEffortId"/>
+                    <order-by field-name="fromDate"/>
+                </entity-find>
+                <iterate list="taskWorkEffortPartyList" entry="taskWorkEffortParty">
+                    <if condition="taskWorkEffortParty.workTypeEnumId">
+                        <set field="workTypeEnumId" from="taskWorkEffortParty.workTypeEnumId"/></if>
+                </iterate>
+                <if condition="!workTypeEnumId">
+                    <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="projectWorkEffortPartyList">
+                        <date-filter valid-date="fromDate"/><econdition field-name="partyId"/>
+                        <econdition field-name="workEffortId" from="taskWorkEffort.rootWorkEffortId"/>
+                        <order-by field-name="fromDate"/>
+                    </entity-find>
+                    <iterate list="projectWorkEffortPartyList" entry="projectWorkEffortParty">
+                        <if condition="projectWorkEffortParty.workTypeEnumId">
+                            <set field="workTypeEnumId" from="projectWorkEffortParty.workTypeEnumId"/></if>
+                    </iterate>
+                </if>
+            </if>
 
             <!-- if clientPartyId not set find from timesheetId or workEffortId -->
             <if condition="!clientPartyId &amp;&amp; timesheetId">
@@ -204,8 +224,8 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <if condition="wepList"><set field="workEffortParty" from="wepList[0]"/></if>
 
-            <if condition="!emplPositionClassId">
-                <set field="emplPositionClassId" from="workEffortParty?.emplPositionClassId ?: workEffort.emplPositionClassId"/></if>
+            <if condition="!workTypeEnumId">
+                <set field="workTypeEnumId" from="workEffortParty?.workTypeEnumId ?: workEffort.workTypeEnumId"/></if>
             <if condition="!fromDate"><set field="fromDate" from="workEffort.actualStartDate ?: workEffort.estimatedStartDate"/></if>
             <if condition="!hours"><set field="hours" from="workEffort.actualWorkDuration"/></if>
             <if condition="!breakHours"><set field="breakHours" from="workEffort.actualBreakDuration"/></if>
@@ -424,7 +444,16 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="find" noun="TimeEntryRateAmount">
-        <description>Internal service used by get#TimeEntryRate</description>
+        <description>
+            Internal service used by get#TimeEntryRate. Find a RateAmount record based on fields populated in TimeEntry
+            and fields populated in applicable RateAmount records, finding a match on as many fields as possible.
+
+            If there are rates associated with the workEffortId (generally task), or its corresponding rootWorkEffortId
+            (generally project) or partyId then only consider those rates.
+
+            With the remaining list match on as many as possible of: emplPositionClassId, workTypeEnumId,
+            payGradeId (from Employment if there is one for the partyId).
+        </description>
         <in-parameters>
             <parameter name="timeEntry" type="EntityValue" required="true"/>
             <parameter name="ratePurposeEnumId" required="true"/>
@@ -452,6 +481,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="workEffortId" from="null"/>
                 </econditions>
                 <econdition field-name="emplPositionClassId" from="timeEntry.emplPositionClassId" or-null="true" ignore-if-empty="true"/>
+                <econdition field-name="workTypeEnumId" from="timeEntry.workTypeEnumId" or-null="true" ignore-if-empty="true"/>
                 <econdition field-name="ratePurposeEnumId"/>
                 <econdition field-name="rateTypeEnumId"/>
                 <econdition field-name="rateCurrencyUomId"/>
@@ -459,46 +489,25 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
 
             <!-- <log level="warn" message="=============== ratePurposeEnumId=${ratePurposeEnumId}, rateTypeEnumId=${rateTypeEnumId}\nrateAmountList=${rateAmountList}"/> -->
+            <set field="fullRateAmountList" from="rateAmountList"/>
 
-            <!-- rates associated with the task and party? -->
-            <if condition="taskWorkEffort">
-                <filter-map-list list="rateAmountList" to-list="partyTaskList">
-                    <field-map field-name="workEffortId" from="taskWorkEffort.workEffortId"/>
-                    <field-map field-name="partyId" from="timeEntry.partyId"/>
-                </filter-map-list>
-                <if condition="partyTaskList"><set field="raListToUse" from="partyTaskList"/></if>
-                <!-- rates associated with the root/project and party? -->
-                <if condition="!raListToUse &amp;&amp; taskWorkEffort.rootWorkEffortId">
-                    <filter-map-list list="rateAmountList" to-list="partyProjectList">
-                        <field-map field-name="workEffortId" from="taskWorkEffort.rootWorkEffortId"/>
-                        <field-map field-name="partyId" from="timeEntry.partyId"/>
-                    </filter-map-list>
-                    <if condition="partyProjectList"><set field="raListToUse" from="partyProjectList"/></if>
-                </if>
+            <!-- if there is a taskWorkEffort and rates are associated with it or the project only use those -->
+            <if condition="taskWorkEffort != null">
+                <set field="taskRaList" from="rateAmountList.findAll({ it.workEffortId == taskWorkEffort.workEffortId })"/>
+                <if condition="taskRaList"><then>
+                    <set field="rateAmountList" from="taskRaList"/>
+                </then><else-if condition="taskWorkEffort.rootWorkEffortId">
+                    <set field="rootWeRaList" from="rateAmountList.findAll({ it.workEffortId == taskWorkEffort.rootWorkEffortId })"/>
+                    <if condition="rootWeRaList"><set field="rateAmountList" from="rootWeRaList"/></if>
+                </else-if></if>
             </if>
 
-            <!-- rates associated with the task? -->
-            <if condition="!raListToUse &amp;&amp; taskWorkEffort?.workEffortId">
-                <filter-map-list list="rateAmountList" to-list="taskList">
-                    <field-map field-name="workEffortId" from="taskWorkEffort.workEffortId"/></filter-map-list>
-                <if condition="taskList"><set field="raListToUse" from="taskList"/></if>
-            </if>
-            <!-- rates associated with the root/project? -->
-            <if condition="!raListToUse &amp;&amp; taskWorkEffort?.rootWorkEffortId">
-                <filter-map-list list="rateAmountList" to-list="projectList">
-                    <field-map field-name="workEffortId" from="taskWorkEffort.rootWorkEffortId"/></filter-map-list>
-                <if condition="projectList"><set field="raListToUse" from="projectList"/></if>
-            </if>
+            <!-- if there are rates associated with the party only use those -->
+            <set field="partyRaList" from="rateAmountList.findAll({ it.partyId == timeEntry.partyId })"/>
+            <if condition="partyRaList"><set field="rateAmountList" from="partyRaList"/></if>
 
-            <!-- no rate yet? get the default rate for the TimeEntry Party -->
-            <if condition="!raListToUse">
-                <filter-map-list list="rateAmountList" to-list="partyList">
-                    <field-map field-name="partyId" from="timeEntry.partyId"/></filter-map-list>
-                <if condition="partyList"><set field="raListToUse" from="partyList"/></if>
-            </if>
-
-            <!-- if still no rate find relevant Employment record -->
-            <if condition="!raListToUse">
+            <!-- find relevant Employment record -->
+            <if condition="timeEntry.partyId &amp;&amp; timeEntry.clientPartyId">
                 <entity-find entity-name="mantle.humanres.employment.EmploymentAndRelationship" list="employmentList">
                     <date-filter valid-date="timeEntry.thruDate"/>
                     <econdition field-name="fromPartyId" from="timeEntry.partyId"/>
@@ -511,32 +520,17 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </if>
 
-            <!-- no rate yet? look by Employment.payGradeId and timeEntry.emplPositionClassId -->
-            <if condition="!raListToUse &amp;&amp; emplPosition?.payGradeId">
-                <filter-map-list list="rateAmountList" to-list="gradeAndEmplPositionClassList">
-                    <field-map field-name="emplPositionClassId" from="timeEntry.emplPositionClassId"/>
-                    <field-map field-name="payGradeId" from="emplPosition.payGradeId"/>
-                </filter-map-list>
-                <if condition="gradeAndEmplPositionClassList"><set field="raListToUse" from="gradeAndEmplPositionClassList"/></if>
-            </if>
-            <!-- no rate yet? look by just Employment.payGradeId -->
-            <if condition="!raListToUse &amp;&amp; emplPosition?.payGradeId">
-                <filter-map-list list="rateAmountList" to-list="gradeRateList">
-                    <field-map field-name="payGradeId" from="emplPosition.payGradeId"/></filter-map-list>
-                <if condition="gradeRateList"><set field="raListToUse" from="gradeRateList"/></if>
-            </if>
 
-            <!-- no rate yet? get the default rate for the EmplPositionClass -->
-            <if condition="!raListToUse &amp;&amp; timeEntry.emplPositionClassId">
-                <filter-map-list list="rateAmountList" to-list="emplPositionClassList">
-                    <field-map field-name="emplPositionClassId" from="timeEntry.emplPositionClassId"/></filter-map-list>
-                <if condition="emplPositionClassList"><set field="raListToUse" from="emplPositionClassList"/></if>
-            </if>
+            <!-- find maximal match of workTypeEnumId, payGradeId, and emplPositionClassId -->
+            <set field="workTypeEnumId" from="timeEntry.workTypeEnumId ?: taskWorkEffort?.workTypeEnumId"/>
+            <set field="payGradeId" from="emplPosition?.payGradeId"/>
+            <set field="emplPositionClassId" from="timeEntry.emplPositionClassId ?: emplPosition?.emplPositionClassId"/>
 
-            <if condition="raListToUse">
-                <set field="rateAmountId" from="raListToUse[0].rateAmountId"/>
-                <set field="rateAmount" from="raListToUse[0].rateAmount"/>
-            </if>
+            <set field="rateAmountToUse" from="StupidUtilities.findMaximalMatch(rateAmountList,
+                    [workTypeEnumId:workTypeEnumId, payGradeId:payGradeId, emplPositionClassId:emplPositionClassId])"/>
+
+            <set field="rateAmountId" from="rateAmountToUse?.rateAmountId"/>
+            <set field="rateAmount" from="rateAmountToUse?.rateAmount"/>
             <!-- <log level="warn" message="=============== ratePurposeEnumId=${ratePurposeEnumId}, rateTypeEnumId=${rateTypeEnumId}, rateAmountId=${rateAmountId}, rateAmount=${rateAmount}"/> -->
         </actions>
     </service>
