@@ -975,7 +975,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" cache="false">
                 <econdition field-name="shipmentId"/><econdition field-name="productId"/>
-                <econdition field-name="quantityNotHandled" operator="greater" from="0"/>
+                <econdition field-name="quantityNotHandled" operator="not-equals" from="0"/>
             </entity-find>
             <set field="quantityRemaining" from="quantity"/>
             <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
@@ -1019,7 +1019,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- if an assetId is passed make sure it is for the same product, etc -->
             <if condition="assetId">
-                <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset"/>
+                <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true"/>
                 <if condition="!asset"><return error="true" message="Asset [${assetId}] not found, not packing"/></if>
                 <if condition="shipmentItemSource.productId != asset.productId">
                     <return error="true" message="Asset product [${asset.productId}] is not the same as shipment item product [${shipmentItemSource.productId}], not packing"/></if>
@@ -1040,14 +1040,27 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="assetReservation"><then>
                 <set field="assetReservationList" from="[assetReservation]"/>
             </then><else-if condition="!assetReservationList">
+                <!-- get these by order of assetId so that different threads behave consistently for locking (avoid deadlocks!) -->
                 <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetReservationList">
                     <econdition field-name="orderId" from="shipmentItemSource.orderId"/>
                     <econdition field-name="orderItemSeqId" from="shipmentItemSource.orderItemSeqId"/>
-                    <econdition field-name="quantityNotIssued" operator="greater" from="0"/>
+                    <econdition field-name="quantityNotIssued" operator="not-equals" from="0"/>
                     <econdition field-name="assetId" ignore-if-empty="true"/>
+                    <order-by field-name="assetId"/>
                 </entity-find>
             </else-if></if>
             <if condition="assetReservationList">
+                <!-- lock each Asset record before proceeding to make sure we can continue -->
+                <set field="resAssetMap" from="[:]"/>
+                <iterate list="assetReservationList" entry="assetReservation">
+                    <set field="curAssetId" from="assetReservation.assetId"/>
+                    <if condition="!resAssetMap.containsKey(curAssetId)">
+                        <entity-find-one entity-name="mantle.product.asset.Asset" value-field="curAsset" for-update="true">
+                            <field-map field-name="assetId" from="curAssetId"/></entity-find-one>
+                        <script>resAssetMap.put(curAssetId, curAsset)</script>
+                    </if>
+                </iterate>
+
                 <!-- issue based on reservations -->
                 <iterate list="assetReservationList" entry="assetReservation">
                     <set field="quantityToIssue" from="assetReservation.quantityNotIssued > quantityRemaining ?
@@ -1061,9 +1074,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- if the asset has a shipmentBoxTypeId it is already packaged, so create a package just for it -->
                     <!-- TODO: do something similar if Product is set as already packaged -->
                     <!-- TODO: calculate weight of asset package, or even set on asset record? -->
-                    <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
-                        <field-map field-name="assetId" from="assetReservation.assetId"/></entity-find-one>
-                    <if condition="asset.shipmentBoxTypeId">
+                    <set field="curAsset" from="resAssetMap.get(assetReservation.assetId)"/>
+                    <if condition="curAsset.shipmentBoxTypeId">
                         <service-call name="create#mantle.shipment.ShipmentPackage" out-map="context"
                                 in-map="[shipmentId:shipmentItemSource.shipmentId,
                                     shipmentBoxTypeId:asset.shipmentBoxTypeId]"/>
