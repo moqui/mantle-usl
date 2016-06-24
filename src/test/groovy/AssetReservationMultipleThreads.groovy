@@ -17,6 +17,7 @@ import org.moqui.Moqui
 import org.moqui.context.ExecutionContext
 import org.moqui.entity.EntityList
 import org.moqui.entity.EntityValue
+import org.moqui.impl.StupidJavaUtilities
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import spock.lang.Shared
@@ -49,9 +50,15 @@ class AssetReservationMultipleThreads extends Specification {
         gec.user.setEffectiveTime(new Timestamp(effectiveTime))
         gec.user.loginUser("john.doe", "moqui", null)
 
+        gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Asset", 55300, 20)
+        gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetDetail", 55300, 20)
+        gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetReservation", 55300, 20)
     }
 
     def cleanupSpec() {
+        gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.Asset")
+        gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetDetail")
+        gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetReservation")
         gec.destroy()
     }
     def setup() {
@@ -67,6 +74,10 @@ class AssetReservationMultipleThreads extends Specification {
         def list = []
 
         when:
+        EntityList assetList = gec.entity.find("mantle.product.asset.Asset").condition("productId", "DEMO_1_1").list()
+        def initialAtp = assetList.sum { EntityValue asset -> asset.availableToPromiseTotal }
+        logger.info("Initial ATP of DEMO_1_1 is " + StupidJavaUtilities.toPlainString(initialAtp))
+
         numThreads.times { threadId ->
             Thread.start {
                 try {
@@ -77,24 +88,25 @@ class AssetReservationMultipleThreads extends Specification {
             }
         }
         latch.await(30, TimeUnit.SECONDS)
-        EntityValue asset = gec.entity.find("mantle.product.asset.Asset").condition("assetId","DEMO_1_1A").one()
-        logger.info("ATP of DEMO_1_1A is " + asset.availableToPromiseTotal)
+        assetList = gec.entity.find("mantle.product.asset.Asset").condition("productId", "DEMO_1_1").list()
+        def afterAtp = assetList.sum { EntityValue asset -> asset.availableToPromiseTotal }
+        logger.info("After ATP of DEMO_1_1 is " + StupidJavaUtilities.toPlainString(afterAtp))
 
-        EntityList resList = gec.entity.find("mantle.product.issuance.AssetReservation").condition("assetId","DEMO_1_1A").list()
-        def totalNotAvailable = resList.sum {EntityValue res -> res.quantityNotAvailable}
-        logger.info("AssetReservations be created are ${resList}")
-        logger.info("Total not available of AssetReservations is " + totalNotAvailable)
+        EntityList resList = gec.entity.find("mantle.product.issuance.AssetReservation").condition("productId", "DEMO_1_1").list()
+        def totalNotAvailable = resList.sum { EntityValue res -> res.quantityNotAvailable }
+        logger.info("All DEMO_1_1 AssetReservations: ${resList}")
+        logger.info("Total not available of DEMO_1_1 in AssetReservations is " + StupidJavaUtilities.toPlainString(totalNotAvailable))
 
         then:
-        asset.availableToPromiseTotal == -totalNotAvailable
+        afterAtp == -totalNotAvailable
 
         // cleanup:
         // cancelOrders(list)
     }
 
-    String makeOrder(int threadId) {
+    String makeOrder(int threadNum) {
         ExecutionContext ec = Moqui.getExecutionContext()
-        ec.user.setEffectiveTime(new Timestamp(effectiveTime + threadId))
+        ec.user.setEffectiveTime(new Timestamp(effectiveTime + threadNum))
         ec.user.loginUser("joe@public.com", "moqui", null)
         ec.artifactExecution.disableAuthz()
 
@@ -102,7 +114,8 @@ class AssetReservationMultipleThreads extends Specification {
         boolean beganTx = ec.transaction.begin(null)
         try {
             String productStoreId = "POPC_DEFAULT"
-            EntityValue productStore = ec.entity.find("mantle.product.store.ProductStore").condition("productStoreId", productStoreId).one()
+            EntityValue productStore = ec.entity.find("mantle.product.store.ProductStore")
+                    .condition("productStoreId", productStoreId).useCache(true).one()
             String currencyUomId = productStore.defaultCurrencyUomId
             String customerPartyId = ec.user.userAccount.partyId
 
@@ -117,7 +130,10 @@ class AssetReservationMultipleThreads extends Specification {
                     .parameters([orderId: cartOrderId, paymentMethodId:'CustJqpCc', paymentInstrumentEnumId:'PiCreditCard',
                                  shippingPostalContactMechId: 'CustJqpAddr', shippingTelecomContactMechId: 'CustJqpTeln',
                                  carrierPartyId: '_NA_', shipmentMethodEnumId: 'ShMthGround']).call()
+            // place#Order triggers the asset reservation
             ec.service.sync().name("mantle.order.OrderServices.place#Order").parameters([orderId: cartOrderId]).call()
+
+            // logger.info(ec.artifactExecution.printHistory())
 
             ec.user.logoutUser()
         } finally {

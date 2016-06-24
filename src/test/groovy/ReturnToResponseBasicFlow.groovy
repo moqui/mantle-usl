@@ -268,10 +268,10 @@ class ReturnToResponseBasicFlow extends Specification {
                 <parts shipmentMethodEnumId="ShMthGround" telecomContactMechId="CustJqpTeln" postalContactMechId="CustJqpAddr" partTotal="0" customerPartyId="CustJqp" lastUpdatedStamp="1450573654119" facilityId="ORG_ZIZI_RETAIL_WH" vendorPartyId="ORG_ZIZI_RETAIL" carrierPartyId="_NA_" statusId="OrderApproved" orderPartSeqId="01"/>
                 <items orderItemSeqId="01" isModifiedPrice="N" itemTypeEnumId="ItemProduct" quantity="1"
                         itemDescription="Demo Product One-One" productId="DEMO_1_1" unitAmount="0" orderPartSeqId="01">
-                    <reservations assetReservationId="55700" assetId="55406" reservedDate="${effectiveTime}" quantity="1"
+                    <reservations assetReservationId="55700" assetId="55400" reservedDate="${effectiveTime}" quantity="1"
                             productId="DEMO_1_1" sequenceNum="0" quantityNotIssued="1" quantityNotAvailable="0"
                             reservationOrderEnumId="AsResOrdFifoRec">
-                        <mantle.product.asset.AssetDetail assetDetailId="55703" assetId="55406" productId="DEMO_1_1"
+                        <mantle.product.asset.AssetDetail assetDetailId="55703" assetId="55400" productId="DEMO_1_1"
                             availableToPromiseDiff="-1" effectiveDate="${effectiveTime}"/>
                     </reservations>
                 </items>
@@ -389,20 +389,20 @@ class ReturnToResponseBasicFlow extends Specification {
         when:
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
-            <mantle.product.issuance.AssetIssuance assetIssuanceId="55700" assetId="55406" shipmentId="55701"
+            <mantle.product.issuance.AssetIssuance assetIssuanceId="55700" assetId="55400" shipmentId="55701"
                     orderId="55700" orderItemSeqId="01" issuedDate="${effectiveTime}" quantity="1" productId="DEMO_1_1"
                     assetReservationId="55700" acctgTransResultEnumId="AtrSuccess">
                 <mantle.ledger.transaction.AcctgTrans postedDate="${effectiveTime}" amountUomId="USD" isPosted="Y"
-                        assetId="55406" acctgTransTypeEnumId="AttInventoryIssuance" glFiscalTypeEnumId="GLFT_ACTUAL"
+                        assetId="55400" acctgTransTypeEnumId="AttInventoryIssuance" glFiscalTypeEnumId="GLFT_ACTUAL"
                         transactionDate="${effectiveTime}" acctgTransId="55701" organizationPartyId="ORG_ZIZI_RETAIL">
-                    <mantle.ledger.transaction.AcctgTransEntry amount="7.5" productId="DEMO_1_1" glAccountId="141300000"
+                    <mantle.ledger.transaction.AcctgTransEntry amount="8" productId="DEMO_1_1" glAccountId="141300000"
                             reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatInventory"
-                            debitCreditFlag="C" assetId="55406" acctgTransEntrySeqId="01"/>
-                    <mantle.ledger.transaction.AcctgTransEntry amount="7.5" productId="DEMO_1_1" glAccountId="512000000"
+                            debitCreditFlag="C" assetId="55400" acctgTransEntrySeqId="01"/>
+                    <mantle.ledger.transaction.AcctgTransEntry amount="8" productId="DEMO_1_1" glAccountId="512000000"
                             reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatCogs" debitCreditFlag="D"
-                            assetId="55406" acctgTransEntrySeqId="02"/>
+                            assetId="55400" acctgTransEntrySeqId="02"/>
                 </mantle.ledger.transaction.AcctgTrans>
-                <mantle.product.asset.AssetDetail assetDetailId="55704" assetId="55406" productId="DEMO_1_1"
+                <mantle.product.asset.AssetDetail assetDetailId="55704" assetId="55400" productId="DEMO_1_1"
                         assetReservationId="55700" shipmentId="55701" effectiveDate="${effectiveTime}" quantityOnHandDiff="-1"/>
             </mantle.product.issuance.AssetIssuance>
         </entity-facade-xml>""").check(dataCheckErrors)
