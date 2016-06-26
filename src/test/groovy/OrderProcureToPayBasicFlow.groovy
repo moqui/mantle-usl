@@ -1056,21 +1056,24 @@ class OrderProcureToPayBasicFlow extends Specification {
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <assets assetId="55406" productId="DEMO_1_1" statusId="AstAvailable" assetTypeEnumId="AstTpInventory"
+                    receivedDate="${effectiveTime}" acquiredDate="${effectiveTime}" quantityOnHandTotal="10" availableToPromiseTotal="10"
+                    facilityId="ORG_ZIZI_RETAIL_WH" classEnumId="AsClsInventoryFin" ownerPartyId="ORG_ZIZI_RETAIL" hasQuantity="Y"/>
             <mantle.product.asset.PhysicalInventory physicalInventoryId="55401" physicalInventoryDate="${effectiveTime}"
                     comments="Test found 10 DEMO_1_1" partyId="EX_JOHN_DOE">
-                <mantle.product.asset.AssetDetail assetDetailId="55419" assetId="DEMO_1_1A" productId="DEMO_1_1"
+                <mantle.product.asset.AssetDetail assetDetailId="55419" assetId="55406" productId="DEMO_1_1"
                         varianceReasonEnumId="InVrFound" availableToPromiseDiff="10" quantityOnHandDiff="10" effectiveDate="${effectiveTime}"/>
-                <mantle.ledger.transaction.AcctgTrans acctgTransId="55418" postedDate="${effectiveTime}" amountUomId="USD"
-                        isPosted="Y" assetId="DEMO_1_1A" acctgTransTypeEnumId="AttInventoryVariance"
-                        glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
-                    <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="75" productId="DEMO_1_1"
-                            glAccountId="816000000" reconcileStatusId="AterNot" isSummary="N"
-                            glAccountTypeEnumId="GatInvFound" debitCreditFlag="C" assetId="DEMO_1_1A"/>
-                    <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" amount="75" productId="DEMO_1_1"
-                            glAccountId="141300000" reconcileStatusId="AterNot" isSummary="N"
-                            glAccountTypeEnumId="GatInventory" debitCreditFlag="D" assetId="DEMO_1_1A"/>
-                </mantle.ledger.transaction.AcctgTrans>
             </mantle.product.asset.PhysicalInventory>
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55418" postedDate="${effectiveTime}" amountUomId="USD"
+                    isPosted="Y" assetId="55406" acctgTransTypeEnumId="AttInventoryVariance" physicalInventoryId="55401"
+                    glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="75" productId="DEMO_1_1"
+                        glAccountId="816000000" reconcileStatusId="AterNot" isSummary="N"
+                        glAccountTypeEnumId="GatInvFound" debitCreditFlag="C" assetId="55406"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" amount="75" productId="DEMO_1_1"
+                        glAccountId="141300000" reconcileStatusId="AterNot" isSummary="N"
+                        glAccountTypeEnumId="GatInventory" debitCreditFlag="D" assetId="55406"/>
+            </mantle.ledger.transaction.AcctgTrans>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
