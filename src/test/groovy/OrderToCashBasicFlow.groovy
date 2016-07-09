@@ -53,6 +53,7 @@ class OrderToCashBasicFlow extends Specification {
         ec.entity.tempSetSequencedIdPrimary("mantle.shipment.ShipmentItemSource", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Asset", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetDetail", 55500, 10)
+        ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.PhysicalInventory", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.issuance.AssetReservation", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.issuance.AssetIssuance", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.account.invoice.Invoice", 55500, 10)
@@ -69,6 +70,7 @@ class OrderToCashBasicFlow extends Specification {
         ec.entity.tempResetSequencedIdPrimary("mantle.shipment.ShipmentItemSource")
         ec.entity.tempResetSequencedIdPrimary("mantle.product.asset.Asset")
         ec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetDetail")
+        ec.entity.tempResetSequencedIdPrimary("mantle.product.asset.PhysicalInventory")
         ec.entity.tempResetSequencedIdPrimary("mantle.product.issuance.AssetReservation")
         ec.entity.tempResetSequencedIdPrimary("mantle.product.issuance.AssetIssuance")
         ec.entity.tempResetSequencedIdPrimary("mantle.account.invoice.Invoice")
@@ -297,7 +299,7 @@ class OrderToCashBasicFlow extends Specification {
                 quantityOnHandDiff="-7" assetReservationId="55502" shipmentId="${shipResult.shipmentId}"
                 productId="DEMO_2_1" assetIssuanceId="55502"/>
             <!-- the automatic physical inventory found record because QOH went below zero -->
-            <mantle.product.asset.AssetDetail assetDetailId="55506" assetId="55500" physicalInventoryId="100000"
+            <mantle.product.asset.AssetDetail assetDetailId="55506" assetId="55500" physicalInventoryId="55500"
                 availableToPromiseDiff="7" quantityOnHandDiff="7" productId="DEMO_2_1" varianceReasonEnumId="InVrFound"
                 acctgTransResultEnumId="AtrNoAcquireCost"/>
         </entity-facade-xml>""").check()
