@@ -121,7 +121,7 @@ class AssetReservationMultipleThreads extends Specification {
 
             Map addOut1 = ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
                     .parameters([productId: 'DEMO_1_1', quantity: 60, customerPartyId: customerPartyId,
-                                 currencyUomId: currencyUomId, productStoreId: productStoreId]).call()
+                                 currencyUomId: currencyUomId, productStoreId: productStoreId]).useTransactionCache(false).call()
 
             cartOrderId = addOut1.orderId
             // String orderPartSeqId = addOut1.orderPartSeqId
