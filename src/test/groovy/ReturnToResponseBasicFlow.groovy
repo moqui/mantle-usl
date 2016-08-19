@@ -480,7 +480,8 @@ class ReturnToResponseBasicFlow extends Specification {
                         <entries acctgTransEntrySeqId="02" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="251100000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="GatCustomerCredits" debitCreditFlag="D"/>
                     </mantle.ledger.transaction.AcctgTrans>
-                    <applications amountApplied="${kieEnabled ? '13.77' : '7.77'}" appliedDate="${effectiveTime}" acctgTransResultEnumId="AtrPaymentNotPosted"
+                    <!-- NOTE: not checking acctgTransResultEnumId, could be success or payment not posted depending on if payment or application posts first -->
+                    <applications amountApplied="${kieEnabled ? '13.77' : '7.77'}" appliedDate="${effectiveTime}"
                             paymentApplicationId="55700" invoiceId="55700"/>
                 </mantle.account.payment.Payment>
             </financialAccounts>

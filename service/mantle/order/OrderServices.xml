@@ -51,6 +51,7 @@ h2. General Order Placement and eCommerce Usage
 
             <parameter name="orderItemList" type="List"><parameter name="orderItem" type="Map">
                 <auto-parameters entity-name="mantle.order.OrderItem"/></parameter></parameter>
+            <parameter name="allItemsAuditLogList" type="List"><parameter name="orderItem" type="Map"/></parameter>
             <parameter name="orderItemWithChildrenSet" type="Set"><parameter name="orderItemSeqId"/></parameter>
             <parameter name="paymentList" type="List"><parameter name="payment" type="Map">
                 <auto-parameters entity-name="mantle.account.payment.Payment"/></parameter></parameter>
@@ -165,7 +166,7 @@ h2. General Order Placement and eCommerce Usage
             <log message="======== Order Master:\n${groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(headerMaster))}"/>
             -->
 
-            <set field="statusItem" from="orderHeader.'OrderHeader#moqui.basic.StatusItem'"/>
+            <set field="statusItem" from="orderHeader.status"/>
             <!-- NOTE: these statuses are fairly liberal, may want to restrict more in certain scenarios (such as customer changing an order) -->
             <set field="editableStatusIds" from="new HashSet(['OrderBeingChanged', 'OrderOpen', 'OrderRequested',
                 'OrderProposed', 'OrderPlaced', 'OrderProcessing', 'OrderWishList', 'OrderGiftRegistry', 'OrderAutoReorder'])"/>
@@ -185,6 +186,13 @@ h2. General Order Placement and eCommerce Usage
                     }
                 }
             ]]></script>
+            <entity-find entity-name="moqui.entity.EntityAuditLog" list="allItemsAuditLogList">
+                <econdition field-name="changedEntityName" value="mantle.order.OrderItem"/>
+                <econdition field-name="changedFieldName" operator="in" value="quantity,unitAmount"/>
+                <econdition field-name="pkPrimaryValue" from="orderId"/>
+                <select-field field-name="changedFieldName,pkSecondaryValue,newValueText,oldValueText,changedByUserId,changedDate"/>
+                <order-by field-name="-changedDate"/>
+            </entity-find>
 
             <entity-find-related value-field="orderHeader" relationship-name="mantle.account.payment.Payment"
                     list="paymentList" order-by-list="['paymentId']"/>
@@ -554,7 +562,7 @@ h2. General Order Placement and eCommerce Usage
     </service>
 
     <!-- OrderItem Services -->
-    <service verb="create" noun="OrderItem">
+    <service verb="create" noun="OrderItem" transaction="cache">
         <in-parameters>
             <parameter name="orderId" required="true"/>
             <auto-parameters entity-name="mantle.order.OrderItem" include="nonpk"/>
@@ -581,7 +589,7 @@ h2. General Order Placement and eCommerce Usage
             <service-call name="create#mantle.order.OrderItem" in-map="context" out-map="context"/>
         </actions>
     </service>
-    <service verb="update" noun="OrderItem">
+    <service verb="update" noun="OrderItem" transaction="cache">
         <in-parameters>
             <auto-parameters include="pk" required="true"/>
             <auto-parameters include="nonpk"/>
@@ -672,7 +680,7 @@ h2. General Order Placement and eCommerce Usage
     </service>
 
     <!-- OrderProductQuantity aka "Cart" Services -->
-    <service verb="add" noun="OrderProductQuantity" authenticate="anonymous-all">
+    <service verb="add" noun="OrderProductQuantity" authenticate="anonymous-all" transaction="cache">
         <description>A service for an add-to-cart sort of operation, including:
             1. create an Order if no orderId is passed in
             2. determine the price to charge for the Product (and update based on quantity as needed)
@@ -760,7 +768,7 @@ h2. General Order Placement and eCommerce Usage
                 <else><set field="isModifiedPrice" value="Y"/></else>
             </if>
 
-            <if condition="orderItemList">
+            <if condition="orderItemList"><then>
                 <set field="orderItem" from="orderItemList.first"/>
                 <set field="orderItemSeqId" from="orderItem.orderItemSeqId"/>
                 <set field="orderPartSeqId" from="orderItem.orderPartSeqId" set-if-empty="false"/>
@@ -770,15 +778,13 @@ h2. General Order Placement and eCommerce Usage
                 <if condition="orderItem.requiredByDate &amp;&amp; requiredByDate &amp;&amp; orderItem.requiredByDate &lt; requiredByDate">
                     <set field="requiredByDate" from="orderItem.requiredByDate"/></if>
                 <service-call name="mantle.order.OrderServices.update#OrderItem" in-map="context"/>
-
-                <else>
-                    <service-call name="mantle.order.OrderServices.create#OrderItem" in-map="context" out-map="createOrderItemOut"/>
-                    <set field="orderItemSeqId" from="createOrderItemOut.orderItemSeqId"/>
-                </else>
-            </if>
+            </then><else>
+                <service-call name="mantle.order.OrderServices.create#OrderItem" in-map="context" out-map="createOrderItemOut"/>
+                <set field="orderItemSeqId" from="createOrderItemOut.orderItemSeqId"/>
+            </else></if>
         </actions>
     </service>
-    <service verb="update" noun="OrderProductQuantity" authenticate="anonymous-all">
+    <service verb="update" noun="OrderProductQuantity" authenticate="anonymous-all" transaction="cache">
         <in-parameters>
             <parameter name="orderId" required="true"/>
             <parameter name="orderItemSeqId" required="true"/>
@@ -1372,14 +1378,14 @@ h2. General Order Placement and eCommerce Usage
                 <return error="true" message="Request ${requestId} has no Facility set."/>
             </if>
 
-            <entity-find entity-name="mantle.facility.FacilityContactMech" list="postalList">
+            <entity-find entity-name="mantle.facility.FacilityContactMech" list="postalList" cache="true">
                 <date-filter/><econdition field-name="facilityId" from="request.facilityId"/>
                 <econdition field-name="contactMechPurposeId" operator="in" value="PostalShippingDest,PostalGeneral"/>
                 <order-by field-name="-contactMechPurposeId,-fromDate"/><!-- prefer PostalShippingDest over PostalGeneral, get most recent -->
             </entity-find>
             <set field="shippingPostalContactMechId" from="postalList?.first?.contactMechId"/>
 
-            <entity-find entity-name="mantle.facility.FacilityContactMech" list="phoneList">
+            <entity-find entity-name="mantle.facility.FacilityContactMech" list="phoneList" cache="true">
                 <date-filter/><econdition field-name="facilityId" from="request.facilityId"/>
                 <econdition field-name="contactMechPurposeId" operator="in" value="PhoneShippingDest,PhonePrimary"/>
                 <order-by field-name="-contactMechPurposeId,-fromDate"/><!-- prefer PhoneShippingDest over PhonePrimary, get most recent -->
@@ -1393,8 +1399,7 @@ h2. General Order Placement and eCommerce Usage
             <set field="requestItemListBySupplier" from="[:]"/>
             <iterate list="allRequestItemList" entry="requestItem">
                 <if condition="!requestItem.supplierPartyId">
-                    <return error="true" message="No Supplier set on item ${requestItem.requestItemSeqId} for Request ${requestId}"/>
-                </if>
+                    <return error="true" message="No Supplier set on item ${requestItem.requestItemSeqId} for Request ${requestId}"/></if>
                 <script>StupidUtilities.addToListInMap(requestItem.supplierPartyId, requestItem, requestItemListBySupplier)</script>
             </iterate>
 
