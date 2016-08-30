@@ -266,22 +266,21 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="dueDate == null &amp;&amp; settlementTermId">
                 <entity-find-one entity-name="mantle.account.invoice.SettlementTerm" value-field="settlementTerm"/>
                 <script><![CDATA[
-                    def dueDateDt = new org.joda.time.MutableDateTime(invoiceDate.time,
-                            org.joda.time.DateTimeZone.forTimeZone(ec.entity.databaseTimeZone))
+                    def dueDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(invoiceDate.time), ec.entity.databaseTimeZone.toZoneId())
 
                     switch (settlementTerm.termTypeEnumId) {
                         case 'TtFinPaymentDayNextMonth':
-                            dueDateDt.addMonths(1)
+                            dueDateDt = dueDateDt.plusMonths(1)
                         case 'TtFinPaymentDayCurMonth':
-                            int dayOfMonth = settlementTerm.termValue ?: 1
-                            if (dayOfMonth > dueDateDt.dayOfMonth().getMaximumValue())
-                                dayOfMonth = dueDateDt.dayOfMonth().getMaximumValue()
-                            dueDateDt.setDayOfMonth(dayOfMonth)
+                            int dayOfMonth = settlementTerm.termValue as long ?: 1
+                            int maxDays = dueDateDt.range(java.time.temporal.ChronoField.DAY_OF_MONTH).getMaximum()
+                            if (dayOfMonth > maxDays) dayOfMonth = maxDays
+                            dueDateDt = dueDateDt.withDayOfMonth(dayOfMonth)
                             break
                         default:
-                            dueDateDt.addDays((settlementTerm.termValue as int) ?: 0)
+                            dueDateDt = dueDateDt.plusDays((settlementTerm.termValue as long) ?: 0)
                     }
-                    dueDate = new java.sql.Timestamp(dueDateDt.getMillis())
+                    dueDate = java.sql.Timestamp.from(dueDateDt.toInstant())
                     // could happen for TtFinPaymentDayCurMonth with a day less than today; handle differently?
                     if (dueDate < invoiceDate) dueDate = invoiceDate
                 ]]></script>
@@ -490,6 +489,7 @@ along with this software (see the LICENSE.md file). If not, see
 
     <!-- Invoices based on Shipment -->
     <service verb="create" noun="SalesShipmentInvoices">
+        <!-- transaction=cache note: called by SECA and combined with other service that don't support tx cache so can't -->
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
             <parameter name="statusId"><description>If specified after create set to this statusId (always created
@@ -513,13 +513,18 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <order-map-list list="shipmentItemSourceList"><order-by field-name="orderId"/><order-by field-name="orderItemSeqId"/></order-map-list>
 
+            <set field="orderHeaderMap" from="[:]"/>
             <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
                 <set field="orderItem" from="shipmentItemSource.'mantle.order.OrderItem'"/>
                 <if condition="!orderItem || shipmentItemSource.invoiceId"><continue/></if>
                 <set field="itemAmount" from="(orderItem.unitAmount ?: 0) * (orderItem.quantity ?: 0)"/>
                 <if condition="itemAmount == 0"><continue/></if>
 
-                <set field="orderHeader" from="shipmentItemSource.'mantle.order.OrderHeader'"/>
+                <set field="orderHeader" from="orderHeaderMap.get(shipmentItemSource.orderId)"/>
+                <if condition="orderHeader == null">
+                    <set field="orderHeader" from="shipmentItemSource.'mantle.order.OrderHeader'"/>
+                    <script>orderHeaderMap.put(shipmentItemSource.orderId, orderHeader)</script>
+                </if>
                 <set field="invoiceId" from="invoiceIdByOrderPartIdMap[orderItem.orderId + ':' + orderItem.orderPartSeqId]"/>
 
                 <if condition="!invoiceId">
@@ -691,7 +696,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="orderId" from="orderAndPartId.substring(0, orderAndPartId.indexOf(':'))"/>
                 <set field="orderPartSeqId" from="orderAndPartId.substring(orderAndPartId.indexOf(':') + 1)"/>
                 <set field="invoiceId" from="invoiceIdByOrderIdEntry.value"/>
-                <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+                <set field="orderHeader" from="orderHeaderMap.get(orderId)"/>
+                <if condition="orderHeader == null">
+                    <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+                    <script>orderHeaderMap.put(orderId, orderHeader)</script>
+                </if>
                 <entity-find entity-name="mantle.order.OrderItem" list="otherOrderItemList">
                     <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
                     <econdition field-name="productId" from="null"/><econdition field-name="parentItemSeqId" from="null"/>
