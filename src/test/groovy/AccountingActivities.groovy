@@ -46,7 +46,7 @@ class AccountingActivities extends Specification {
     def setupSpec() {
         // init the framework, get the ec
         ec = Moqui.getExecutionContext()
-        ec.user.loginUser("john.doe", "moqui", null)
+        ec.user.loginUser("john.doe", "moqui")
         // set an effective date so data check works, etc
         ec.user.setEffectiveTime(new Timestamp(effectiveTime))
 

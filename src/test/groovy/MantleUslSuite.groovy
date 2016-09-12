@@ -15,9 +15,10 @@
 import org.junit.runner.RunWith
 import org.junit.runners.Suite
 
+// NOTE: OrderTenantAccess.class temporarily removed, to be replaced with similar instance access functionality
 @RunWith(Suite.class)
 @Suite.SuiteClasses([ AccountingActivities.class, AssetReservationMultipleThreads.class, OrderProcureToPayBasicFlow.class,
-        OrderTenantAccess.class, OrderToCashBasicFlow.class, OrderToCashTime.class, ReturnToResponseBasicFlow.class,
+        OrderToCashBasicFlow.class, OrderToCashTime.class, ReturnToResponseBasicFlow.class,
         WorkPlanToCashBasicFlow.class, RestApiTests.class ])
 class MantleUslSuite {
 }

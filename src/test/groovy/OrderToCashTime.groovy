@@ -53,7 +53,7 @@ class OrderToCashTime extends Specification {
 
         long startTime = System.currentTimeMillis()
         for (int i = 0; i < numOrders; i++) {
-            ec.user.loginUser("joe@public.com", "moqui", null)
+            ec.user.loginUser("joe@public.com", "moqui")
 
             String productStoreId = "POPC_DEFAULT"
             EntityValue productStore = ec.entity.find("mantle.product.store.ProductStore").condition("productStoreId", productStoreId).useCache(true).one()
@@ -85,7 +85,7 @@ class OrderToCashTime extends Specification {
 
             ec.user.logoutUser()
 
-            ec.user.loginUser("john.doe", "moqui", null)
+            ec.user.loginUser("john.doe", "moqui")
             ec.service.sync().name("mantle.shipment.ShipmentServices.ship#OrderPart")
                     .parameters([orderId:cartOrderId, orderPartSeqId:orderPartSeqId]).call()
             ec.user.logoutUser()
