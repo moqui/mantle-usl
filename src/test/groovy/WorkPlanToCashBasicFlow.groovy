@@ -39,7 +39,7 @@ class WorkPlanToCashBasicFlow extends Specification {
     def setupSpec() {
         // init the framework, get the ec
         ec = Moqui.getExecutionContext()
-        ec.user.loginUser("john.doe", "moqui", null)
+        ec.user.loginUser("john.doe", "moqui")
         effectiveThruDate = ec.l10n.parseTimestamp(ec.l10n.format(ec.user.nowTimestamp, 'yyyy-MM-dd HH:mm'), 'yyyy-MM-dd HH:mm')
         // set an effective date so data check works, etc
         ec.user.setEffectiveTime(effectiveThruDate)

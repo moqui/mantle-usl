@@ -48,7 +48,7 @@ class AssetReservationMultipleThreads extends Specification {
         gec = Moqui.getExecutionContext()
         // set an effective date so data check works, etc
         gec.user.setEffectiveTime(new Timestamp(effectiveTime))
-        gec.user.loginUser("john.doe", "moqui", null)
+        gec.user.loginUser("john.doe", "moqui")
 
         gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Asset", 55300, 20)
         gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetDetail", 55300, 20)
@@ -107,7 +107,7 @@ class AssetReservationMultipleThreads extends Specification {
     String makeOrder(int threadNum) {
         ExecutionContext ec = Moqui.getExecutionContext()
         ec.user.setEffectiveTime(new Timestamp(effectiveTime + threadNum))
-        ec.user.loginUser("joe@public.com", "moqui", null)
+        ec.user.loginUser("joe@public.com", "moqui")
         ec.artifactExecution.disableAuthz()
 
         String cartOrderId = null

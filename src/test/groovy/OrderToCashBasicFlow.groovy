@@ -91,7 +91,7 @@ class OrderToCashBasicFlow extends Specification {
 
     def "create Sales Order"() {
         when:
-        ec.user.loginUser("joe@public.com", "moqui", null)
+        ec.user.loginUser("joe@public.com", "moqui")
 
         String productStoreId = "POPC_DEFAULT"
         EntityValue productStore = ec.entity.find("mantle.product.store.ProductStore").condition("productStoreId", productStoreId).one()
@@ -211,7 +211,7 @@ class OrderToCashBasicFlow extends Specification {
 
     def "ship Sales Order"() {
         when:
-        ec.user.loginUser("john.doe", "moqui", null)
+        ec.user.loginUser("john.doe", "moqui")
 
         shipResult = ec.service.sync().name("mantle.shipment.ShipmentServices.ship#OrderPart")
                 .parameters([orderId:cartOrderId, orderPartSeqId:orderPartSeqId]).call()

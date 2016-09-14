@@ -105,7 +105,7 @@ class ReturnToResponseBasicFlow extends Specification {
 
     def "create Return From Order"() {
         when:
-        ec.user.loginUser("joe@public.com", "moqui", null)
+        ec.user.loginUser("joe@public.com", "moqui")
 
         // create return
         Map createMap = ec.service.sync().name("mantle.order.ReturnServices.create#ReturnFromOrder")
@@ -157,7 +157,7 @@ class ReturnToResponseBasicFlow extends Specification {
 
     def "approve Return"() {
         when:
-        ec.user.loginUser("john.doe", "moqui", null)
+        ec.user.loginUser("john.doe", "moqui")
 
         // triggers SECA rule to create an Sales Return (incoming) Shipment
         ec.service.sync().name("mantle.order.ReturnServices.approve#Return").parameters([returnId:returnId]).call()
@@ -422,7 +422,7 @@ class ReturnToResponseBasicFlow extends Specification {
         // ========== place order as customer
 
         ec.user.logoutUser()
-        ec.user.loginUser("joe@public.com", "moqui", null)
+        ec.user.loginUser("joe@public.com", "moqui")
         String customerPartyId = ec.user.userAccount.partyId
         // get customer credit account
         EntityList custFaList = ec.entity.find("mantle.account.financial.FinancialAccount")
@@ -443,7 +443,7 @@ class ReturnToResponseBasicFlow extends Specification {
 
         // ========== ship/etc order as admin
 
-        ec.user.loginUser("john.doe", "moqui", null)
+        ec.user.loginUser("john.doe", "moqui")
         ec.service.sync().name("mantle.shipment.ShipmentServices.ship#OrderPart")
                 .parameters([orderId:orderId, orderPartSeqId:orderPartSeqId]).call()
 

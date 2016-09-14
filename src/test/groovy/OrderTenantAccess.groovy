@@ -22,6 +22,8 @@ import spock.lang.Specification
 
 import java.sql.Timestamp
 
+// NOTE: this is no longer being run, left for now as a placeholder for future instance access functionality
+
 /* To run these make sure moqui, and mantle are in place and run:
     "gradle cleanAll load runtime/mantle/mantle-usl:test"
    Or to quick run with saved DB copy use "gradle loadSave" once then each time "gradle reloadSave runtime/mantle/mantle-usl:test"
@@ -71,7 +73,7 @@ class OrderTenantAccess extends Specification {
 
     def "create Sales Order"() {
         when:
-        ec.user.loginUser("joe@public.com", "moqui", null)
+        ec.user.loginUser("joe@public.com", "moqui")
 
         String productStoreId = "POPC_DEFAULT"
         EntityValue productStore = ec.entity.find("mantle.product.store.ProductStore").condition("productStoreId", productStoreId).one()
