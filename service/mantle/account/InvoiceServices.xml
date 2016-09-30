@@ -1071,6 +1071,63 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="distribute" noun="InvoiceItemDetail">
+        <in-parameters>
+            <parameter name="invoiceId" required="true"/>
+            <parameter name="invoiceItemSeqId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.invoice.InvoiceItem" value-field="invoiceItem"/>
+            <entity-find entity-name="mantle.account.invoice.InvoiceItemDetail" list="detailList">
+                <econdition field-name="invoiceId"/><econdition field-name="invoiceItemSeqId"/></entity-find>
+            <set field="quantityRemaining" from="invoiceItem.quantity"/>
+            <set field="totalFacilitySize" from="0"/>
+            <set field="detailsToUpdate" from="[]"/>
+            <set field="facilityMap" from="[:]"/>
+            <set field="facilitySizeMap" from="[:]"/>
+            <iterate list="detailList" entry="detail">
+                <if condition="detail.facilityId == null"><continue/></if>
+                <if condition="detail.quantity"><then>
+                    <set field="quantityRemaining" from="quantityRemaining - detail.quantity"/>
+                </then><else>
+                    <set field="detailFacility" from="facilityMap.get(detail.facilityId)"/>
+                    <if condition="detailFacility == null">
+                        <entity-find-one entity-name="mantle.facility.Facility" value-field="detailFacility">
+                            <field-map field-name="facilityId" from="detail.facilityId"/></entity-find-one>
+                        <script>facilityMap.put(detail.facilityId, detailFacility)</script>
+                    </if>
+                    <if condition="detailFacility.facilitySize">
+                        <if condition="detailFacility.facilitySizeUomId">
+                            <!-- convert to standard unit, like acres... if unit not an area return error -->
+                            <set field="currentSize" from="detailFacility.facilitySize"/>
+                            <set field="sizeUom" from="detailFacility.sizeUom"/>
+                            <if condition="sizeUom.uomTypeEnumId != 'UT_AREA_MEASURE'">
+                                <return error="true" message="Facility ${detailFacility.pseudoId}: ${detailFacility.facilityName} has a size UOM that is not an area"/></if>
+                            <if condition="activeSizeUom == null"><then>
+                                <set field="activeSizeUom" from="sizeUom"/>
+                            </then><else-if condition="activeSizeUom.uomId != sizeUom.uomId">
+                                <service-call name="org.moqui.impl.BasicServices.convert#Uom"
+                                              in-map="[uomId:sizeUom.uomId, toUomId:activeSizeUom.uomId, amount:currentSize]"
+                                              out-map="sizeConvertOut" out-map-add-to-existing="false"/>
+                                <check-errors/>
+                                <set field="currentSize" from="sizeConvertOut.convertedAmount"/>
+                            </else-if></if>
+                        </if>
+                        <set field="totalFacilitySize" from="totalFacilitySize + currentSize"/>
+                        <script>facilitySizeMap.put(detail.facilityId, currentSize)</script>
+                        <script>detailsToUpdate.add(detail)</script>
+                    </if>
+                </else></if>
+            </iterate>
+            <iterate list="detailsToUpdate" entry="detail">
+                <set field="currentSize" from="facilitySizeMap.get(detail.facilityId)"/>
+                <set field="detail.quantity" from="quantityRemaining * (currentSize / totalFacilitySize)"/>
+                <entity-update value-field="detail"/>
+            </iterate>
+            <message>Set quantity on ${detailsToUpdate.size()} details for item ${invoiceItemSeqId}, total facility size: ${ec.l10n.format(totalFacilitySize, '')}${activeSizeUom != null ? ' (' + activeSizeUom.description + ')' : ''}, quantity distributed: ${ec.l10n.format(quantityRemaining, '')}</message>
+        </actions>
+    </service>
+
     <!-- ============================================== -->
     <!-- ========== Invoice Content Services ========== -->
     <!-- ============================================== -->
