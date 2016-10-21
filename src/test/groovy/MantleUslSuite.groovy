@@ -12,8 +12,11 @@
  * <http://creativecommons.org/publicdomain/zero/1.0/>.
  */
 
+
+import org.junit.AfterClass
 import org.junit.runner.RunWith
 import org.junit.runners.Suite
+import org.moqui.Moqui
 
 // NOTE: OrderTenantAccess.class temporarily removed, to be replaced with similar instance access functionality
 @RunWith(Suite.class)
@@ -21,4 +24,8 @@ import org.junit.runners.Suite
         OrderToCashBasicFlow.class, OrderToCashTime.class, ReturnToResponseBasicFlow.class,
         WorkPlanToCashBasicFlow.class, RestApiTests.class ])
 class MantleUslSuite {
+    @AfterClass
+    public static void destroyMoqui() {
+        Moqui.destroyActiveExecutionContextFactory();
+    }
 }
