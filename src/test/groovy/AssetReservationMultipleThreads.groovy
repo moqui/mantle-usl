@@ -17,7 +17,7 @@ import org.moqui.Moqui
 import org.moqui.context.ExecutionContext
 import org.moqui.entity.EntityList
 import org.moqui.entity.EntityValue
-import org.moqui.impl.StupidJavaUtilities
+import org.moqui.util.ObjectUtilities
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import spock.lang.Shared
@@ -76,7 +76,7 @@ class AssetReservationMultipleThreads extends Specification {
         when:
         EntityList assetList = gec.entity.find("mantle.product.asset.Asset").condition("productId", "DEMO_1_1").list()
         def initialAtp = assetList.sum { EntityValue asset -> asset.availableToPromiseTotal }
-        logger.info("Initial ATP of DEMO_1_1 is " + StupidJavaUtilities.toPlainString(initialAtp))
+        logger.info("Initial ATP of DEMO_1_1 is " + ObjectUtilities.toPlainString(initialAtp))
 
         numThreads.times { threadId ->
             Thread.start {
@@ -90,12 +90,12 @@ class AssetReservationMultipleThreads extends Specification {
         latch.await(30, TimeUnit.SECONDS)
         assetList = gec.entity.find("mantle.product.asset.Asset").condition("productId", "DEMO_1_1").list()
         def afterAtp = assetList.sum { EntityValue asset -> asset.availableToPromiseTotal }
-        logger.info("After ATP of DEMO_1_1 is " + StupidJavaUtilities.toPlainString(afterAtp))
+        logger.info("After ATP of DEMO_1_1 is " + ObjectUtilities.toPlainString(afterAtp))
 
         EntityList resList = gec.entity.find("mantle.product.issuance.AssetReservation").condition("productId", "DEMO_1_1").list()
         def totalNotAvailable = resList.sum { EntityValue res -> res.quantityNotAvailable }
         logger.info("All DEMO_1_1 AssetReservations: ${resList}")
-        logger.info("Total not available of DEMO_1_1 in AssetReservations is " + StupidJavaUtilities.toPlainString(totalNotAvailable))
+        logger.info("Total not available of DEMO_1_1 in AssetReservations is " + ObjectUtilities.toPlainString(totalNotAvailable))
 
         then:
         afterAtp == -totalNotAvailable
