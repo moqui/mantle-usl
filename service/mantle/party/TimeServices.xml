@@ -14,6 +14,73 @@ along with this software (see the LICENSE.md file). If not, see
 -->
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.0.xsd">
 
+    <service verb="get" noun="DescendantPeriods">
+        <in-parameters>
+            <parameter name="parentPeriodId" required="true"/>
+            <parameter name="timePeriodTypeId" required="true"/>
+            <parameter name="createMissing" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="timePeriodList" type="List"><parameter name="timePeriod" type="Map"/></parameter>
+        </out-parameters>
+        <actions>
+            <if condition="createMissing"><entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="parentPeriod">
+                <field-map field-name="timePeriodId" from="parentPeriodId"/></entity-find-one></if>
+
+            <set field="timePeriodList" from="[]"/>
+            <entity-find entity-name="mantle.party.time.TimePeriod" list="childPeriodList">
+                <econdition field-name="parentPeriodId"/><order-by field-name="thruDate"/></entity-find>
+            <if condition="createMissing">
+                <if condition="childPeriodList"><then>
+                    <!-- add next child periods as needed -->
+                    <set field="lastChildPeriod" from="childPeriodList.get(childPeriodList.size() - 1)"/>
+                    <while condition="lastChildPeriod.thruDate &lt; parentPeriod.thruDate">
+                        <service-call name="mantle.party.TimeServices.getOrCreate#NextTimePeriod" out-map="createNextChildOut"
+                                      in-map="[timePeriodId:lastChildPeriod.timePeriodId]" out-map-add-to-existing="false"/>
+                        <set field="lastChildPeriod" from="createNextChildOut.nextTimePeriod"/>
+                        <script>childPeriodList.add(createNextChildOut.nextTimePeriod)</script>
+                    </while>
+                </then><else>
+                    <!-- find the TimePeriodType to use -->
+                    <entity-find-one entity-name="mantle.party.time.TimePeriodType" value-field="targetPeriodType">
+                        <field-map field-name="timePeriodTypeId"/></entity-find-one>
+                    <set field="childPeriodType" from="targetPeriodType"/>
+                    <while condition="childPeriodType?.parentPeriodTypeId &amp;&amp; childPeriodType.parentPeriodTypeId != parentPeriod.timePeriodTypeId">
+                        <entity-find-one entity-name="mantle.party.time.TimePeriodType" value-field="childPeriodType">
+                            <field-map field-name="timePeriodTypeId" from="childPeriodType.parentPeriodTypeId"/></entity-find-one>
+                    </while>
+                    <if condition="childPeriodType == null"><return error="true" message="Tried to create missing children but could not find parent period type for target type ${targetPeriodType.description}"/></if>
+
+                    <!-- find the most recent period of the type for the organization -->
+                    <entity-find entity-name="mantle.party.time.TimePeriod" list="mostRecentPeriodList" limit="1">
+                        <econdition field-name="partyId" from="parentPeriod.partyId"/>
+                        <econdition field-name="timePeriodTypeId" from="childPeriodType.timePeriodTypeId"/>
+                        <order-by field-name="-thruDate"/>
+                    </entity-find>
+                    <if condition="!mostRecentPeriodList"><return error="true" message="No previous TimePeriod found for organization ${parentPeriod.partyId} and type ${childPeriodType.timePeriodTypeId}"/></if>
+
+                    <!-- create next periods until we're to/past the thruDate of the current parentPeriod -->
+                    <set field="lastChildPeriod" from="mostRecentPeriodList.get(0)"/>
+                    <while condition="lastChildPeriod.thruDate &lt; parentPeriod.thruDate">
+                        <service-call name="mantle.party.TimeServices.getOrCreate#NextTimePeriod" out-map="createNextChildOut"
+                                      in-map="[timePeriodId:lastChildPeriod.timePeriodId]" out-map-add-to-existing="false"/>
+                        <set field="lastChildPeriod" from="createNextChildOut.nextTimePeriod"/>
+                        <script>childPeriodList.add(createNextChildOut.nextTimePeriod)</script>
+                    </while>
+                </else></if>
+            </if>
+            <iterate list="childPeriodList" entry="childPeriod">
+                <if condition="childPeriod.timePeriodTypeId == timePeriodTypeId"><then>
+                    <script>timePeriodList.add(childPeriod)</script>
+                </then><else>
+                    <service-call name="mantle.party.TimeServices.get#DescendantPeriods" out-map="childGetOut" out-map-add-to-existing="false"
+                                  in-map="[parentPeriodId:childPeriod.timePeriodId, timePeriodTypeId:timePeriodTypeId, createMissing:createMissing]"/>
+                    <script>if (childGetOut.timePeriodList) timePeriodList.addAll(childGetOut.timePeriodList)</script>
+                </else></if>
+            </iterate>
+        </actions>
+    </service>
+
     <service verb="create" noun="TimePeriod">
         <description>If previousPeriodId is not specified must specify fromDate, partyId, and timePeriodTypeId.
             Checks for an existing TimePeriod for the partyId, timePeriodTypeId, and fromDate.
