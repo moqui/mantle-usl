@@ -113,6 +113,24 @@ class AccountingActivities extends Specification {
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <acctgTrans acctgTransId="55100" organizationPartyId="ORG_ZIZI_RETAIL" amountUomId="USD" isPosted="Y" 
+                    acctgTransTypeEnumId="AttCapitalization" glFiscalTypeEnumId="GLFT_ACTUAL" postedDate="${effectiveTime}" transactionDate="${effectiveTime}">
+                <entries acctgTransEntrySeqId="01" amount="100000" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
+                <entries acctgTransEntrySeqId="02" amount="100000" glAccountId="332000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
+            </acctgTrans>
+            <acctgTrans acctgTransId="55101" organizationPartyId="ORG_ZIZI_RETAIL" amountUomId="USD" isPosted="Y" 
+                    acctgTransTypeEnumId="AttCapitalization" glFiscalTypeEnumId="GLFT_ACTUAL" postedDate="${effectiveTime}" transactionDate="${effectiveTime}">
+                <entries acctgTransEntrySeqId="01" amount="125000" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
+                <entries acctgTransEntrySeqId="02" amount="100000" glAccountId="332000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
+                <entries acctgTransEntrySeqId="03" amount="25000" glAccountId="333000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
+            </acctgTrans>
+            <acctgTrans acctgTransId="55102" organizationPartyId="ORG_ZIZI_CORP" amountUomId="USD" isPosted="Y" 
+                    acctgTransTypeEnumId="AttCapitalization" glFiscalTypeEnumId="GLFT_ACTUAL" postedDate="${effectiveTime}" transactionDate="${effectiveTime}">
+                <entries acctgTransEntrySeqId="01" amount="150000" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
+                <entries acctgTransEntrySeqId="02" amount="150000" glAccountId="332000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
+            </acctgTrans>
+            
+            <!-- TODO uncomment this after adding call to calc gl account org summaries:
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="111100000" timePeriodId="${timePeriodId}"
                     postedCredits="0" postedDebits="225000" endingBalance="225000" organizationPartyId="${organizationPartyId}"/>
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="332000000" timePeriodId="${timePeriodId}"
@@ -124,6 +142,7 @@ class AccountingActivities extends Specification {
                     postedCredits="0" postedDebits="150000" endingBalance="150000" organizationPartyId="${organizationPartyId2}"/>
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="332000000" timePeriodId="${timePeriodId2}"
                     postedCredits="150000" postedDebits="0" endingBalance="150000" organizationPartyId="${organizationPartyId2}"/>
+            -->
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
@@ -156,6 +175,16 @@ class AccountingActivities extends Specification {
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <acctgTrans acctgTransId="55103" organizationPartyId="ORG_ZIZI_RETAIL" amountUomId="USD" isPosted="Y" 
+                    acctgTransTypeEnumId="AttInternal" glFiscalTypeEnumId="GLFT_ACTUAL" postedDate="${effectiveTime}" transactionDate="${effectiveTime}">
+                <entries acctgTransEntrySeqId="01" amount="100" glAccountId="850000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
+                <entries acctgTransEntrySeqId="02" amount="100" glAccountId="336000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
+            </acctgTrans>
+            <acctgTrans acctgTransId="55104" organizationPartyId="ORG_ZIZI_RETAIL" amountUomId="USD" isPosted="Y" 
+                    acctgTransTypeEnumId="AttInternal" glFiscalTypeEnumId="GLFT_ACTUAL" postedDate="${effectiveTime}" transactionDate="${effectiveTime}">
+                <entries acctgTransEntrySeqId="01" amount="60" glAccountId="336000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
+                <entries acctgTransEntrySeqId="02" amount="60" glAccountId="335000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
+            </acctgTrans>            
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
@@ -190,6 +219,11 @@ class AccountingActivities extends Specification {
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+        <acctgTrans acctgTransId="55105" organizationPartyId="ORG_ZIZI_RETAIL" amountUomId="USD" isPosted="Y" 
+                acctgTransTypeEnumId="AttDisbursement" glFiscalTypeEnumId="GLFT_ACTUAL" postedDate="${effectiveTime}" transactionDate="${effectiveTime}">
+            <entries acctgTransEntrySeqId="01" amount="30" glAccountId="335000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
+            <entries acctgTransEntrySeqId="02" amount="30" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
+        </acctgTrans>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
