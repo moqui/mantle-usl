@@ -80,6 +80,16 @@ class RestApiTests extends Specification {
         ec.artifactExecution.enableAuthz()
     }
 
+    def "calculate GL Account Org Summaries for Accounting Tests"() {
+        when:
+        // this is very late in the mantle tests, do this here to get all data
+        // recalculate summaries, create GlAccountOrgTimePeriod records
+        ec.service.sync().name("mantle.ledger.LedgerServices.recalculate#GlAccountOrgSummaries").call()
+
+        then:
+        true
+    }
+
     @Unroll
     def "call Moqui Tools REST API (#requestMethod, #screenPath, #containsTextList)"() {
         expect:
