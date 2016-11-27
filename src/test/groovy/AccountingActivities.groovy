@@ -111,6 +111,9 @@ class AccountingActivities extends Specification {
                 .parameters([acctgTransId:acctgTransId, glAccountId:'332000000', debitCreditFlag:'C', amount:150000]).call()
         ec.service.sync().name("mantle.ledger.LedgerServices.post#AcctgTrans").parameters([acctgTransId:acctgTransId]).call()
 
+        // recalculate summaries, create GlAccountOrgTimePeriod records
+        ec.service.sync().name("mantle.ledger.LedgerServices.recalculate#GlAccountOrgSummaries").call()
+
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <acctgTrans acctgTransId="55100" organizationPartyId="ORG_ZIZI_RETAIL" amountUomId="USD" isPosted="Y" 
@@ -130,7 +133,6 @@ class AccountingActivities extends Specification {
                 <entries acctgTransEntrySeqId="02" amount="150000" glAccountId="332000000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
             </acctgTrans>
             
-            <!-- TODO uncomment this after adding call to calc gl account org summaries:
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="111100000" timePeriodId="${timePeriodId}"
                     postedCredits="0" postedDebits="225000" endingBalance="225000" organizationPartyId="${organizationPartyId}"/>
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="332000000" timePeriodId="${timePeriodId}"
@@ -142,7 +144,6 @@ class AccountingActivities extends Specification {
                     postedCredits="0" postedDebits="150000" endingBalance="150000" organizationPartyId="${organizationPartyId2}"/>
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="332000000" timePeriodId="${timePeriodId2}"
                     postedCredits="150000" postedDebits="0" endingBalance="150000" organizationPartyId="${organizationPartyId2}"/>
-            -->
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
