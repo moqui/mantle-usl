@@ -160,6 +160,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <parameter name="fromParty" type="Map"/>
             <parameter name="fromContactInfo" type="Map"><description>From the mantle.party.ContactServices.get#PartyContactInfo service.</description></parameter>
+            <parameter name="logoImageLocation"/>
             <parameter name="toParty" type="Map"/>
             <parameter name="toContactInfo" type="Map"><description>From the mantle.party.ContactServices.get#PartyContactInfo service.</description></parameter>
             <parameter name="toBillingRep" type="Map"/>
@@ -197,6 +198,9 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="fromContactInfo"
                     in-map="[partyId:invoice.fromPartyId, postalContactMechPurposeId:'PostalPayment',
                         telecomContactMechPurposeId:'PhonePayment', emailContactMechPurposeId:'EmailPayment']"/>
+            <service-call name="mantle.party.PartyServices.get#PartyContentLocation" out-map="logoImageOut"
+                          in-map="[partyId:invoice.fromPartyId, partyContentTypeEnumIdList:['PcntLogoImage', 'PcntPrimaryImage']]"/>
+            <set field="logoImageLocation" from="logoImageOut.contentLocation"/>
 
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toParty">
                 <field-map field-name="partyId" from="invoice.toPartyId"/></entity-find-one>
@@ -426,10 +430,16 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
 
+            <set field="toPartyId" from="orderPart.customerPartyId"/>
+            <entity-find entity-name="mantle.order.OrderPartParty" list="billToList">
+                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                <econdition field-name="roleTypeId" value="CustomerBillTo"/>
+            </entity-find>
+            <if condition="billToList"><set field="toPartyId" from="billToList[0].partyId"/></if>
+
             <set field="description" value="Invoice for Order ${orderId} part ${orderPartSeqId}"/>
             <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="context"
-                    in-map="[invoiceTypeEnumId:'InvoiceSales',
-                        fromPartyId:orderPart.vendorPartyId, toPartyId:orderPart.customerPartyId,
+                    in-map="[invoiceTypeEnumId:'InvoiceSales', fromPartyId:orderPart.vendorPartyId, toPartyId:toPartyId,
                         invoiceDate:invoiceDate, currencyUomId:orderHeader.currencyUomId,
                         description:description, systemMessageRemoteId:orderHeader.systemMessageRemoteId]"/>
 
@@ -531,10 +541,18 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- find the OrderPart for the from/toPartyId, etc -->
                     <set field="orderPart" from="orderItem.'mantle.order.OrderPart'"/>
                     <if condition="orderPart">
+                        <set field="toPartyId" from="orderPart.customerPartyId"/>
+                        <entity-find entity-name="mantle.order.OrderPartParty" list="billToList">
+                            <econdition field-name="orderId" from="orderPart.orderId"/>
+                            <econdition field-name="orderPartSeqId" from="orderPart.orderPartSeqId"/>
+                            <econdition field-name="roleTypeId" value="CustomerBillTo"/>
+                        </entity-find>
+                        <if condition="billToList"><set field="toPartyId" from="billToList[0].partyId"/></if>
+
                         <set field="description" value="Invoice for Order ${orderItem.orderId} part ${orderItem.orderPartSeqId} and Shipment ${shipmentId}"/>
                         <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="invOut"
                                 in-map="[invoiceTypeEnumId:'InvoiceSales',
-                                    fromPartyId:orderPart.vendorPartyId, toPartyId:orderPart.customerPartyId,
+                                    fromPartyId:orderPart.vendorPartyId, toPartyId:toPartyId,
                                     invoiceDate:invoiceDate, currencyUomId:orderHeader.currencyUomId,
                                     description:description, systemMessageRemoteId:orderHeader.systemMessageRemoteId]"/>
                         <set field="invoiceId" from="invOut.invoiceId"/>
@@ -549,7 +567,7 @@ along with this software (see the LICENSE.md file). If not, see
 
                     <!-- first do AssetIssuance -->
                     <if condition="handleIssuances">
-                        <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList">
+                        <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList" for-update="true">
                             <econdition-object field="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
                                 shipmentId:shipmentId]"/>
                             <order-by field-name="orderItemSeqId"/>
@@ -568,6 +586,10 @@ along with this software (see the LICENSE.md file). If not, see
                                         invoiceId:invoiceId, invoiceItemSeqId:iiOut.invoiceItemSeqId,
                                         assetIssuanceId:assetIssuance.assetIssuanceId, shipmentId:shipmentId,
                                         amount:orderItem.unitAmount, quantity:assetIssuance.quantity]"/>
+                            <!-- set invoiceId and invoiceItemSeqId on AssetIssuance -->
+                            <set field="assetIssuance.invoiceId" from="invoiceId"/>
+                            <set field="assetIssuance.invoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
+                            <entity-update value-field="assetIssuance"/>
                             <!-- update ShipmentItemSource -->
                             <if condition="shipmentItemSource.invoiceItemSeqId"><then>
                                 <!-- will have to split the ShipmentItemSource -->
@@ -593,7 +615,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- now do AssetReceipt; this service is reused for purchase orders by a wrapping service, in
                         spite of the name handle these too -->
                     <if condition="handleReceipts">
-                        <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList">
+                        <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList" for-update="true">
                             <econdition-object field="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
                                 shipmentId:shipmentId]"/>
                             <order-by field-name="orderItemSeqId"/>
@@ -612,6 +634,10 @@ along with this software (see the LICENSE.md file). If not, see
                                         invoiceId:invoiceId, invoiceItemSeqId:iiOut.invoiceItemSeqId,
                                         assetReceiptId:assetReceipt.assetReceiptId, shipmentId:shipmentId,
                                         amount:orderItem.unitAmount, quantity:assetReceipt.quantityAccepted]"/>
+                            <!-- set invoiceId and invoiceItemSeqId on AssetReceipt -->
+                            <set field="assetReceipt.invoiceId" from="invoiceId"/>
+                            <set field="assetReceipt.invoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
+                            <entity-update value-field="assetReceipt"/>
                             <!-- update ShipmentItemSource -->
                             <if condition="shipmentItemSource.invoiceItemSeqId"><then>
                                 <!-- will have to split the ShipmentItemSource -->
