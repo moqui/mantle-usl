@@ -62,12 +62,131 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="lastName" operator="like" value="%${term}%" ignore-case="true"/>
                     <econdition field-name="username" operator="like" value="%${term}%" ignore-case="true"/>
                 </econditions>
-                <order-by field-name="^firstName"/><order-by field-name="^lastName"/><order-by field-name="^username"/>
+                <order-by field-name="^firstName,^lastName,^username"/>
             </entity-find>
-            <script>
-                outList = []
-                for (def pau in pauList) outList.add([value:pau.partyId, label:ec.resource.expand('UsernameTemplate','',pau)])
-            </script>
+            <script>outList = []; for (def pau in pauList) outList.add([value:pau.partyId, label:ec.resource.expand('UsernameTemplate','',pau)])</script>
+        </actions>
+    </service>
+
+    <service verb="find" noun="PartyDuplicates">
+        <in-parameters><parameter name="partyId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="matchingInfoByPartyId" type="Map"><description>Key is partyId, value is List of records that match the
+                other party including PartyIdentification, PartyContactMechInfo (email), ...</description></parameter>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="partyDetail"/>
+            <set field="firstName" from="partyDetail.firstName"/>
+            <set field="organizationName" from="partyDetail.organizationName"/>
+            <set field="matchingInfoByPartyId" from="[:]"/>
+
+            <!-- find matching identifications -->
+            <entity-find entity-name="mantle.party.PartyIdentification" list="partyIdentificationList">
+                <econdition field-name="partyId"/><select-field field-name="idValue,partyIdTypeEnumId"/></entity-find>
+            <!-- TODO: perhaps filter characters in query somehow? (all non-alphanumeric; dash, dot, comma, space, etc) -->
+            <entity-find entity-name="mantle.party.PartyIdentification" list="allDupIdList">
+                <econdition field-name="partyId" operator="not-equals"/>
+                <econdition field-name="idValue" operator="in" from="partyIdentificationList*.idValue"/></entity-find>
+            <iterate list="allDupIdList" entry="dupId">
+                <!-- make sure matches party ID type, don't match for same ID of different type -->
+                <set field="partyIdent" from="partyIdentificationList.find({ it.idValue == partyIdent.idValue &amp;&amp; it.partyIdTypeEnumId == partyIdent.partyIdTypeEnumId })"/>
+                <script>addToListInMap(dupId.partyId, dupId, matchingInfoByPartyId)</script>
+            </iterate>
+
+            <!-- find matching emails -->
+            <entity-find entity-name="mantle.party.contact.PartyContactMechInfo" list="partyContactMechInfoList">
+                <date-filter/><econdition field-name="partyId"/><econdition field-name="contactMechTypeEnumId" value="CmtEmailAddress"/>
+                <select-field field-name="infoString"/>
+            </entity-find>
+            <entity-find entity-name="mantle.party.contact.PartyContactMechInfo" list="allDupEmailList">
+                <date-filter/><econdition field-name="partyId" operator="not-equals"/>
+                <econdition field-name="contactMechTypeEnumId" value="CmtEmailAddress"/>
+                <econdition field-name="infoString" operator="in" from="partyContactMechInfoList*.infoString"/>
+                <select-field field-name="partyId,contactMechId,contactMechTypeEnumId,infoString"/>
+            </entity-find>
+            <iterate list="allDupEmailList" entry="dupEmail"><script>addToListInMap(dupEmail.partyId, dupEmail, matchingInfoByPartyId)</script></iterate>
+
+            <!-- find matching telecom numbers, only include if first name matches? -->
+            <entity-find entity-name="mantle.party.contact.PartyContactMechTelecomNumber" list="partyTelecomNumberList">
+                <date-filter/><econdition field-name="partyId"/>
+                <select-field field-name="areaCode,contactNumber"/>
+            </entity-find>
+            <iterate list="partyTelecomNumberList" entry="ptn">
+                <script><![CDATA[
+                    areaCode = ptn.areaCode
+                    contactNumber = replaceNonAlphaNumeric(ptn.contactNumber, '%' as char)
+                    // NOTE: the following is USA phone number specific (3 digit area code, 7 digit number with 3/4 separator)
+                    if (!areaCode && contactNumber.length() > 8) {
+                        areaCode = contactNumber.substring(0,3)
+                        contactNumber = contactNumber.substring(3)
+                        if (contactNumber.charAt(0) == '%') contactNumber = contactNumber.substring(1)
+                    }
+                    if (!contactNumber.contains('%') && contactNumber.length() > 3) { contactNumber = contactNumber.substring(0,3) + '%' + contactNumber.substring(3) }
+                    fullNumber = (areaCode ? areaCode + '%' : '') + contactNumber
+                ]]></script>
+                <entity-find entity-name="mantle.party.contact.PartyContactMechTelecomNumber" list="dupTelNumList">
+                    <date-filter/><econdition field-name="partyId" operator="not-equals"/>
+                    <econditions combine="or">
+                        <econdition field-name="contactNumber" operator="like" from="contactNumber"/>
+                        <econdition field-name="contactNumber" operator="like" from="fullNumber"/>
+                    </econditions>
+                    <econdition field-name="areaCode" from="areaCode" or-null="true" ignore-if-empty="true"/>
+                    <select-field field-name="partyId,contactMechId,contactMechTypeEnumId,countryCode,areaCode,contactNumber"/>
+                </entity-find>
+                <iterate list="dupTelNumList" entry="dupTelNum">
+                    <if condition="!matchingInfoByPartyId.containsKey(dupTelNum.partyId)">
+                        <entity-find-one entity-name="mantle.party.PartyDetail" value-field="dupPartyDetail">
+                            <field-map field-name="partyId" from="dupTelNum.partyId"/></entity-find-one>
+                        <if condition="(firstName &amp;&amp; !firstName.equalsIgnoreCase(dupPartyDetail.firstName)) ||
+                                (organizationName &amp;&amp; !organizationName.equalsIgnoreCase(dupPartyDetail.organizationName))">
+                            <continue/></if>
+                    </if>
+                    <script>addToListInMap(dupTelNum.partyId, dupTelNum, matchingInfoByPartyId)</script>
+                </iterate>
+            </iterate>
+
+            <!-- find matching postal addresses (address1, postal code, country), only include if first name matches? -->
+            <entity-find entity-name="mantle.party.contact.PartyContactMechPostalAddressOnly" list="partyPostalAddressList">
+                <date-filter/><econdition field-name="partyId"/>
+                <select-field field-name="address1,unitNumber,postalCode,postalCodeExt,countryGeoId"/>
+            </entity-find>
+            <iterate list="partyPostalAddressList" entry="ppa">
+                <!-- TODO: more flexible matching for other common strings... and for different languages? -->
+                <!-- for these if abbreviated is prefixed just replace with prefix + %, similar pattern for others -->
+                <script><![CDATA[
+                    address1 = ppa.address1.replace("Road","R%d%").replace("Rd","R%d%").replace("Street","St%").replace("Avenue","Av%").replace("North","N%").replace("South","S%").replace("East","E%").replace("West","W%")
+                    address1 = replaceNonAlphaNumeric(address1, '%' as char)
+                ]]></script>
+                <entity-find entity-name="mantle.party.contact.PartyContactMechPostalAddressOnly" list="dupAddressList">
+                    <date-filter/><econdition field-name="partyId" operator="not-equals"/>
+                    <econdition field-name="address1" operator="like" from="address1" ignore-case="true"/>
+                    <econdition field-name="unitNumber" operator="like" from="'%' + replaceNonAlphaNumeric(ppa.unitNumber, '%' as char)" ignore-if-empty="true"/>
+                    <econdition field-name="postalCode" from="ppa.postalCode"/>
+                    <econdition field-name="postalCodeExt" from="ppa.postalCodeExt" or-null="true" ignore-if-empty="true"/>
+                    <econdition field-name="countryGeoId" from="ppa.countryGeoId" or-null="true" ignore-if-empty="true"/>
+                    <select-field field-name="partyId,contactMechId,contactMechTypeEnumId,address1,unitNumber,postalCode,postalCodeExt,countryGeoId"/>
+                </entity-find>
+                <!-- <log level="warn" message="dup addresses address1 ${address1} unitNumber ${replaceNonAlphaNumeric(ppa.unitNumber, '%' as char)} postalCode ${ppa.postalCode}\n${dupAddressList}"/> -->
+                <!-- <log level="warn" message="${dupAddressList_xafind}"/> -->
+                <iterate list="dupAddressList" entry="dupAddress">
+                    <if condition="!matchingInfoByPartyId.containsKey(dupAddress.partyId)">
+                        <entity-find-one entity-name="mantle.party.PartyDetail" value-field="dupPartyDetail">
+                            <field-map field-name="partyId" from="dupAddress.partyId"/></entity-find-one>
+                        <if condition="(firstName &amp;&amp; !firstName.trim().equalsIgnoreCase(dupPartyDetail.firstName?.trim())) ||
+                                (organizationName &amp;&amp; !organizationName.equalsIgnoreCase(dupPartyDetail.organizationName))">
+                            <continue/></if>
+                    </if>
+                    <script>addToListInMap(dupAddress.partyId, dupAddress, matchingInfoByPartyId)</script>
+                </iterate>
+            </iterate>
+
+            <!-- exclude disabled parties -->
+            <set field="matchPartyIdSet" from="matchingInfoByPartyId.keySet()"/>
+            <iterate list="matchPartyIdSet" entry="matchPartyId">
+                <entity-find-one entity-name="mantle.party.Party" value-field="matchParty">
+                    <field-map field-name="partyId" from="matchPartyId"/></entity-find-one>
+                <if condition="'Y'.equals(matchParty.disabled)"><script>matchingInfoByPartyId.remove(matchPartyId)</script></if>
+            </iterate>
         </actions>
     </service>
 
