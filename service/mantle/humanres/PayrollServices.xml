@@ -1092,6 +1092,362 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
         </actions>
     </service>
+
+    <service verb="generate" noun="Efw2File">
+        <in-parameters>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="submitterPartyId" required="true"/>
+            <parameter name="resubWfid" default=""/> <!-- If resubmission, the WFID issued by SSA -->
+            <parameter name="preparerCode" default="L"/>
+            <!-- TODO: allow selective employers or all? -->
+            <!-- TODO: allow selective employees or all? -->
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fileText"/>
+        </out-parameters>
+        <actions>
+            <!--
+                What character sets may I use?
+                    * American Standard Code for Information Interchange-1 (ASCII-1) for BSO submitters.
+                    * Extended Binary Coded Decimal Interchange Code (EBCDIC) or ASCII for EDT submitters.
+                    * See Appendix D for character sets.
+                Are there any restrictions concerning the number of records for an EFW2 file?
+                    * If your organization files on behalf of multiple employers, include no more than 1 million RW Records
+                        or 50,000 RE Records per submission.
+                    * Following these guidelines will help to ensure that your wage data is processed in a timely manner.
+                What is the length of each record?
+                    * 512 bytes.
+                What case letters must I use?
+                    * Use alphabetic upper-case letters for all fields other than the “Contact E-Mail/Internet” field in the
+                        RA Record and the “Employer Contact E-Mail/Internet” field in the RE Record (positions 446-485).
+                    * For the "Contact E-Mail/Internet" field in the RA Record (positions 446 - 485) and in the
+                        “Employer Contact E-Mail/Internet” RE Record (positions 279-318), use upper and/or lower case letters
+                        as needed to show the exact electronic mail address.
+                What rules do you have for alpha/numeric fields?
+                    * Left justify and fill with blanks.
+                    * Where the "field" shows "Blank," all positions must be blank, not zeros.
+                What rules do you have for money fields?
+                    * Must contain only numbers.
+                    * No punctuation.
+                    * No signed amounts (high order signed or low order signed).
+                    * Include both dollars and cents with the decimal point assumed (example: $59.60 = 00000005960).
+                    * Do not round to the nearest dollar (example: $5,500.99 = 00000550099).
+                    * Right justify and zero fill to the left.
+                    * Any money field that has no amount to be reported must be filled with zeros, not blanks.
+                What rules do you have for reporting Wages, Tips, and Other Compensation and Income Tax Withheld?
+                    * The tax jurisdiction code reported in position 220 of the RE Record tells SSA how to process the report.
+                    * Note section 4.2.1 where US Territories and Protectorates have special places for Income:
+                        - Puerto Rico (P)
+                        - Virgin Islands (V)
+                        - Guam (G)
+                        - American Samoa (S)
+                        - Northern Mariana Islands (N)
+                What rules do you have for the format of the employee name?
+                    * Enter the name exactly as shown on the individual's Social Security card.
+                    * Must be submitted in the individual name fields:
+                        - Employee First Name
+                        - Employee Middle Name or Initial (if shown on Social Security card)
+                        - Employee Last Name
+                        - Suffix (if shown on Social Security card)
+                    * Do not include any titles.
+                What rules do you have for the Social Security Number (SSN)?
+                    * Use the number shown on the original/replacement SSN card.
+                    * Only numeric characters.
+                    * Omit hyphens.
+                    * May not begin with a 666 or 9.
+                    * If there is no SSN available for the employee, enter zeros (0) in positions 3 - 11 of the RW Record, and
+                        have your employee call 1-800-772-1213 or visit their local Social Security office to obtain an SSN.
+            -->
+
+            <!-- Create RA Submitter Record (Required) -->
+            <!-- Loop Across Employers (Time Periods are per employer; there will only be one employer) -->
+            <!-- Create RE Employer Record (Required) -->
+            <!-- Loop Across Employees -->
+            <!-- Create RW Employee Wage Record (Required) -->
+            <!-- Create RO Employee Wage Record (Optional) -->
+            <!-- Create RS State Wage Record (Optional) -->
+            <!-- Create RT Total Record (Required) -->
+            <!-- Create RU Total Record (Optional) -->
+            <!-- Create RV State Total Record (Optional) -->
+            <!-- Create RF Final Record (Required) -->
+
+            <service-call name="mantle.other.TaxServices.get#PayerTaxInfo" in-map="[partyId:submitterPartyId]" out-map="submitter"/>
+
+            <!-- get employmentList and timePeriod -->
+            <service-call name="mantle.humanres.PayrollServices.get#TimePeriodEmployments"
+                          in-map="[timePeriodId:timePeriodId, ignoreType:true]" out-map="context"/>
+
+            <!-- For each employee -->
+            <service-call name="mantle.humanres.PayrollServices.get#EmploymentWageAndTaxInfo"
+                          in-map="[timePeriodId:timePeriodId, partyRelationshipId:employment.partyRelationshipId]" out-map="employeeWageAndTaxInfo"/>
+
+            <script><![CDATA[
+                import org.moqui.context.ExecutionContext
+                import org.moqui.entity.EntityValue
+                ExecutionContext ec = context.ec
+
+                List<StringBuilder> lines = []
+
+                ////////////////////////////////////////////////////////////////////////////////
+                // RA Submitter Record (Required)
+                ////////////////////////////////////////////////////////////////////////////////
+                StringBuilder raHeader = new StringBuilder(512)
+                // Record Identifier (1-2, 2)
+                raHeader.append("RA")
+                // Submitter's Employer Identification Number (EIN) (3-11, 9)
+                raHeader.append(submitter?.ein?.replaceAll("\\p{P}", "")?.padLeft(9, '0').take(9)) // Remove all punctuation
+                // User Identification (User ID) (12-10, 8)
+                raHeader.append(submitter?.uid?.toUpperCase()?.padRight(8, ' ')?.take(8))
+                // Software Vendor Code (20-13, 4)
+                String softwareVendorCode = ec.user.getPreference('org.nactp.software.vendor.id') ?: ""
+                raHeader.append(softwareVendorCode.padRight(4, ' ').take(4))
+                // Blank (24-28, 5)
+                raHeader.append("".padRight(5, ' '))
+                // Resub Indicator (29-29, 1) // 1 if being resubmitted, otherwise 0
+                raHeader.append(resubWfid.trim().empty() ? "0" : "1")
+                // Resub Wage File Identifier (WFID) (30-35, 6)
+                raHeader.append(resubWfid.toUpperCase().padRight(6, ' '), 6))
+                // Software Code (36-37, 2)
+                raHeader.append(softwareVendorCode.empty() ? "98" : "99")
+
+                //******************************************************************************
+                // Company
+                //******************************************************************************
+                // Company Name (38-94, 57)
+                raHeader.append(submitter.name.toUpperCase().padRight(57, ' ').take(57)) // Fixme, which name?
+                // Location Address (95-116, 22) (Attention, Suite, Room Number, etc.)
+                raHeader.append(ADDR2.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                // Delivery Address (117-138, 22) (Street Number and Name or PO Box)
+                raHeader.append(ADDR1.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                // City (139-160, 22)
+                raHeader.append(CITY.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                // State Abbreviation (161-162, 2) Foreign Addresses fill with blanks
+                raHeader.append(STATE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                // Zip Code (163-167, 5) For a foreign address, fill with blanks
+                raHeader.append(ZIP.toUpperCase().padRight(5, ' ').take(5)) // Fixme
+                // Zip Code Extension (168-171, 4) If not applicable, fill with blanks
+                raHeader.append(ZIP_EXT.toUpperCase().padRight(4, ' ').take(4)) // Fixme
+                // Blank (172-176, 5)
+                raHeader.append("".padRight(5, ' '))
+                // Foreign State/Province (177-199, 23) If applicable, otherwise blank
+                raHeader.append(FOREIGN.toUpperCase().padRight(23, ' ').take(23)) // Fixme
+                // Foreign Postal Code (200-214, 15)
+                raHeader.append(FOREIGN_POSTAL_CODE.toUpperCase().padRight(15, ' ').take(15)) // Fixme
+                // Country Code (215-216, 2) If one of the following, fill with blanks:
+                    // * One of the 50 States of the U.S.A.
+                    // * District of Columbia
+                    // * Military Post Office (MPO)
+                    // * American Samoa
+                    // * Guam
+                    // * Northern Mariana Islands
+                    // * Puerto Rico
+                    // * Virgin Islands
+                    // * Otherwise, enter the applicable Country Code (see Appendix G).
+                raHeader.append(COUNTRY_CODE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+
+                //******************************************************************************
+                // Submitter
+                //******************************************************************************
+                // Submitter Name (217-273, 57)
+                raHeader.append(submitter.name.toUpperCase().padRight(57, ' ').take(2))
+                // Location Address (274-295, 22) (Attention, Suite, Room Number, etc.)
+                raHeader.append(SUBMITTER_ADDR2.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                // Delivery Address (296-317, 22) (Street Number and Name or PO Box)
+                raHeader.append(SUBMITTER_ADDR1.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                // City (318-339, 22)
+                raHeader.append(SUBMITTER_CITY.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                // State Abbreviation (340-341, 2) Foreign Addresses fill with blanks
+                raHeader.append(SUBMITTER_STATE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                // Zip Code (342-346, 5) For a foreign address, fill with blanks
+                raHeader.append(SUBMITTER_ZIP.toUpperCase().padRight(5, ' ').take(5)) // Fixme
+                // Zip Code Extension (347-350, 4) If not applicable, fill with blanks
+                raHeader.append(SUBMITTER_ZIP_EXT.toUpperCase().padRight(4, ' ').take(4)) // Fixme
+                // Blank (351-355, 5)
+                raHeader.append("".padRight(5, ' '))
+                // Foreign State/Province (356-378, 23) If applicable, otherwise blank
+                raHeader.append(SUBMITTER_FOREIGN.toUpperCase().padRight(23, ' ').take(23)) // Fixme
+                // Foreign Postal Code (379-393, 15)
+                raHeader.append(SUBMITTER_FOREIGN_POSTAL_CODE.toUpperCase().padRight(15, ' ').take(15)) // Fixme
+                // Country Code (394-395, 2) If one of the following, fill with blanks:
+                    // * One of the 50 States of the U.S.A.
+                    // * District of Columbia
+                    // * Military Post Office (MPO)
+                    // * American Samoa
+                    // * Guam
+                    // * Northern Mariana Islands
+                    // * Puerto Rico
+                    // * Virgin Islands
+                    // * Otherwise, enter the applicable Country Code (see Appendix G).
+                raHeader.append(SUBMITTER_COUNTRY_CODE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                // Contact Name (396-422, 27) Submitter Contact Name
+                raHeader.append(SUBMITTER_CONTACT_NAME.toUpperCase().padRight(27, ' ').take(2)) // Fixme
+                // Contact Phone Number (423-437, 15) contact phone with numeric values only (including area code).take(left justify and blank fill
+                raHeader.append(SUBMITTER_CONTACT_PHONE.replaceAll("\\p{P}", "").padRight(15, ' ').take(15)) // Remove Punctuation; Fixme
+                // Contact Phone Extension (438-442, 5), left justify and blank fill
+                raHeader.append(SUBMITTER_CONTACT_PHONE_EXT.replaceAll("\\p{P}", "").padRight(5, ' ').take(5)) // Remove Punctuation; Fixme
+                // Blank (443-445, 3)
+                raHeader.append("".padRight(3, ' '))
+                // Contact E-Mail Internet (446-485, 40) Cannot be blank, can be mixed case
+                raHeader.append(SUBMITTER_CONTACT_EMAIL.padRight(40, ' ').take(40)) // Fixme
+                // Blank (486-488, 3)
+                raHeader.append("".padRight(3, ' '))
+                // Contact Fax (489-498, 10) for US Only, includes area code
+                raHeader.append(SUBMITTER_CONTACT_FAX.replaceAll("\\p{P}", "").padRight(10, ' ').take(10)) // Remove Punctuation; Fixme
+                // Blank (499-499, 1)
+                raHeader.append("".padRight(1, ' '))
+
+                // Preparer Code (500-500, 1)
+                // Enter one of the following codes to indicate who prepared this file:
+                //     * A (Accounting Firm)
+                //     * L (Self-Prepared)
+                //     * S (Service Bureau)
+                //     * P (Parent Company)
+                //     * O (Other)
+                // Note: If more than one code applies, use the code that best describes who prepared this file.
+                raHeader.append(preparerCode.toUpperCase().padRight(1, ' ').take(1))
+                // Blank (501-512, 12)
+                raHeader.append("".padRight(12, ' '))
+
+                lines.add(raHeader)
+
+// Fixme: find employers
+                for (Map employer in employerList) {
+                    ////////////////////////////////////////////////////////////////////////////////
+                    // RE Empolyer Record (Required)
+                    ////////////////////////////////////////////////////////////////////////////////
+                    StringBuilder reHeader = new StringBuilder(512)
+                    // Record Identifier (1-2, 2)
+                    reHeader.append("RE")
+                    // Tax Year (3-6, 4)
+                    reHeader.append(TAX_YEAR.replaceAll("\\p{P}", "").padLeft(4, '0').take(4)) // Fixme
+                    // Agent Identifier Code (7-1, 1)
+                    // NOTE: Review Section 2.1 - Agent Determination before entering a “1,” “2” or “3” in this field.
+                    // If applicable, enter one of the following codes:
+                    //    * "1" 2678 Agent (Approved by IRS)
+                    //    * "2" Common Paymaster (A corporation that pays an employee who works for two or more related corporations at the same time.)
+                    //    * "3" 3504 Agent
+                    // Otherwise, fill with a blank.
+                    reHeader.append(AGENT_INDICATOR.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    // Employer/Agent Identification Number (EIN) (8-16, 9)
+                    //    * Enter only numeric characters.
+                    //    * Omit hyphens.
+                    //    * Do not begin with 00, 07, 08, 09, 17, 18, 19, 28, 29, 49, 69, 70, 78, 79 or 89.
+                    //    * Enter the EIN under which tax payments were submitted to the IRS under Form 941, 943, 944, CT-1 or Schedule H.
+                    //        - If employer tax payments were deposited under the EIN of the Agent, enter the EIN of the Agent.
+                    //        - If employer tax payments were deposited under the EIN of the employer, enter the EIN of the employer.
+                    //    * If you entered a “1”, “2” or “3” in the Agent Indicator Code field (position 7); enter the EIN of the Agent.
+                    //    * See “Other EIN” (positions 31- 39) if taxes were deposited under more than one EIN during the year.
+                    reHeader.append(employer.ein.replaceAll("\\p{P}", "").padLeft(9, '0').take(9)) // Removes all punctuation; Fixme; conditional EIN
+                    // Agent for EIN (17-25, 9)
+                    //    If you entered a "1" in the Agent Indicator Code field (position 7), enter the Employer’s EIN for which you
+                    //    are an Agent.  Otherwise, fill with blanks
+                    reHeader.append(AGENT_EIN.replaceAll("\\p{P}", "").padLeft(9, '0').take(9)) // Removes all punctuation; Fixme
+                    // Terminating Business Indicator(26-26, 1)
+                    //     If this is the last tax year that W-2s will be filed under this EIN, enter "1."  Otherwise, enter "0" (zero).
+                    reHeader.append(TERMINATING_INDICATOR.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    // Establishment Number (27-30, 4)
+                    //     For multiple RE Records with the same EIN, you may use this field to assign a unique identifier for
+                    //     each RE Record (i.e., store for factory locations or types of payroll). Enter any combination of
+                    //     blanks, numbers, letters or keyboard characters.  Otherwise, fill with blanks.
+                    reHeader.append(ESTABLISHMENT_NUMBER.toUpperCase().padRight(4, ' ').take(4)) // Fixme
+                    // Other EIN (31-39, 9)
+                    //     For this tax year, if you submitted tax payments to the IRS under Form 941, 943, 944, CT-1 or Schedule H
+                    //     or W-2 data to SSA, and you used an EIN different from the EIN in positions 8 - 16, enter the other EIN.
+                    reHeader.append(OTHER_EIN.replaceAll("\\p{P}", "").padLeft(9, '0').take(9)) // Removes all punctuation; Fixme
+                    //******************************************************************************
+                    // Employer
+                    //******************************************************************************
+                    // Employer Name (40-96, 57)
+                    raHeader.append(employer.name.toUpperCase().padRight(57, ' ').take(57))
+                    // Location Address (97-118, 22) (Attention, Suite, Room Number, etc.)
+                    raHeader.append(EMPLOYER_ADDR2.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                    // Delivery Address (119-140, 22) (Street Number and Name or PO Box)
+                    raHeader.append(EMPLOYER_ADDR1.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                    // City (141-162, 22)
+                    raHeader.append(EMPLOYER_CITY.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                    // State Abbreviation (163-164, 2) Foreign Addresses fill with blanks
+                    raHeader.append(EMPLOYER_STATE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                    // Zip Code (165-169, 5) For a foreign address, fill with blanks
+                    raHeader.append(EMPLOYER_ZIP.toUpperCase().padRight(5, ' ').take(5)) // Fixme
+                    // Zip Code Extension (170-173, 4) If not applicable, fill with blanks
+                    raHeader.append(EMPLOYER_ZIP_EXT.toUpperCase().padRight(4, ' ').take(4)) // Fixme
+                    // Kind of Employer (174-174, 1)
+                    //    Enter the appropriate kind of employer:
+                    //        F = Federal govt.
+                    //            (Federal government entity or instrumentality)
+                    //        S = State/local non-501c.
+                    //            (State or local government or instrumentality (this includes cities, townships, counties,
+                    //             special-purpose districts or other publicly-owned entities with governmental authority))
+                    //        T = 501c non-govt.
+                    //            (Non-governmental tax-exempt section 501(c) organization (types of 501(c) non-governmental
+                    //             organizations include private foundations, public charities, social and recreation clubs and
+                    //             veterans organizations))
+                    //        Y = State/local 501c.
+                    //             (State or local government or instrumentality where the employer received a determination
+                    //              letter from the IRS indication that they are also a tax-exempt organization under section 501(c)(3))
+                    //        N = None Apply
+                    // Note: Leave blank if the Tax Jurisdiction Code in position 220 of the RE Record is P (Puerto Rico).
+                    reHeader.append(KIND_OF_EMPLOYER.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    // Foreign State/Province (179-201, 23) If applicable, otherwise blank
+                    reHeader.append(FOREIGN.toUpperCase().padRight(23, ' ').take(23)) // Fixme
+                    // Foreign Postal Code (202-216, 15)
+                    reHeader.append(FOREIGN_POSTAL_CODE.toUpperCase().padRight(15, ' ').take(15)) // Fixme
+                    // Country Code (217-218, 2) If one of the following, fill with blanks:
+                    //    * One of the 50 States of the U.S.A.
+                    //    * District of Columbia
+                    //    * Military Post Office (MPO)
+                    //    * American Samoa
+                    //    * Guam
+                    //    * Northern Mariana Islands
+                    //    * Puerto Rico
+                    //    * Virgin Islands
+                    //    * Otherwise, enter the applicable Country Code (see Appendix G).
+                    reHeader.append(COUNTRY_CODE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                    // Employment Code (219-219, 1)
+                    //    Enter the appropriate employment code:
+                    //        A = Agriculture                              Form 943
+                    //        H = Household                                Schedule H
+                    //        M = Military                                 Form 941
+                    //        Q = Medicare Qualified Government Employment Form 941
+                    //        X = Railroad                                 CT-1
+                    //        F = Regular                                  Form 944
+                    //        R = Regular (all others)                     Form 941
+                    //    If the Tax Jurisdiction Code in position 220 of the RE Record is blank (domestic), reporting Employment
+                    //        Code ‘Q’ (MQGE) is valid for tax year 1983 through the current tax year.
+                    //    If the Tax Jurisdiction Code in position 220 of the RE Record is P, V, G, S, or N (not domestic),
+                    //        reporting Employment Code ‘Q’ (MQGE) is valid for tax years 1986 through the current tax year.
+                    //    Note: Railroad reporting is not applicable for Puerto Rico and territorial employers.
+                    reHeader.append(EMPLOYMENT_CODE.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    // Tax Jurisdiction Code (220-220, 1)
+                    //    Enter the code that identifies the type of income tax withheld from the employee’s earnings.
+                    //    Blank =                      W-2
+                    //    V = Virgin Islands           W-2VI
+                    //    G = Guam                     W-2GU
+                    //    S = American Samoa           W-2AS
+                    //    N = Northern Mariana Islands W-2CM
+                    //    P = Puerto Rico              W-2PR/499R-2
+                    reHeader.append(TAX_JURISDICTION_CODE.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    // Third Party Sick Pay Indicator (221-221, 1)
+                    reHeader.append(THIRD_PARTY_SICK_INDICATOR.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    // Employer Contact Name (222-248, 27)
+                    reHeader.append(EMPLOYER_CONTACT_NAME.toUpperCase().padRight(27, ' ').take(2)) // Fixme
+                    // EmployerContact Phone Number (249-263, 15) contact phone with numeric values only (including area code), left justify and blank fill
+                    reHeader.append(EMPLOYER_CONTACT_PHONE.replaceAll("\\p{P}", "").padRight(15, ' ').take(15)) // Remove Punctuation; Fixme
+                    // EmployerContact Phone Extension (264-268, 5), left justify and blank fill
+                    reHeader.append(EMPLOYER_CONTACT_PHONE_EXT.replaceAll("\\p{P}", "").padRight(5, ' ').take(5)) // Remove Punctuation; Fixme
+                    // Employer Contact Fax (489-498, 10) for US Only, includes area code
+                    reHeader.append(EMPLOYER_CONTACT_FAX.replaceAll("\\p{P}", "").padRight(10, ' ').take(10)) // Remove Punctuation; Fixme
+                    // EmployerContact E-Mail Internet (446-485, 40) Cannot be blank, can be mixed case
+                    reHeader.append(EMPLOYER_CONTACT_EMAIL.padRight(40, ' ').take(40)) // Fixme
+                    // Blank
+                    reHeader.append("".padRight(194, ' '))
+
+                }
+
+
+            ]]></script>
+        </actions>
+    </service>
     <service verb="get" noun="UsaIrs1099MiscFormData">
         <!-- NOTE: currently supports only one federal and state; to support multiple states with
             different wage/etc amounts other payroll services/etc would also need to be changed -->
