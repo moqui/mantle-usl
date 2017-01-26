@@ -842,7 +842,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="timePeriod" type="Map"/>
             <parameter name="employment" type="Map"/>
 
-            <parameter name="employeeFirstName"/>
+            <parameter name="employeeFirstName"/> <!-- TODO: This includes middle name; there are places such as EFW2 that is not desirable/allowed -->
             <parameter name="employeeLastName"/>
             <parameter name="employeeSuffix"/>
             <parameter name="employeeSsn"/>
@@ -887,6 +887,7 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="employeeHomeContactInfo"
                     in-map="[partyId:employment.toPartyId, postalContactMechId:employment.taxHomeContactMechId,
                         postalContactMechPurposeId:'PostalHome']"/>
+            <!-- TODO: Shouldn't the unit number go along with address line 2? -->
             <script>employeeHomeStreetString = """${employeeHomeContactInfo?.postalAddress?.address1 ? employeeHomeContactInfo.postalAddress.address1 + (employeeHomeContactInfo.postalAddress.unitNumber ? ' #' + employeeHomeContactInfo.postalAddress.unitNumber : '') : ''}${employeeHomeContactInfo?.postalAddress?.address2 ? '\n' + employeeHomeContactInfo.postalAddress.address2 : ''}"""</script>
             <script>employeeHomeCszString = """${employeeHomeContactInfo?.postalAddress ? (employeeHomeContactInfo.postalAddress.city ?: '') + (employeeHomeContactInfo.postalAddressStateGeo?.geoCodeAlpha2 ? ', ' + employeeHomeContactInfo.postalAddressStateGeo.geoCodeAlpha2 : '') + ' ' + (employeeHomeContactInfo.postalAddress.postalCode ?: '') + (employeeHomeContactInfo.postalAddress.postalCodeExt ? '-' + employeeHomeContactInfo.postalAddress.postalCodeExt : '') + (employeeHomeContactInfo.postalAddressCountryGeo?.geoCodeAlpha3 ? ' ' + employeeHomeContactInfo.postalAddressCountryGeo.geoCodeAlpha3 : '') : ''}"""</script>
             <script>employeeHomeString = """${employeeHomeStreetString}\n${employeeHomeCszString}"""</script>
@@ -1097,10 +1098,10 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="timePeriodId" required="true"/>
             <parameter name="submitterPartyId" required="true"/>
+            <parameter name="agentPartyId"/>
             <parameter name="resubWfid" default=""/> <!-- If resubmission, the WFID issued by SSA -->
             <parameter name="preparerCode" default="L"/>
-            <!-- TODO: allow selective employers or all? -->
-            <!-- TODO: allow selective employees or all? -->
+            <parameter name="terminatingBusiness" default="N"/>
         </in-parameters>
         <out-parameters>
             <parameter name="fileText"/>
@@ -1172,10 +1173,23 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- Create RF Final Record (Required) -->
 
             <service-call name="mantle.other.TaxServices.get#PayerTaxInfo" in-map="[partyId:submitterPartyId]" out-map="submitter"/>
+            <if condition="submitter == null"><return error="true" message="Submitter is required."/></if>
+
+            <!-- Agents are optional, and are defined per employer, but this only uses one -->
+            <service-call name="mantle.other.TaxServices.get#PayerTaxInfo" in-map="[partyId:agentPartyId]" out-map="agent"/>
 
             <!-- get employmentList and timePeriod -->
             <service-call name="mantle.humanres.PayrollServices.get#TimePeriodEmployments"
                           in-map="[timePeriodId:timePeriodId, ignoreType:true]" out-map="context"/>
+            <if condition="!timePeriod"><return error="true" message="Time period is invalid"/></if>
+            <if condition="!employmentList"><return error="true" message="No employements found for time period"/></if>
+
+            <!-- EFW2 supports multiple employers even though time periods only encompass one -->
+            <!-- Further, this currently infers that the lone employer is the company submitting the EFW2; if this is not correct
+                 redefine company -->
+            <service-call name="mantle.other.TaxServices.get#PayerTaxInfo" in-map="[partyId:timePeriod?.partyId]" out-map="company"/>
+            <set field="employerList" from="[company]"/>
+
 
             <script><![CDATA[
                 import org.moqui.context.ExecutionContext
@@ -1190,45 +1204,66 @@ along with this software (see the LICENSE.md file). If not, see
                 StringBuilder raHeader = new StringBuilder(512)
                 // Record Identifier (1-2, 2)
                 raHeader.append("RA")
+
                 // Submitter's Employer Identification Number (EIN) (3-11, 9)
-                raHeader.append(submitter?.ein?.replaceAll("\\p{P}", "")?.padLeft(9, '0').take(9)) // Remove all punctuation
+                raHeader.append(submitter?.ein?.replaceAll("\\p{P}", "")?.padLeft(9, '0')?.take(9)) // Remove all punctuation
+
                 // User Identification (User ID) (12-10, 8)
                 raHeader.append(submitter?.uid?.toUpperCase()?.padRight(8, ' ')?.take(8))
+
                 // Software Vendor Code (20-13, 4)
                 String softwareVendorCode = ec.user.getPreference('org.nactp.software.vendor.id') ?: ""
-                raHeader.append(softwareVendorCode.padRight(4, ' ').take(4))
+                raHeader.append(softwareVendorCode.padRight(4, ' ')?.take(4))
+
                 // Blank (24-28, 5)
                 raHeader.append("".padRight(5, ' '))
+
                 // Resub Indicator (29-29, 1) // 1 if being resubmitted, otherwise 0
                 raHeader.append(resubWfid.trim().empty() ? "0" : "1")
+
                 // Resub Wage File Identifier (WFID) (30-35, 6)
-                raHeader.append(resubWfid.toUpperCase().padRight(6, ' '), 6))
+                raHeader.append(resubWfid?.toUpperCase()?.padRight(6, ' ')?.take(6))
+
                 // Software Code (36-37, 2)
                 raHeader.append(softwareVendorCode.empty() ? "98" : "99")
 
                 //******************************************************************************
-                // Company
+                // Company (Currently inferred as the first and only employer for the time period)
                 //******************************************************************************
                 // Company Name (38-94, 57)
-                raHeader.append(submitter.name.toUpperCase().padRight(57, ' ').take(57)) // Fixme, which name?
+                raHeader.append(company?.name?.toUpperCase()?.padRight(57, ' ')?.take(57))
+
                 // Location Address (95-116, 22) (Attention, Suite, Room Number, etc.)
-                raHeader.append(ADDR2.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                String cmpAddress2 = company?.contactInfo?.postalAddress?.address2 ?: ''
+                String cmpUnit = company?.contactInfo?.postalAddress?.unit ? '#' + company?.contactInfo?.postalAddress?.address2 : ''
+                String cmpLocAddress = cmpAddress2 ? (cmpUnit ? (cmpAddress2 + ' ' + cmpUnit) : cmpAddress2) : cmpUnit
+                raHeader.append(cmpLocAddress.padRight(22, ' ')?.take(22))
+
                 // Delivery Address (117-138, 22) (Street Number and Name or PO Box)
-                raHeader.append(ADDR1.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                raHeader.append(company?.contactInfo?.postalAddress?.address1?.toUpperCase()?.padRight(22, ' ')?.take(22))
+
                 // City (139-160, 22)
-                raHeader.append(CITY.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                raHeader.append(company?.contactInfo?.postalAddress?.city?.toUpperCase()?.padRight(22, ' ')?.take(22))
+
                 // State Abbreviation (161-162, 2) Foreign Addresses fill with blanks
-                raHeader.append(STATE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                Boolean cmpHasUsAddress = company?.contactInfo?.postalAddressCountryGeo?.geoId == 'USA'
+                raHeader.append((cmpHasUsAddress ? company?.contactInfo?.postalAddressStateGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(2, ' ')?.take(2))
+
                 // Zip Code (163-167, 5) For a foreign address, fill with blanks
-                raHeader.append(ZIP.toUpperCase().padRight(5, ' ').take(5)) // Fixme
+                raHeader.append((cmpHasUsAddress ? company?.contactInfo?.postalCode : '')?.toUpperCase()?.padRight(5, ' ')?.take(5))
+
                 // Zip Code Extension (168-171, 4) If not applicable, fill with blanks
-                raHeader.append(ZIP_EXT.toUpperCase().padRight(4, ' ').take(4)) // Fixme
+                raHeader.append((cmpHasUsAddress ? company?.contactInfo?.postalCodeExt : '')?.toUpperCase()?.padRight(4, ' ')?.take(4))
+
                 // Blank (172-176, 5)
                 raHeader.append("".padRight(5, ' '))
+
                 // Foreign State/Province (177-199, 23) If applicable, otherwise blank
-                raHeader.append(FOREIGN.toUpperCase().padRight(23, ' ').take(23)) // Fixme
+                raHeader.append((!cmpHasUsAddress ? company?.contactInfo?.postalAddressStateGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(23, ' ')?.take(23))
+
                 // Foreign Postal Code (200-214, 15)
-                raHeader.append(FOREIGN_POSTAL_CODE.toUpperCase().padRight(15, ' ').take(15)) // Fixme
+                raHeader.append((!cmpHasUsAddress ? company?.contactInfo?.postalCode : '')?.toUpperCase()?.padRight(15, ' ')?.take(15))
+
                 // Country Code (215-216, 2) If one of the following, fill with blanks:
                     // * One of the 50 States of the U.S.A.
                     // * District of Columbia
@@ -1239,31 +1274,44 @@ along with this software (see the LICENSE.md file). If not, see
                     // * Puerto Rico
                     // * Virgin Islands
                     // * Otherwise, enter the applicable Country Code (see Appendix G).
-                raHeader.append(COUNTRY_CODE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                raHeader.append((!cmpHasUsAddress ? company?.contactInfo?.postalAddressCountryGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(2, ' ')?.take(2))
 
                 //******************************************************************************
                 // Submitter
                 //******************************************************************************
                 // Submitter Name (217-273, 57)
-                raHeader.append(submitter.name.toUpperCase().padRight(57, ' ').take(2))
+                raHeader.append(submitter?.name?.toUpperCase()?.padRight(57, ' ')?.take(2))
+
                 // Location Address (274-295, 22) (Attention, Suite, Room Number, etc.)
-                raHeader.append(SUBMITTER_ADDR2.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                String subAddress2 = submitter?.contactInfo?.postalAddress?.address2 ?: ''
+                String subUnit = submitter?.contactInfo?.postalAddress?.unit ? '#' + submitter?.contactInfo?.postalAddress?.address2 : ''
+                String subLocAddress = subAddress2 ? (subUnit ? (subAddress2 + ' ' + subUnit) : subAddress2) : subUnit
+                raHeader.append(subLocAddress?.toUpperCase()?.padRight(22, ' ')?.take(22))
+
                 // Delivery Address (296-317, 22) (Street Number and Name or PO Box)
-                raHeader.append(SUBMITTER_ADDR1.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                raHeader.append(submitter?.contactInfo?.postalAddress?.address1?.toUpperCase()?.padRight(22, ' ')?.take(22))
+
                 // City (318-339, 22)
-                raHeader.append(SUBMITTER_CITY.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                raHeader.append(submitter?.contactInfo?.postalAddress?.city?.toUpperCase()?.padRight(22, ' ')?.take(22))
+
                 // State Abbreviation (340-341, 2) Foreign Addresses fill with blanks
-                raHeader.append(SUBMITTER_STATE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                Boolean subHasUsAddress = submitter?.contactInfo?.postalAddressCountryGeo?.geoId == 'USA'
+                raHeader.append((subHasUsAddress ? submitter?.contactInfo?.postalAddressStateGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(2, ' ')?.take(2))
+
                 // Zip Code (342-346, 5) For a foreign address, fill with blanks
-                raHeader.append(SUBMITTER_ZIP.toUpperCase().padRight(5, ' ').take(5)) // Fixme
+                raHeader.append((subHasUsAddress ? submitter?.contactInfo?.postalCode : '')?.toUpperCase()?.padRight(5, ' ')?.take(5))
+
                 // Zip Code Extension (347-350, 4) If not applicable, fill with blanks
-                raHeader.append(SUBMITTER_ZIP_EXT.toUpperCase().padRight(4, ' ').take(4)) // Fixme
+                raHeader.append((subHasUsAddress ? submitter?.contactInfo?.postalCodeExt : '')?.toUpperCase()?.padRight(4, ' ')?.take(4))
+
                 // Blank (351-355, 5)
                 raHeader.append("".padRight(5, ' '))
                 // Foreign State/Province (356-378, 23) If applicable, otherwise blank
-                raHeader.append(SUBMITTER_FOREIGN.toUpperCase().padRight(23, ' ').take(23)) // Fixme
+                raHeader.append((!subHasUsAddress ? submitter?.contactInfo?.postalAddressStateGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(23, ' ')?.take(23))
+
                 // Foreign Postal Code (379-393, 15)
-                raHeader.append(SUBMITTER_FOREIGN_POSTAL_CODE.toUpperCase().padRight(15, ' ').take(15)) // Fixme
+                raHeader.append((!subHasUsAddress ? submitter?.contactInfo?.postalCode : '')?.toUpperCase()?.padRight(15, ' ')?.take(15))
+
                 // Country Code (394-395, 2) If one of the following, fill with blanks:
                     // * One of the 50 States of the U.S.A.
                     // * District of Columbia
@@ -1274,21 +1322,29 @@ along with this software (see the LICENSE.md file). If not, see
                     // * Puerto Rico
                     // * Virgin Islands
                     // * Otherwise, enter the applicable Country Code (see Appendix G).
-                raHeader.append(SUBMITTER_COUNTRY_CODE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                raHeader.append((!subHasUsAddress ? submitter?.contactInfo?.postalAddressCountryGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(2, ' ')?.take(2))
+
                 // Contact Name (396-422, 27) Submitter Contact Name
-                raHeader.append(SUBMITTER_CONTACT_NAME.toUpperCase().padRight(27, ' ').take(2)) // Fixme
-                // Contact Phone Number (423-437, 15) contact phone with numeric values only (including area code).take(left justify and blank fill
-                raHeader.append(SUBMITTER_CONTACT_PHONE.replaceAll("\\p{P}", "").padRight(15, ' ').take(15)) // Remove Punctuation; Fixme
+                raHeader.append(submitter?.contactInfo?.toName?.toUpperCase()?.padRight(27, ' ')?.take(2))
+
+                // Contact Phone Number (423-437, 15) contact phone with numeric values only (including area code) left justify and blank fill
+                raHeader.append(submitter?.phoneString?.replaceAll("\\p{P}", "")?.padRight(15, ' ')?.take(15)) // Remove Punctuation; FIXME: Should not contain +1 for US?
+
                 // Contact Phone Extension (438-442, 5), left justify and blank fill
-                raHeader.append(SUBMITTER_CONTACT_PHONE_EXT.replaceAll("\\p{P}", "").padRight(5, ' ').take(5)) // Remove Punctuation; Fixme
+
+                raHeader.append(""?.replaceAll("\\p{P}", "")?.padRight(5, ' ')?.take(5)) // Remove Punctuation; FIXME: this doesn't exist yet
                 // Blank (443-445, 3)
                 raHeader.append("".padRight(3, ' '))
+
                 // Contact E-Mail Internet (446-485, 40) Cannot be blank, can be mixed case
-                raHeader.append(SUBMITTER_CONTACT_EMAIL.padRight(40, ' ').take(40)) // Fixme
+                raHeader.append(submitter?.contactInfo?.postalAddressStateGeo?.emailAddress.padRight(40, ' ')?.take(40))
+
                 // Blank (486-488, 3)
                 raHeader.append("".padRight(3, ' '))
+
                 // Contact Fax (489-498, 10) for US Only, includes area code
-                raHeader.append(SUBMITTER_CONTACT_FAX.replaceAll("\\p{P}", "").padRight(10, ' ').take(10)) // Remove Punctuation; Fixme
+                raHeader.append(""?.replaceAll("\\p{P}", "")?.padRight(10, ' ')?.take(10)) // Remove Punctuation; FIXME: need 10 digit fax number
+
                 // Blank (499-499, 1)
                 raHeader.append("".padRight(1, ' '))
 
@@ -1300,13 +1356,14 @@ along with this software (see the LICENSE.md file). If not, see
                 //     * P (Parent Company)
                 //     * O (Other)
                 // Note: If more than one code applies, use the code that best describes who prepared this file.
-                raHeader.append(preparerCode.toUpperCase().padRight(1, ' ').take(1))
+                raHeader.append(preparerCode?.toUpperCase()?.padRight(1, ' ')?.take(1))
+
                 // Blank (501-512, 12)
                 raHeader.append("".padRight(12, ' '))
 
                 lines.add(raHeader)
 
-// Fixme: find employers
+                // employerList is allowed to contain more than one employer, but will only contain the one for the time period
                 for (Map employer in employerList) {
                     ////////////////////////////////////////////////////////////////////////////////
                     // RE Empolyer Record (Required)
@@ -1315,7 +1372,8 @@ along with this software (see the LICENSE.md file). If not, see
                     // Record Identifier (1-2, 2)
                     reHeader.append("RE")
                     // Tax Year (3-6, 4)
-                    reHeader.append(TAX_YEAR.replaceAll("\\p{P}", "").padLeft(4, '0').take(4)) // Fixme
+                    reHeader.append(timePeriod?.periodNum?.replaceAll("\\p{P}", "")?.padLeft(4, '0')?.take(4))
+
                     // Agent Identifier Code (7-1, 1)
                     // NOTE: Review Section 2.1 - Agent Determination before entering a “1,” “2” or “3” in this field.
                     // If applicable, enter one of the following codes:
@@ -1323,7 +1381,8 @@ along with this software (see the LICENSE.md file). If not, see
                     //    * "2" Common Paymaster (A corporation that pays an employee who works for two or more related corporations at the same time.)
                     //    * "3" 3504 Agent
                     // Otherwise, fill with a blank.
-                    reHeader.append(AGENT_INDICATOR.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    reHeader.append((agent?.federalAgentIndicatorCode ?: '')?.toUpperCase()?.padRight(1, ' ')?.take(1))
+
                     // Employer/Agent Identification Number (EIN) (8-16, 9)
                     //    * Enter only numeric characters.
                     //    * Omit hyphens.
@@ -1333,40 +1392,56 @@ along with this software (see the LICENSE.md file). If not, see
                     //        - If employer tax payments were deposited under the EIN of the employer, enter the EIN of the employer.
                     //    * If you entered a “1”, “2” or “3” in the Agent Indicator Code field (position 7); enter the EIN of the Agent.
                     //    * See “Other EIN” (positions 31- 39) if taxes were deposited under more than one EIN during the year.
-                    reHeader.append(employer.ein.replaceAll("\\p{P}", "").padLeft(9, '0').take(9)) // Removes all punctuation; Fixme; conditional EIN
+                    reHeader.append((agent ?: employer)?.ein?.replaceAll("\\p{P}", "")?.padLeft(9, '0')?.take(9)) // Removes all punctuation
+
                     // Agent for EIN (17-25, 9)
                     //    If you entered a "1" in the Agent Indicator Code field (position 7), enter the Employer’s EIN for which you
                     //    are an Agent.  Otherwise, fill with blanks
-                    reHeader.append(AGENT_EIN.replaceAll("\\p{P}", "").padLeft(9, '0').take(9)) // Removes all punctuation; Fixme
+                    reHeader.append((agent ? employer?.ein : '')?.replaceAll("\\p{P}", "")?.padLeft(9, '0')?.take(9)) // Removes all punctuation
+
                     // Terminating Business Indicator(26-26, 1)
                     //     If this is the last tax year that W-2s will be filed under this EIN, enter "1."  Otherwise, enter "0" (zero).
-                    reHeader.append(TERMINATING_INDICATOR.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    reHeader.append("0"?.toUpperCase()?.padRight(1, ' ')?.take(1)) // Hard Coded to not terminating business
+
                     // Establishment Number (27-30, 4)
                     //     For multiple RE Records with the same EIN, you may use this field to assign a unique identifier for
                     //     each RE Record (i.e., store for factory locations or types of payroll). Enter any combination of
                     //     blanks, numbers, letters or keyboard characters.  Otherwise, fill with blanks.
-                    reHeader.append(ESTABLISHMENT_NUMBER.toUpperCase().padRight(4, ' ').take(4)) // Fixme
+                    reHeader.append(""?.toUpperCase()?.padRight(4, ' ')?.take(4)) // This would require a repeating RE section because of the same EIN if used
+
                     // Other EIN (31-39, 9)
                     //     For this tax year, if you submitted tax payments to the IRS under Form 941, 943, 944, CT-1 or Schedule H
                     //     or W-2 data to SSA, and you used an EIN different from the EIN in positions 8 - 16, enter the other EIN.
-                    reHeader.append(OTHER_EIN.replaceAll("\\p{P}", "").padLeft(9, '0').take(9)) // Removes all punctuation; Fixme
+                    reHeader.append(""?.replaceAll("\\p{P}", "")?.padLeft(9, '0')?.take(9)) // Hard coded to no other EIN used during the year; There is no EIN history?
+
                     //******************************************************************************
                     // Employer
                     //******************************************************************************
                     // Employer Name (40-96, 57)
-                    raHeader.append(employer.name.toUpperCase().padRight(57, ' ').take(57))
+                    raHeader.append(employer?.name?.toUpperCase()?.padRight(57, ' ')?.take(57))
+
                     // Location Address (97-118, 22) (Attention, Suite, Room Number, etc.)
-                    raHeader.append(EMPLOYER_ADDR2.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                    String emprAddress2 = company?.contactInfo?.postalAddress?.address2 ?: ''
+                    String emprUnit = company?.contactInfo?.postalAddress?.unit ? '#' + employer?.contactInfo?.postalAddress?.address2 : ''
+                    String emprLocAddress = emprAddress2 ? (emprUnit ? (emprAddress2 + ' ' + emprUnit) : emprAddress2) : emprUnit
+                    raHeader.append(emprLocAddress?.toUpperCase()?.padRight(22, ' ')?.take(22))
+
                     // Delivery Address (119-140, 22) (Street Number and Name or PO Box)
-                    raHeader.append(EMPLOYER_ADDR1.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                    raHeader.append(employer?.contactInfo?.postalAddress?.toUpperCase()?.padRight(22, ' ')?.take(22))
+
                     // City (141-162, 22)
-                    raHeader.append(EMPLOYER_CITY.toUpperCase().padRight(22, ' ').take(22)) // Fixme
+                    raHeader.append(employer?.contactInfo?.postalAddress?.city?.toUpperCase()?.padRight(22, ' ')?.take(22))
+
                     // State Abbreviation (163-164, 2) Foreign Addresses fill with blanks
-                    raHeader.append(EMPLOYER_STATE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                    Boolean emprHasUsAddress = employer?.contactInfo?.postalAddressCountryGeo?.geoId == 'USA'
+                    raHeader.append((emprHasUsAddress ? employer?.contactInfo?.postalAddressStateGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(2, ' ')?.take(2))
+
                     // Zip Code (165-169, 5) For a foreign address, fill with blanks
-                    raHeader.append(EMPLOYER_ZIP.toUpperCase().padRight(5, ' ').take(5)) // Fixme
+                    raHeader.append((emprHasUsAddress ? employer?.contactInfo?.postalCode : '')?.toUpperCase()?.padRight(5, ' ')?.take(5))
+
                     // Zip Code Extension (170-173, 4) If not applicable, fill with blanks
-                    raHeader.append(EMPLOYER_ZIP_EXT.toUpperCase().padRight(4, ' ').take(4)) // Fixme
+                    raHeader.append((emprHasUsAddress ? employer?.contactInfo?.postalCodeExt : '')?.toUpperCase()?.padRight(4, ' ')?.take(4))
+
                     // Kind of Employer (174-174, 1)
                     //    Enter the appropriate kind of employer:
                     //        F = Federal govt.
@@ -1383,11 +1458,14 @@ along with this software (see the LICENSE.md file). If not, see
                     //              letter from the IRS indication that they are also a tax-exempt organization under section 501(c)(3))
                     //        N = None Apply
                     // Note: Leave blank if the Tax Jurisdiction Code in position 220 of the RE Record is P (Puerto Rico).
-                    reHeader.append(KIND_OF_EMPLOYER.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    reHeader.append("N"?.toUpperCase()?.padRight(1, ' ')?.take(1)) // Hard Coded to None Apply
+
                     // Foreign State/Province (179-201, 23) If applicable, otherwise blank
-                    reHeader.append(FOREIGN.toUpperCase().padRight(23, ' ').take(23)) // Fixme
+                    reHeader.append((!emprHasUsAddress ? employer?.contactInfo?.postalAddressStateGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(23, ' ')?.take(23))
+
                     // Foreign Postal Code (202-216, 15)
-                    reHeader.append(FOREIGN_POSTAL_CODE.toUpperCase().padRight(15, ' ').take(15)) // Fixme
+                    reHeader.append((!emprHasUsAddress ? employer?.contactInfo?.postalCode : '')?.toUpperCase()?.padRight(15, ' ')?.take(15))
+
                     // Country Code (217-218, 2) If one of the following, fill with blanks:
                     //    * One of the 50 States of the U.S.A.
                     //    * District of Columbia
@@ -1398,7 +1476,8 @@ along with this software (see the LICENSE.md file). If not, see
                     //    * Puerto Rico
                     //    * Virgin Islands
                     //    * Otherwise, enter the applicable Country Code (see Appendix G).
-                    reHeader.append(COUNTRY_CODE.toUpperCase().padRight(2, ' ').take(2)) // Fixme
+                    reHeader.append((!emprHasUsAddress ? employer?.contactInfo?.postalAddressCountryGeo?.geoCodeAlpha2 : '')?.toUpperCase()?.padRight(2, ' ')?.take(2))
+
                     // Employment Code (219-219, 1)
                     //    Enter the appropriate employment code:
                     //        A = Agriculture                              Form 943
@@ -1413,7 +1492,8 @@ along with this software (see the LICENSE.md file). If not, see
                     //    If the Tax Jurisdiction Code in position 220 of the RE Record is P, V, G, S, or N (not domestic),
                     //        reporting Employment Code ‘Q’ (MQGE) is valid for tax years 1986 through the current tax year.
                     //    Note: Railroad reporting is not applicable for Puerto Rico and territorial employers.
-                    reHeader.append(EMPLOYMENT_CODE.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    reHeader.append(EMPLOYMENT_CODE?.toUpperCase()?.padRight(1, ' ')?.take(1)) // Fixme
+
                     // Tax Jurisdiction Code (220-220, 1)
                     //    Enter the code that identifies the type of income tax withheld from the employee’s earnings.
                     //    Blank =                      W-2
@@ -1422,19 +1502,26 @@ along with this software (see the LICENSE.md file). If not, see
                     //    S = American Samoa           W-2AS
                     //    N = Northern Mariana Islands W-2CM
                     //    P = Puerto Rico              W-2PR/499R-2
-                    reHeader.append(TAX_JURISDICTION_CODE.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    reHeader.append(TAX_JURISDICTION_CODE?.toUpperCase()?.padRight(1, ' ')?.take(1)) // Fixme
+
                     // Third Party Sick Pay Indicator (221-221, 1)
-                    reHeader.append(THIRD_PARTY_SICK_INDICATOR.toUpperCase().padRight(1, ' ').take(1)) // Fixme
+                    reHeader.append(THIRD_PARTY_SICK_INDICATOR?.toUpperCase()?.padRight(1, ' ')?.take(1)) // Fixme
+
                     // Employer Contact Name (222-248, 27)
-                    reHeader.append(EMPLOYER_CONTACT_NAME.toUpperCase().padRight(27, ' ').take(2)) // Fixme
+                    reHeader.append(EMPLOYER_CONTACT_NAME?.toUpperCase()?.padRight(27, ' ')?.take(2)) // Fixme
+
                     // EmployerContact Phone Number (249-263, 15) contact phone with numeric values only (including area code), left justify and blank fill
-                    reHeader.append(EMPLOYER_CONTACT_PHONE.replaceAll("\\p{P}", "").padRight(15, ' ').take(15)) // Remove Punctuation; Fixme
+                    reHeader.append(EMPLOYER_CONTACT_PHONE?.replaceAll("\\p{P}", "")?.padRight(15, ' ')?.take(15)) // Remove Punctuation; Fixme
+
                     // EmployerContact Phone Extension (264-268, 5), left justify and blank fill
-                    reHeader.append(EMPLOYER_CONTACT_PHONE_EXT.replaceAll("\\p{P}", "").padRight(5, ' ').take(5)) // Remove Punctuation; Fixme
+                    reHeader.append(EMPLOYER_CONTACT_PHONE_EXT?.replaceAll("\\p{P}", "")?.padRight(5, ' ')?.take(5)) // Remove Punctuation; Fixme
+
                     // Employer Contact Fax (489-498, 10) for US Only, includes area code
-                    reHeader.append(EMPLOYER_CONTACT_FAX.replaceAll("\\p{P}", "").padRight(10, ' ').take(10)) // Remove Punctuation; Fixme
+                    reHeader.append(EMPLOYER_CONTACT_FAX?.replaceAll("\\p{P}", "")?.padRight(10, ' ')?.take(10)) // Remove Punctuation; Fixme
+
                     // EmployerContact E-Mail Internet (446-485, 40) Cannot be blank, can be mixed case
-                    reHeader.append(EMPLOYER_CONTACT_EMAIL.padRight(40, ' ').take(40)) // Fixme
+                    reHeader.append(EMPLOYER_CONTACT_EMAIL.padRight(40, ' ')?.take(40)) // Fixme
+
                     // Blank
                     reHeader.append("".padRight(194, ' '))
 
