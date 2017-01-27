@@ -25,11 +25,14 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="statusItem" type="Map"/>
             <parameter name="shipmentTypeEnum" type="Map"/>
             <parameter name="isIncoming" type="Boolean"/>
+            <parameter name="allowUpdate" type="Boolean"/>
             <parameter name="fromPartyDetail" type="Map"/>
             <parameter name="toPartyDetail" type="Map"/>
             <parameter name="statusHistoryList" type="List"><parameter name="auditLog" type="Map"/></parameter>
             <parameter name="shipmentItemDetailList" type="List"><parameter name="shipmentItemDetail" type="Map"/></parameter>
             <parameter name="shipmentRouteSegmentList" type="List"><parameter name="shipmentRouteSegment" type="Map"/></parameter>
+            <parameter name="firstRouteSegment" type="Map"/>
+            <parameter name="lastRouteSegment" type="Map"/>
             <parameter name="shipmentPackageList" type="List"><parameter name="shipmentPackage" type="Map"/></parameter>
             <parameter name="shipmentItemSourceList" type="List"><parameter name="shipmentItemSource"/></parameter>
             <parameter name="orderIdSet" type="Set"><parameter name="orderId"/></parameter>
@@ -42,6 +45,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="statusItem" from="shipment.'Shipment#moqui.basic.StatusItem'"/>
             <set field="shipmentTypeEnum" from="shipment.'ShipmentType#moqui.basic.Enumeration'"/>
             <set field="isIncoming" from="shipmentTypeEnum?.enumId == 'ShpTpIncoming' || shipmentTypeEnum?.parentEnumId == 'ShpTpIncoming'"/>
+            <set field="allowUpdate" from="shipment.statusId in ['ShipInput', 'ShipScheduled'] ||
+                    (isIncoming &amp;&amp; shipment.statusId in ['ShipShipped', 'ShipPicked', 'ShipPacked'])"/>
 
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromPartyDetail">
                 <field-map field-name="partyId" from="shipment.fromPartyId"/></entity-find-one>
@@ -59,6 +64,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="shipmentId"/><order-by field-name="productId"/></entity-find>
             <entity-find entity-name="mantle.shipment.ShipmentRouteSegmentDetail" list="shipmentRouteSegmentList">
                 <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
+            <set field="firstRouteSegment" from="shipmentRouteSegmentList ? shipmentRouteSegmentList.get(0) : null"/>
+            <set field="lastRouteSegment" from="shipmentRouteSegmentList ? shipmentRouteSegmentList.get(shipmentRouteSegmentList.size()-1) : null"/>
+
             <entity-find-related value-field="shipment" relationship-name="mantle.shipment.ShipmentPackage"
                     list="shipmentPackageList" order-by-list="['shipmentPackageSeqId']"/>
 
@@ -394,6 +402,26 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[shipmentId:shipmentId, shipmentPackageSeqId:shipmentPackageSeqId,
                                 shipmentRouteSegmentSeqId:srs.shipmentRouteSegmentSeqId]"/>
             </iterate>
+        </actions>
+    </service>
+    <service verb="update" noun="ShipmentPackageAndRouteSeg">
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="shipmentPackageSeqId" required="true"/>
+            <parameter name="shipmentRouteSegmentSeqId"><description>Defaults for first route segment</description></parameter>
+            <auto-parameters entity-name="mantle.shipment.ShipmentPackage" include="nonpk"/>
+            <auto-parameters entity-name="mantle.shipment.ShipmentPackageRouteSeg" include="nonpk"/>
+        </in-parameters>
+        <actions>
+            <if condition="!shipmentRouteSegmentSeqId">
+                <entity-find entity-name="mantle.shipment.ShipmentRouteSegment" list="routeSegList">
+                    <econdition field-name="shipmentId"/><select-field field-name="shipmentRouteSegmentSeqId"/></entity-find>
+                <set field="shipmentRouteSegmentSeqId" from="routeSegList ? routeSegList[0].shipmentRouteSegmentSeqId : null"/>
+            </if>
+            <if condition="!shipmentRouteSegmentSeqId"><return error="true" message="No route segment found on Shipment ${shipmentId}"/></if>
+
+            <service-call name="update#mantle.shipment.ShipmentPackage" in-map="context" out-map="context"/>
+            <service-call name="update#mantle.shipment.ShipmentPackageRouteSeg" in-map="context" out-map="context"/>
         </actions>
     </service>
 
@@ -1172,8 +1200,7 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
 
             <!-- consider doing this automatically when all quantities of all items are received -->
-            <service-call name="update#mantle.shipment.Shipment" out-map="context"
-                    in-map="[shipmentId:shipmentId, statusId:'ShipDelivered']"/>
+            <service-call name="update#mantle.shipment.Shipment" out-map="context" in-map="[shipmentId:shipmentId, statusId:'ShipDelivered']"/>
         </actions>
     </service>
     <service verb="receive" noun="ShipmentProduct">
@@ -1187,10 +1214,10 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="quantityAccepted" type="BigDecimal" required="true"/>
             <parameter name="quantityRejected" type="BigDecimal" default="0"/>
             <parameter name="rejectionReasonEnumId"/>
-            <!-- TODO: Lot fields (note that both Asset and Lot have manufacturedDate; Asset.expectedEndOfLife is equivalent to Lot.expirationDate) -->
+            <!-- Lot fields (note that both Asset and Lot have manufacturedDate; Asset.expectedEndOfLife is equivalent to Lot.expirationDate) -->
             <parameter name="lotNumber"/>
             <parameter name="expirationDate" type="Date"/>
-            <parameter name="mfgPartyId"><description>Defaults to Shipment.fromPartyId</description></parameter>
+            <parameter name="mfgPartyId"><description>Defaults to Shipment.fromPartyId (if lotNumber and no lotId)</description></parameter>
         </in-parameters>
         <out-parameters><parameter name="assetIdList" type="List"><parameter name="assetId"/></parameter></out-parameters>
         <actions>
@@ -1200,7 +1227,10 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="facilityId" from="shipmentRouteSegmentList?.first?.destinationFacilityId"/>
             </if>
             <if condition="!facilityId"><return error="true" message="Cannot receive Product ${productId} on Shipment ${shipmentId}, no facilityId specified."/></if>
-
+            <if condition="!lotId &amp;&amp; lotNumber &amp;&amp; !mfgPartyId">
+                <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+                <set field="mfgPartyId" from="shipment.fromPartyId"/>
+            </if>
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" cache="false">
                 <econdition field-name="shipmentId"/><econdition field-name="productId"/>
                 <econdition field-name="quantityNotHandled" operator="greater" from="0"/>
@@ -1222,11 +1252,10 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="shipmentItemSource.quantityNotHandled" from="shipmentItemSource.quantityNotHandled - quantityToReject"/>
 
                 <service-call name="mantle.product.AssetServices.receive#Asset" out-map="receiveAssetOut"
-                        in-map="context + [productId:productId, quantity:quantityToAccept, shipmentId:shipmentId,
-                            shipmentPackageSeqId:null, facilityId:facilityId,
+                        in-map="context + [quantity:quantityToAccept, shipmentPackageSeqId:null,
                             orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId,
                             returnId:shipmentItemSource.returnId, returnItemSeqId:shipmentItemSource.returnItemSeqId,
-                            quantityRejected:quantityToReject, rejectionReasonEnumId:rejectionReasonEnumId]"/>
+                            quantityRejected:quantityToReject]"/>
                 <script>assetIdList.add(receiveAssetOut.assetId)</script>
 
                 <!-- update quantityNotHandled and status -->
