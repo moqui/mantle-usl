@@ -260,14 +260,96 @@ along with this software (see the LICENSE.md file). If not, see
                 </iterate>
             </if>
             <if condition="checkQuantityRemaining &gt; 0">
+                <set field="baseAssetCond" from="[productId:productId, statusId:'AstAvailable']"/>
+                <if condition="inventoryFacilityId"><set field="baseAssetCond.facilityId" from="inventoryFacilityId"/></if>
+                <if condition="organizationPartyId &amp;&amp; assetAllowOtherOwner != 'Y'">
+                    <set field="baseAssetCond.ownerPartyId" from="organizationPartyId"/></if>
+
+                <!-- see if we need to try for single lot and newer inventory, done via lotsToUse list -->
+                <set field="lotsToUse" from="null"/>
+                <set field="singleLot" from="false"/>
+                <set field="newerInventory" from="false"/>
+                <if condition="orderPart.customerPartyId">
+                    <entity-find entity-name="mantle.party.PartySetting" list="custSettingList" cache="true">
+                        <econdition field-name="partyId" from="orderPart.customerPartyId"/>
+                        <econdition field-name="partySettingTypeId" value="CustomerSetting"/>
+                    </entity-find>
+                    <set field="singleLot" from="custSettingList.find({ 'CsstSingleLot'.equals(it.settingValue) }) != null"/>
+                    <set field="newerInventory" from="custSettingList.find({ 'CsstNewerInventory'.equals(it.settingValue) }) != null"/>
+                </if>
+
+                <if condition="singleLot || newerInventory">
+                    <set field="newerThanExpireDate" from="null"/>
+                    <if condition="newerInventory">
+                        <!-- get most recent asset issued and lot expire date for it -->
+                        <entity-find entity-name="mantle.product.issuance.AssetIssuanceLotSummary" list="issuanceLotList" limit="1">
+                            <econdition field-name="toPartyId" from="orderPart.customerPartyId"/>
+                            <econdition field-name="productId"/>
+                            <select-field field-name="expirationDate,expectedEndOfLife"/>
+                            <order-by field-name="-issuedDate"/>
+                        </entity-find>
+                        <if condition="issuanceLotList">
+                            <set field="newerThanExpireDate" from="issuanceLotList[0].expirationDate ?: issuanceLotList[0].expectedEndOfLife"/></if>
+                    </if>
+                    <!-- do pre-query to find sufficient lots, or if no sufficient largest lots by order to minimize lots -->
+                    <entity-find entity-name="mantle.product.asset.AssetLotSummary" list="lotSummaryList">
+                        <econdition-object field="baseAssetCond"/>
+                        <econdition field-name="expirationDate" operator="greater-equals" from="newerThanExpireDate" ignore-if-empty="true"/>
+                        <select-field field-name="lotId,availableToPromiseTotal,manufacturedDate,expirationDate"/>
+                        <!-- order to get fewest but sufficient available in a lot -->
+                        <order-by field-name="availableToPromiseTotal"/>
+                    </entity-find>
+                    <set field="availableFoundByLot" from="0.0"/>
+                    <iterate list="lotSummaryList" entry="lotSummary">
+                        <set field="availableFoundByLot" from="availableFoundByLot + lotSummary.availableToPromiseTotal"/></iterate>
+                    <!-- if no or insufficient records found and newerThanExpireDate, search again without -->
+                    <if condition="availableFoundByLot &lt; checkQuantityRemaining &amp;&amp; newerThanExpireDate != null">
+                        <!-- in this case we could get most recent inventory (-expirationDate) since we failed the newer than
+                            constraint, but that would prioritize age over single lot so only do if !singleLot -->
+                        <!-- when finding minimal lot or newest results are used in reverse order, so use expirationDate and not -expirationDate -->
+                        <set field="lotRetryOrderBy" from="singleLot ? 'availableToPromiseTotal' : 'expirationDate'"/>
+                        <entity-find entity-name="mantle.product.asset.AssetLotSummary" list="lotSummaryList">
+                            <econdition-object field="baseAssetCond"/>
+                            <select-field field-name="lotId,availableToPromiseTotal,manufacturedDate,expirationDate"/>
+                            <order-by field-name="${lotRetryOrderBy}"/>
+                        </entity-find>
+                    </if>
+                    <!-- if we found any lots look for singleLotId if singleLot, else use best candidate lots based on queries above -->
+                    <if condition="lotSummaryList">
+                        <set field="singleLotId" from="null"/>
+                        <if condition="singleLot">
+                            <!-- find first in list (smallest) lot with sufficient inventory and use it -->
+                            <iterate list="lotSummaryList" entry="lotSummary">
+                                <if condition="lotSummary.availableToPromiseTotal &gt;= checkQuantityRemaining">
+                                    <set field="singleLotId" from="lotSummary.lotId"/><break/></if>
+                            </iterate>
+                        </if>
+                        <if condition="singleLotId"><then>
+                            <log level="warn" message="Found single lot ${singleLotId}"/>
+                            <set field="lotsToUse" from="[singleLotId]"/>
+                        </then><else><script><![CDATA[
+                            // no single lot found? go end to beginning and use as many lots as needed
+                            lotsToUse = []
+                            BigDecimal lotQuantityRemaining = checkQuantityRemaining
+                            for (int i = lotSummaryList.size() - 1; i >= 0; i--) {
+                                def curLotSummary = lotSummaryList.get(i)
+                                lotQuantityRemaining -= curLotSummary.availableToPromiseTotal
+                                lotsToUse.add(curLotSummary.lotId)
+                                if (lotQuantityRemaining <= 0.0) break
+                            }
+                        ]]></script></else></if>
+                        <log level="warn" message="Lots to use: ${lotsToUse}"/>
+                    </if>
+                </if>
+
+                <!-- ========== main available query ========== -->
                 <!-- don't lock here, we'll lock records we need individually to avoid contention -->
                 <entity-find entity-name="mantle.product.asset.Asset" list="checkAssetList">
-                    <econdition field-name="productId"/><econdition field-name="statusId" value="AstAvailable"/>
-                    <econdition field-name="facilityId" from="inventoryFacilityId" ignore-if-empty="true"/>
-                    <econdition field-name="ownerPartyId" from="organizationPartyId" ignore="!organizationPartyId || assetAllowOtherOwner == 'Y'"/>
+                    <econdition-object field="baseAssetCond"/>
                     <!-- only look for Assets with available quantity, to reduce lock contention we'll create new records for negative ATP -->
                     <econdition field-name="availableToPromiseTotal" operator="greater" from="0"/>
                     <econdition field-name="assetId" operator="not-in" from="explicitAssetIdList" ignore-if-empty="true"/>
+                    <econdition field-name="lotId" operator="in" from="lotsToUse" ignore-if-empty="true"/>
                     <order-by field-name="${assetOrderBy},assetId"/>
                 </entity-find>
                 <iterate list="checkAssetList" entry="checkAsset">
