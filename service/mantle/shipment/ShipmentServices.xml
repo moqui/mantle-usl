@@ -386,6 +386,10 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <!-- ======================================================= -->
+    <!-- ========== Package and RouteSegment Services ========== -->
+    <!-- ======================================================= -->
+
     <service verb="create" noun="ShipmentPackage">
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
@@ -422,6 +426,62 @@ along with this software (see the LICENSE.md file). If not, see
 
             <service-call name="update#mantle.shipment.ShipmentPackage" in-map="context" out-map="context"/>
             <service-call name="update#mantle.shipment.ShipmentPackageRouteSeg" in-map="context" out-map="context"/>
+        </actions>
+    </service>
+    <service verb="add" noun="ItemToPackage">
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="productId" required="true"/>
+            <parameter name="shipmentPackageSeqId"><description>If not specified will be put in a new package</description></parameter>
+            <parameter name="quantity" type="BigDecimal"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
+                <field-map field-name="shipmentId"/><field-map field-name="productId"/></entity-find-one>
+            <entity-find entity-name="mantle.shipment.ShipmentPackageContent" list="packageContentList">
+                <econdition field-name="shipmentId"/><econdition field-name="productId"/></entity-find>
+            <set field="packageContentTotal" from="(packageContentList*.quantity).sum() ?: 0.0"/>
+            <set field="quantityNotInPackage" from="((BigDecimal) shipmentItem.quantity ?: 0.0) - packageContentTotal"/>
+            <if condition="!quantity || quantity &gt; quantityNotInPackage"><set field="quantity" from="quantityNotInPackage"/></if>
+            <if condition="!quantity"><return message="No quantity to add to package, not adding"/></if><!-- nothing to add -->
+
+            <if condition="!shipmentPackageSeqId"><service-call name="mantle.shipment.ShipmentServices.create#ShipmentPackage"
+                    in-map="[shipmentId:shipmentId]" out-map="context"/></if>
+
+            <entity-find-one entity-name="mantle.shipment.ShipmentPackageContent" value-field="packageContent">
+                <field-map field-name="shipmentId"/><field-map field-name="productId"/><field-map field-name="shipmentPackageSeqId"/></entity-find-one>
+            <if condition="packageContent != null"><then>
+                <set field="packageContent.quantity" from="packageContent.quantity + quantity"/>
+                <entity-update value-field="packageContent"/>
+            </then><else>
+                <service-call name="create#mantle.shipment.ShipmentPackageContent" in-map="context"/>
+            </else></if>
+        </actions>
+    </service>
+    <service verb="update" noun="ShipmentPackageContent">
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="productId" required="true"/>
+            <parameter name="shipmentPackageSeqId" required="true"/>
+            <parameter name="quantity" type="BigDecimal"/>
+        </in-parameters>
+        <actions>
+            <if condition="!quantity"><then>
+                <service-call name="delete#mantle.shipment.ShipmentPackageContent" in-map="context"/>
+            </then><else>
+                <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
+                    <field-map field-name="shipmentId"/><field-map field-name="productId"/></entity-find-one>
+                <!-- get total for this product in all other packages -->
+                <entity-find entity-name="mantle.shipment.ShipmentPackageContent" list="packageContentList">
+                    <econdition field-name="shipmentId"/><econdition field-name="productId"/>
+                    <econdition field-name="shipmentPackageSeqId" operator="not-equals"/>
+                </entity-find>
+                <set field="packageContentTotal" from="(packageContentList*.quantity).sum() ?: 0.0"/>
+                <set field="quantityNotInPackage" from="((BigDecimal) shipmentItem.quantity ?: 0.0) - packageContentTotal"/>
+                <if condition="quantity &gt; quantityNotInPackage"><set field="quantity" from="quantityNotInPackage"/></if>
+
+                <service-call name="update#mantle.shipment.ShipmentPackageContent" in-map="context"/>
+            </else></if>
         </actions>
     </service>
 
@@ -1110,8 +1170,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="curAsset" from="resAssetMap.get(assetReservation.assetId)"/>
                     <if condition="curAsset.shipmentBoxTypeId">
                         <service-call name="create#mantle.shipment.ShipmentPackage" out-map="context"
-                                in-map="[shipmentId:shipmentItemSource.shipmentId,
-                                    shipmentBoxTypeId:asset.shipmentBoxTypeId]"/>
+                                in-map="[shipmentId:shipmentItemSource.shipmentId, shipmentBoxTypeId:asset.shipmentBoxTypeId]"/>
                     </if>
                 </iterate>
             </if>
@@ -1133,33 +1192,10 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="quantityRemaining">
                 <return error="true" message="Unable to issue ${quantityRemaining} out of quantity specified (${quantity}) for Shipment Item Source [${shipmentItemSourceId}], not packing"/></if>
 
-            <!-- if no shipmentPackageSeqId find the first package -->
-            <if condition="!shipmentPackageSeqId">
-                <entity-find entity-name="mantle.shipment.ShipmentPackage" list="shipmentPackageList">
-                    <econdition field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
-                    <order-by field-name="shipmentPackageSeqId"/></entity-find>
-                <set field="shipmentPackageSeqId" from="shipmentPackageList?.first?.shipmentPackageSeqId"/>
-                <!-- if there is no package don't create one yet, might be using an asset already in a package -->
-            </if>
-            <!-- if still no shipmentPackageSeqId at this point, create a ShipmentPackage -->
-            <if condition="!shipmentPackageSeqId">
-                <service-call name="mantle.shipment.ShipmentServices.create#ShipmentPackage" out-map="context"
-                        in-map="[shipmentId:shipmentItemSource.shipmentId]"/>
-            </if>
-            <!-- create ShipmentPackageContent or update if already exists -->
-            <entity-find-one entity-name="mantle.shipment.ShipmentPackageContent" value-field="shipmentPackageContent">
-                <field-map field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
-                <field-map field-name="productId" from="shipmentItemSource.productId"/>
-                <field-map field-name="shipmentPackageSeqId"/>
-            </entity-find-one>
-            <if condition="shipmentPackageContent"><then>
-                <set field="shipmentPackageContent.quantity" from="shipmentPackageContent.quantity + quantity"/>
-                <entity-update value-field="shipmentPackageContent"/>
-            </then><else>
-                <service-call name="create#mantle.shipment.ShipmentPackageContent"
-                        in-map="[shipmentId:shipmentItemSource.shipmentId, productId:shipmentItemSource.productId,
-                            shipmentPackageSeqId:shipmentPackageSeqId, quantity:quantity]"/>
-            </else></if>
+            <!-- add to specified package, or in new package if none specified -->
+            <service-call name="mantle.shipment.ShipmentServices.add#ItemToPackage"
+                    in-map="[shipmentId:shipmentItemSource.shipmentId, productId:shipmentItemSource.productId,
+                        shipmentPackageSeqId:shipmentPackageSeqId, quantity:quantity]"/>
 
             <!-- update quantityNotHandled to get ready for the next pack call -->
             <set field="shipmentItemSource.quantityNotHandled" from="shipmentItemSource.quantityNotHandled - quantity"/>

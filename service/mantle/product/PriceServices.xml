@@ -14,6 +14,38 @@ along with this software (see the LICENSE.md file). If not, see
 -->
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.0.xsd">
 
+    <service verb="modify" noun="ProductPrice" type="interface">
+        <in-parameters>
+            <parameter name="productId" required="true"/>
+            <parameter name="quantity" type="BigDecimal" required="true"/>
+            <parameter name="priceUomId" required="true"/>
+            <parameter name="pricePurposeEnumId" required="true"/>
+            <parameter name="productStoreId"/><parameter name="vendorPartyId"/><parameter name="customerPartyId"/>
+            <parameter name="configData" type="Map">
+                <description>Comes from the configData configuration field evaluated as a Groovy expression that returns a Map</description></parameter>
+            <parameter name="price" type="BigDecimal"/>
+            <parameter name="productPriceId"/>
+            <parameter name="listPrice" type="BigDecimal"/>
+            <parameter name="listProductPriceId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="price" type="BigDecimal"/>
+            <parameter name="listPrice" type="BigDecimal"/>
+        </out-parameters>
+    </service>
+    <service verb="run" noun="ProductPriceKS">
+        <!-- run from a ProductPriceModify record with serviceName = mantle.product.PriceServices.run#ProductPriceKS -->
+        <implements service="mantle.product.PriceServices.modify#ProductPrice"/>
+        <actions>
+            <!-- run the ProductPriceKS knowledge session rules -->
+            <if condition="ec.factory.getToolFactory('KIE')"><then>
+                <script>ec.getTool("KIE", null).getStatelessKieSession("ProductPriceKS").execute([])</script>
+            </then><else>
+                <log message="KIE not found, not running price rules, using price lookup only"/>
+            </else></if>
+        </actions>
+    </service>
+
     <service verb="get" noun="ProductPrice" authenticate="anonymous-view">
         <description>Use the ProductPrice entity to determine the price to charge or pay for a Product.</description>
         <in-parameters>
@@ -29,8 +61,11 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="price" type="BigDecimal"/>
+            <parameter name="productPriceId"/>
             <parameter name="listPrice" type="BigDecimal"/>
+            <parameter name="listProductPriceId"/>
             <parameter name="priceUomId"/>
+            <parameter name="productPriceId"/>
         </out-parameters>
         <actions>
             <!-- get PptCurrent price -->
@@ -46,6 +81,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- use the maximal match, priority customer, vendor, then store (each if applicable/specified) -->
             <set field="productPrice" from="findMaximalMatch(currentPriceList,
                     [customerPartyId:customerPartyId, vendorPartyId:vendorPartyId, productStoreId:productStoreId])"/>
+            <set field="productPriceId" from="productPrice?.productPriceId"/>
             <set field="price" from="productPrice?.price"/>
 
             <!-- get PptList price -->
@@ -61,18 +97,24 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- use the maximal match, priority customer, vendor, then store (each if applicable/specified) -->
             <set field="listProductPrice" from="findMaximalMatch(listPriceList,
                     [customerPartyId:customerPartyId, vendorPartyId:vendorPartyId, productStoreId:productStoreId])"/>
+            <set field="listProductPriceId" from="listProductPrice?.productPriceId"/>
             <set field="listPrice" from="listProductPrice?.price"/>
 
             <if condition="!price"><set field="price" from="listPrice ?: BigDecimal.ZERO"/></if>
 
             <!-- <log level="warn" message="========== BEFORE rules productId=${productId}, price=${price}, listPrice=${listPrice}"/> -->
 
-            <!-- run the ProductPriceKS knowledge session rules -->
-            <if condition="ec.factory.getToolFactory('KIE')"><then>
-                <script>ec.getTool("KIE", null).getStatelessKieSession("ProductPriceKS").execute([])</script>
-            </then><else>
-                <log message="KIE not found, not running price rules, using price lookup only"/>
-            </else></if>
+            <entity-find entity-name="mantle.product.ProductPriceModify" list="priceModifyList" cache="true"/>
+            <script><![CDATA[
+            for (priceModify in priceModifyList) { try {
+                configData = null
+                if (priceModify.configData) configData = ec.resource.expression(priceModify.configData, "ProductPriceModify_${priceModify.priceModifyId}_configData")
+                Map result = ec.service.sync().name(priceModify.serviceName).parameters(context).disableAuthz().call()
+                if (!ec.message.hasError()) ec.context.putAll(result)
+            } catch (Throwable t) {
+                ec.logger.log(300, "Error calling price modify service ${priceModify.serviceName}", t)
+            } }
+            ]]></script>
 
             <!-- <log level="warn" message="========== AFTER rules productId=${productId}, price=${price}, listPrice=${listPrice}"/> -->
         </actions>
