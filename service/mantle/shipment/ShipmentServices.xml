@@ -866,10 +866,12 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="reservedLocationInfoList" type="List"><parameter name="reservedLocationInfo" type="Map"/></parameter>
             <parameter name="otherLocationInfoList" type="List"><parameter name="otherLocationInfo" type="Map"/></parameter>
             <parameter name="productInfoList" type="List"><parameter name="productInfo" type="Map"/></parameter>
+            <parameter name="packageInfoList" type="List"><parameter name="packageInfo" type="Map"/></parameter>
 
             <!-- for use by get#PicklistPickInfo and others that need more structured results -->
             <parameter name="reservedLocationInfoMap" type="Map"/>
             <parameter name="otherLocationInfoMap" type="Map"/>
+            <parameter name="productInfoMap" type="Map"/>
         </out-parameters>
         <actions>
             <service-call name="mantle.shipment.ShipmentServices.get#ShipmentContactInfo" out-map="context"
@@ -878,6 +880,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- Get the picklist info by product, by reserved location, by other location -->
 
             <set field="productInfoList" from="[]"/>
+            <set field="productInfoMap" from="[:]"/>
             <set field="reservedLocationInfoMap" from="[:]"/>
             <set field="otherLocationInfoMap" from="[:]"/>
 
@@ -899,44 +902,38 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="binLocationNumber" from="sis.binLocationNumber ?: shipment.binLocationNumber ?: 'N/A'"/>
 
                     <!-- find assets by reservation, if any in place -->
-                    <entity-find entity-name="mantle.product.issuance.AssetAndReservation" list="resAssetList">
+                    <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetResList">
                         <econdition field-name="orderId" from="sis.orderId"/>
                         <econdition field-name="orderItemSeqId" from="sis.orderItemSeqId"/>
                     </entity-find>
                     <set field="curQuantityNotHandled" from="sis.quantityNotHandled"/>
-                    <iterate list="resAssetList" entry="resAsset">
-                        <set field="assetLocKey" from="[facilityId:resAsset.facilityId, locationSeqId:resAsset.locationSeqId]"/>
-                        <entity-find-one entity-name="mantle.facility.FacilityLocation" value-field="facLoc">
-                            <field-map field-name="facilityId" from="resAsset.facilityId"/>
-                            <field-map field-name="locationSeqId" from="resAsset.locationSeqId"/>
-                        </entity-find-one>
-                        <set field="locationTypeEnum" from="facLoc?.'FacilityLocationType#moqui.basic.Enumeration'"/>
+                    <iterate list="assetResList" entry="assetRes">
+                        <set field="resAsset" from="assetRes.asset"/>
+                        <set field="assetLocKey" from="[facilityId:resAsset.facilityId, locationSeqId:resAsset.locationSeqId, lotId:resAsset.lotId]"/>
+                        <set field="facLoc" from="resAsset.location"/>
+                        <set field="geoPoint" from="facLoc?.geoPoint"/>
+                        <entity-find-one entity-name="mantle.product.asset.LotAndMfgParty" value-field="lotAndMfg" cache="true">
+                            <field-map field-name="lotId" from="resAsset.lotId"/></entity-find-one>
+                        <set field="assetLocInfo" from="[locationTypeEnum:facLoc?.type, lot:lotAndMfg]"/>
+                        <script>if (facLoc != null) assetLocInfo.putAll(facLoc)</script>
+                        <script>if (geoPoint != null) assetLocInfo.putAll(geoPoint)</script>
+
 
                         <set field="reservedLocationInfo" from="reservedLocationInfoMap.get(assetLocKey)"/>
                         <if condition="!reservedLocationInfo">
-                            <set field="reservedLocationInfo" from="[productInfoMap:[:], locationTypeEnum:locationTypeEnum]"/>
-                            <script>if (facLoc) reservedLocationInfo.putAll(facLoc)</script>
-                            <if condition="facLoc?.geoPointId">
-                                <entity-find-one entity-name="moqui.basic.GeoPoint" value-field="geoPoint">
-                                    <field-map field-name="facLoc.geoPointId"/></entity-find-one>
-                                <script>if (geoPoint) reservedLocationInfo.putAll(geoPoint)</script>
-                            </if>
+                            <set field="reservedLocationInfo" from="new HashMap(assetLocInfo)"/>
+                            <set field="reservedLocationInfo.productInfoMap" from="[:]"/>
                             <script>reservedLocationInfoMap.put(assetLocKey, reservedLocationInfo)</script>
                         </if>
 
                         <set field="productReservedLocationInfo" from="productReservedLocationInfoMap.get(assetLocKey)"/>
                         <if condition="!productReservedLocationInfo">
-                            <set field="productReservedLocationInfo" from="[quantityByBin:new TreeMap(), locationTypeEnum:locationTypeEnum]"/>
-                            <script>if (facLoc) productReservedLocationInfo.putAll(facLoc)</script>
-                            <if condition="facLoc?.geoPointId">
-                                <entity-find-one entity-name="moqui.basic.GeoPoint" value-field="geoPoint">
-                                    <field-map field-name="facLoc.geoPointId"/></entity-find-one>
-                                <script>if (geoPoint) productReservedLocationInfo.putAll(geoPoint)</script>
-                            </if>
+                            <set field="productReservedLocationInfo" from="new HashMap(assetLocInfo)"/>
+                            <set field="productReservedLocationInfo.quantityByBin" from="new TreeMap()"/>
                             <script>productReservedLocationInfoMap.put(assetLocKey, productReservedLocationInfo)</script>
                         </if>
 
-                        <set field="quantityToAdd" from="curQuantityNotHandled > resAsset.quantityNotIssued ? resAsset.quantityNotIssued : curQuantityNotHandled"/>
+                        <set field="quantityToAdd" from="curQuantityNotHandled > assetRes.quantityNotIssued ? assetRes.quantityNotIssued : curQuantityNotHandled"/>
 
                         <!-- handle quantity for reservedLocationInfoList -->
                         <set field="reservedProductInfo" from="reservedLocationInfo.productInfoMap.get(shipmentItem.productId)"/>
@@ -965,34 +962,26 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- NOTE: these are alternate locations, reset curQuantityNotHandled for full list of recommened alternatives -->
                     <set field="curQuantityNotHandled" from="sis.quantityNotHandled"/>
                     <iterate list="assetList" entry="asset">
-                        <set field="assetLocKey" from="[facilityId:asset.facilityId, locationSeqId:asset.locationSeqId]"/>
-                        <entity-find-one entity-name="mantle.facility.FacilityLocation" value-field="facLoc">
-                            <field-map field-name="facilityId" from="asset.facilityId"/>
-                            <field-map field-name="locationSeqId" from="asset.locationSeqId"/>
-                        </entity-find-one>
-                        <set field="locationTypeEnum" from="facLoc?.'FacilityLocationType#moqui.basic.Enumeration'"/>
+                        <set field="assetLocKey" from="[facilityId:asset.facilityId, locationSeqId:asset.locationSeqId, lotId:asset.lotId]"/>
+                        <set field="facLoc" from="asset.location"/>
+                        <set field="geoPoint" from="facLoc?.geoPoint"/>
+                        <entity-find-one entity-name="mantle.product.asset.LotAndMfgParty" value-field="lotAndMfg" cache="true">
+                            <field-map field-name="lotId" from="resAsset.lotId"/></entity-find-one>
+                        <set field="assetLocInfo" from="[locationTypeEnum:facLoc?.type, lot:lotAndMfg]"/>
+                        <script>if (facLoc != null) assetLocInfo.putAll(facLoc)</script>
+                        <script>if (geoPoint != null) assetLocInfo.putAll(geoPoint)</script>
 
                         <set field="otherLocationInfo" from="otherLocationInfoMap.get(assetLocKey)"/>
                         <if condition="!otherLocationInfo">
-                            <set field="otherLocationInfo" from="[productInfoMap:[:], locationTypeEnum:locationTypeEnum]"/>
-                            <script>if (facLoc) otherLocationInfo.putAll(facLoc)</script>
-                            <if condition="facLoc?.geoPointId">
-                                <entity-find-one entity-name="moqui.basic.GeoPoint" value-field="geoPoint">
-                                    <field-map field-name="facLoc.geoPointId"/></entity-find-one>
-                                <script>if (geoPoint) otherLocationInfo.putAll(geoPoint)</script>
-                            </if>
+                            <set field="otherLocationInfo" from="new HashMap(assetLocInfo)"/>
+                            <set field="otherLocationInfo.productInfoMap" from="[:]"/>
                             <script>otherLocationInfoMap.put(assetLocKey, otherLocationInfo)</script>
                         </if>
 
                         <set field="productOtherLocationInfo" from="productOtherLocationInfoMap.get(assetLocKey)"/>
                         <if condition="!productOtherLocationInfo">
-                            <set field="productOtherLocationInfo" from="[quantityByBin:new TreeMap(), locationTypeEnum:locationTypeEnum]"/>
-                            <script>if (facLoc) productOtherLocationInfo.putAll(facLoc)</script>
-                            <if condition="facLoc?.geoPointId">
-                                <entity-find-one entity-name="moqui.basic.GeoPoint" value-field="geoPoint">
-                                    <field-map field-name="facLoc.geoPointId"/></entity-find-one>
-                                <script>if (geoPoint) productOtherLocationInfo.putAll(geoPoint)</script>
-                            </if>
+                            <set field="productOtherLocationInfo" from="new HashMap(assetLocInfo)"/>
+                            <set field="productOtherLocationInfo.quantityByBin" from="new TreeMap()"/>
                             <script>productOtherLocationInfoMap.put(assetLocKey, productOtherLocationInfo)</script>
                         </if>
 
@@ -1026,6 +1015,7 @@ along with this software (see the LICENSE.md file). If not, see
                                    quantity:shipmentItem.quantity]
                     productInfo.putAll(product)
                     productInfoList.add(productInfo)
+                    productInfoMap.put(shipmentItem.productId, productInfo)
                 </script>
             </iterate>
 
@@ -1045,6 +1035,22 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- order productInfoList, all that is needed at this point -->
             <order-map-list list="productInfoList"><order-by field-name="${productOrderBy}"/></order-map-list>
+
+            <entity-find entity-name="mantle.shipment.ShipmentPackage" list="shipmentPackageList">
+                <econdition field-name="shipmentId"/></entity-find>
+            <set field="packageInfoList" from="[]"/>
+            <iterate list="shipmentPackageList" entry="shipmentPackage">
+                <set field="shipmentBoxType" from="shipmentPackage.boxType"/>
+                <set field="weightUom" from="shipmentPackage.weightUom"/>
+                <set field="shipmentPackageContentList" from="shipmentPackage.contents"/>
+                <set field="contentInfoList" from="[]"/>
+                <iterate list="shipmentPackageContentList" entry="packageContent">
+                    <set field="productInfo" from="productInfoMap.get(packageContent.productId)"/>
+                    <script>contentInfoList.add([packageContent:packageContent, productInfo:productInfo])</script>
+                </iterate>
+                <script>packageInfoList.add([shipmentPackage:shipmentPackage, shipmentBoxType:shipmentBoxType, weightUom:weightUom,
+                                             contentInfoList:contentInfoList])</script>
+            </iterate>
         </actions>
     </service>
 
@@ -1223,6 +1229,7 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
             <parameter name="facilityId"><description>If not specified uses ShipmentRouteSegment.destinationFacilityId.</description></parameter>
+            <parameter name="statusId"><description>Use this status on assets created</description></parameter>
         </in-parameters>
         <actions>
             <entity-find entity-name="mantle.shipment.ShipmentItemDetail" list="shipmentItemDetailList">
@@ -1231,7 +1238,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="quantityRemaining" from="sid.quantity - (sid.quantityAcceptedTotal ?: 0) - (sid.quantityRejectedTotal ?: 0)"/>
 
                 <service-call name="mantle.shipment.ShipmentServices.receive#ShipmentProduct"
-                        in-map="[shipmentId:shipmentId, productId:sid.productId,
+                        in-map="[shipmentId:shipmentId, productId:sid.productId, statusId:statusId,
                             quantityAccepted:quantityRemaining, facilityId:facilityId]"/>
             </iterate>
 

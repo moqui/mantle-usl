@@ -15,12 +15,12 @@
 import org.moqui.Moqui
 import org.moqui.context.ExecutionContext
 import org.moqui.entity.EntityList
-import org.moqui.entity.EntityValue
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import spock.lang.Shared
 import spock.lang.Specification
 
+import java.sql.Date
 import java.sql.Timestamp
 
 /* To run these make sure moqui, and mantle are in place and run:
@@ -28,29 +28,17 @@ import java.sql.Timestamp
    Or to quick run with saved DB copy use "gradle loadSave" once then each time "gradle reloadSave runtime/mantle/mantle-usl:test"
  */
 class OrderProcureToPayBasicFlow extends Specification {
-    @Shared
-    protected final static Logger logger = LoggerFactory.getLogger(OrderProcureToPayBasicFlow.class)
-    @Shared
-    ExecutionContext ec
-    @Shared
-    String purchaseOrderId = null, orderPartSeqId
-    @Shared
-    Map setInfoOut, shipResult, sendPmtResult
-    @Shared
-    String vendorPartyId = 'ZiddlemanInc', customerPartyId = 'ORG_ZIZI_RETAIL'
-    @Shared
-    String priceUomId = 'USD', currencyUomId = 'USD'
-    @Shared
-    String facilityId = 'ORG_ZIZI_RETAIL_WH'
-    @Shared
-    long effectiveTime = System.currentTimeMillis()
-    @Shared
-    java.sql.Date eolDate
-    @Shared
-    String equip1AssetId, equip2AssetId, currentFiscalMonthId
-    @Shared
-    long totalFieldsChecked = 0
-
+    @Shared protected final static Logger logger = LoggerFactory.getLogger(OrderProcureToPayBasicFlow.class)
+    @Shared ExecutionContext ec
+    @Shared String purchaseOrderId = null, orderPartSeqId
+    @Shared Map setInfoOut, shipResult, sendPmtResult
+    @Shared String vendorPartyId = 'ZiddlemanInc', customerPartyId = 'ORG_ZIZI_RETAIL'
+    @Shared String priceUomId = 'USD', currencyUomId = 'USD'
+    @Shared String facilityId = 'ORG_ZIZI_RETAIL_WH'
+    @Shared long effectiveTime = System.currentTimeMillis()
+    @Shared java.sql.Date eolDate
+    @Shared String equip1AssetId, equip2AssetId, currentFiscalMonthId
+    @Shared long totalFieldsChecked = 0
 
     def setupSpec() {
         // init the framework, get the ec
@@ -65,6 +53,7 @@ class OrderProcureToPayBasicFlow extends Specification {
         ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Asset", 55400, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetDetail", 55400, 90)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.PhysicalInventory", 55400, 10)
+        ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Lot", 55400, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.receipt.AssetReceipt", 55400, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.issuance.AssetIssuance", 55400, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.account.invoice.Invoice", 55400, 10)
@@ -83,6 +72,7 @@ class OrderProcureToPayBasicFlow extends Specification {
         ec.entity.tempResetSequencedIdPrimary("mantle.product.asset.Asset")
         ec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetDetail")
         ec.entity.tempResetSequencedIdPrimary("mantle.product.asset.PhysicalInventory")
+        ec.entity.tempResetSequencedIdPrimary("mantle.product.asset.Lot")
         ec.entity.tempResetSequencedIdPrimary("mantle.product.receipt.AssetReceipt")
         ec.entity.tempResetSequencedIdPrimary("mantle.product.issuance.AssetIssuance")
         ec.entity.tempResetSequencedIdPrimary("mantle.account.invoice.Invoice")
@@ -265,10 +255,14 @@ class OrderProcureToPayBasicFlow extends Specification {
 
         ec.service.sync().name("mantle.shipment.ShipmentServices.receive#ShipmentProduct")
                 .parameters([shipmentId:shipResult.shipmentId, productId:'DEMO_1_1',
-                    quantityAccepted:400, facilityId:facilityId]).call()
+                    quantityAccepted:400, facilityId:facilityId, locationSeqId:"01010101", lotNumber:'A1111',
+                    manufacturedDate:new Timestamp(effectiveTime - (3600000L*24*14)),
+                    expectedEndOfLife:new Date(effectiveTime + (3600000L*24*180))]).call()
         ec.service.sync().name("mantle.shipment.ShipmentServices.receive#ShipmentProduct")
                 .parameters([shipmentId:shipResult.shipmentId, productId:'DEMO_3_1',
-                    quantityAccepted:100, facilityId:facilityId]).call()
+                    quantityAccepted:100, facilityId:facilityId, locationSeqId:"01020101", lotNumber:'A2222',
+                    manufacturedDate:new Timestamp(effectiveTime - (3600000L*24*14)),
+                    expectedEndOfLife:new Date(effectiveTime + (3600000L*24*240))]).call()
 
         // receive equipment with depreciation settings, in real use more likely set after receive with an update of the Asset record
         Calendar eolCal = ec.user.nowCalendar // will be set to effectiveTime, which will be the acquiredDate
@@ -1056,7 +1050,7 @@ class OrderProcureToPayBasicFlow extends Specification {
     def "inventory Found"() {
         when:
         ec.service.sync().name("mantle.product.AssetServices.record#PhysicalInventoryChange")
-                .parameters([productId:'DEMO_1_1', facilityId:facilityId, quantityChange:10,
+                .parameters([productId:'DEMO_1_1', facilityId:facilityId, quantityChange:10, lotId:'55400', locationSeqId:'01010201',
                              varianceReasonEnumId:'InVrFound', comments:'Test found 10 DEMO_1_1']).call()
 
         List<String> dataCheckErrors = []

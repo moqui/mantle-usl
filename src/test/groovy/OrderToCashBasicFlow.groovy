@@ -372,12 +372,15 @@ class OrderToCashBasicFlow extends Specification {
             <mantle.order.OrderItemBilling orderItemBillingId="55502" orderId="${cartOrderId}" orderItemSeqId="03"
                 invoiceId="55500" invoiceItemSeqId="03" assetIssuanceId="55502" shipmentId="${shipResult.shipmentId}"
                 quantity="7" amount="12.12"/>
-
-            <mantle.account.invoice.InvoiceItem invoiceId="55500" invoiceItemSeqId="04" itemTypeEnumId="ItemShipping"
-                quantity="1" amount="${kieEnabled ? '5' : '0'}" description="Ground Parcel" itemDate="${effectiveTime}"/>
-            <mantle.order.OrderItemBilling orderItemBillingId="55503" orderId="${cartOrderId}" orderItemSeqId="04"
-                invoiceId="55500" invoiceItemSeqId="04" shipmentId="${shipResult.shipmentId}" quantity="1" amount="${kieEnabled ? '5' : '0'}"/>
         </entity-facade-xml>""").check()
+        if (kieEnabled) {
+            dataCheckErrors += ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+                <mantle.account.invoice.InvoiceItem invoiceId="55500" invoiceItemSeqId="04" itemTypeEnumId="ItemShipping"
+                    quantity="1" amount="5" description="Ground Parcel" itemDate="${effectiveTime}"/>
+                <mantle.order.OrderItemBilling orderItemBillingId="55503" orderId="${cartOrderId}" orderItemSeqId="04"
+                    invoiceId="55500" invoiceItemSeqId="04" shipmentId="${shipResult.shipmentId}" quantity="1" amount="${kieEnabled ? '5' : '0'}"/>
+            </entity-facade-xml>""").check()
+        }
         logger.info("validate Shipment Invoice data check results: " + dataCheckErrors)
 
         then:
