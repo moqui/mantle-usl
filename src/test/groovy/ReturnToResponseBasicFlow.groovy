@@ -184,7 +184,8 @@ class ReturnToResponseBasicFlow extends Specification {
 
         // receive Return Shipment
         // triggers SECA rules to receive ReturnItems
-        ec.service.sync().name("mantle.shipment.ShipmentServices.receive#EntireShipment").parameters([shipmentId:returnShipmentId]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.receive#EntireShipment")
+                .parameters([shipmentId:returnShipmentId, statusId:'AstOnHold']).call()
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
