@@ -21,6 +21,7 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="get" noun="ShipmentDisplayInfo">
         <in-parameters><parameter name="shipmentId"/></in-parameters>
         <out-parameters>
+            <parameter name="shipmentId"/>
             <parameter name="shipment" type="Map"/>
             <parameter name="statusItem" type="Map"/>
             <parameter name="shipmentTypeEnum" type="Map"/>
@@ -1386,6 +1387,53 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="update#mantle.shipment.ShipmentRouteSegment"
                     in-map="[shipmentId:shipmentId, shipmentRouteSegmentSeqId:shipmentRouteSegmentList[0].shipmentRouteSegmentSeqId,
                              actualStartDate:shipmentRouteSegmentList[0].actualStartDate?:ec.user.nowTimestamp]"/>
+        </actions>
+    </service>
+
+    <!-- ========== Shipment Notification Services ========== -->
+
+    <service verb="send" noun="ShipmentStoreEmail" authenticate="anonymous-view">
+        <description>Called by SECA rule in Shipment.secas.xml on tx-commit so always run async from triggering thread</description>
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="emailTypeEnumId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" distinct="true">
+                <econdition field-name="shipmentId"/><select-field field-name="orderId"/></entity-find>
+            <set field="orderIdSet" from="new HashSet(shipmentItemSourceList*.orderId)"/>
+            <script>orderIdSet.remove(null)</script>
+            <if condition="!orderIdSet"><return/></if>
+
+            <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList">
+                <econdition field-name="orderId" operator="in" from="orderIdSet"/></entity-find>
+            <set field="productStoreIdSet" from="new HashSet(orderHeaderList*.productStoreId)"/>
+            <script>productStoreIdSet.remove(null)</script>
+            <if condition="!productStoreIdSet"><return/></if>
+
+            <entity-find entity-name="mantle.product.store.ProductStoreEmail" list="storeEmailList">
+                <date-filter/><econdition field-name="productStoreId" operator="in" from="productStoreIdSet"/>
+                <econdition field-name="emailTypeEnumId"/>
+            </entity-find>
+            <if condition="storeEmailList">
+                <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+
+                <!-- simple bodyParameters, let the screen do data prep -->
+                <set field="bodyParameters" from="[shipmentId:shipmentId]"/>
+
+                <!-- get to party email address -->
+                <set field="toPartyId" from="shipment.toPartyId"/>
+                <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="emailInfo"
+                        in-map="[partyId:toPartyId, emailContactMechPurposeId:'EmailShippingDest', defaultToPrimaryPurpose:true]"/>
+                <set field="toAddresses" from="emailInfo.emailAddress"/>
+
+                <!-- send email for each configured -->
+                <iterate list="storeEmailList" entry="storeEmail">
+                    <if condition="!storeEmail.emailTemplateId"><continue/></if>
+                    <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate"
+                            in-map="[emailTemplateId:storeEmail.emailTemplateId, toAddresses:toAddresses, bodyParameters:bodyParameters]"/>
+                </iterate>
+            </if>
         </actions>
     </service>
 
