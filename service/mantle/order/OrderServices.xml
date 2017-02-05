@@ -50,6 +50,7 @@ h2. General Order Placement and eCommerce Usage
             <parameter name="statusItem" type="Map"><auto-parameters entity-name="moqui.basic.StatusItem"/></parameter>
             <parameter name="editableStatusIds" type="Set"><parameter name="statusId"/></parameter>
             <parameter name="orderEditable" type="Boolean"/>
+            <parameter name="placeWarnings" type="List"><parameter name="placeWarning"/></parameter>
 
             <parameter name="orderItemList" type="List"><parameter name="orderItem" type="Map">
                 <auto-parameters entity-name="mantle.order.OrderItem"/></parameter></parameter>
@@ -163,6 +164,8 @@ h2. General Order Placement and eCommerce Usage
             </parameter></parameter>
         </out-parameters>
         <actions>
+            <set field="placeWarnings" from="[]"/>
+
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <if condition="orderHeader == null"><return error="true" message="Order not found with ID ${orderId}"/></if>
             <!--
@@ -180,11 +183,12 @@ h2. General Order Placement and eCommerce Usage
 
             <entity-find-related value-field="orderHeader" relationship-name="mantle.order.OrderItem"
                     list="orderItemList" order-by-list="['orderItemSeqId']"/>
+            <if condition="!orderItemList"><script>placeWarnings.add("Order has no items")</script></if>
             <!-- put items with parentItemSeqId in the list after their parent -->
             <script><![CDATA[
                 orderItemWithChildrenSet = new HashSet()
                 List reverseList = orderItemList.cloneList().orderByFields(["-orderItemSeqId"])
-                for (def orderItem in reverseList) {
+                for (orderItem in reverseList) {
                     if (orderItem.parentItemSeqId) {
                         orderItemWithChildrenSet.add(orderItem.parentItemSeqId)
                         orderItemList.move(orderItemList.indexMatching([orderItemSeqId:orderItem.orderItemSeqId]),
@@ -284,8 +288,15 @@ h2. General Order Placement and eCommerce Usage
             for (EntityValue orderPart in orderPartList) {
                 EntityList partOrderItemList = orderItemList.findAll({ it.orderPartSeqId == orderPart.orderPartSeqId })
                 EntityList partNoParentOrderItemList = partOrderItemList.findAll({ it.parentItemSeqId == null })
-                boolean hasShippableItems = orderItemList.find({ it.product?.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse'] }) != null
 
+                EntityValue customerDetail = ec.entity.find("mantle.party.PartyDetail").condition("partyId", orderPart.customerPartyId).one()
+                EntityValue vendorDetail = ec.entity.find("mantle.party.PartyDetail").condition("partyId", orderPart.vendorPartyId).one()
+                boolean isCustomerInternalOrg = ec.entity.find("mantle.party.PartyRole")
+                        .condition("partyId", orderPart.customerPartyId).condition("roleTypeId", "OrgInternal").one() as boolean
+                boolean isVendorInternalOrg = ec.entity.find("mantle.party.PartyRole")
+                        .condition("partyId", orderPart.vendorPartyId).condition("roleTypeId", "OrgInternal").one() as boolean
+
+                boolean hasShippableItems = orderItemList.find({ it.product?.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse'] }) != null
                 boolean singleLot = false
                 boolean newerInventory = false
                 if (hasShippableItems && orderPart.customerPartyId) {
@@ -317,8 +328,14 @@ h2. General Order Placement and eCommerce Usage
                     partPaymentInfo.paymentInstrumentEnum = partPayment.instrument
                     partPaymentInfoList.add(partPaymentInfo)
                 }
+                BigDecimal partTotalUnpaid = (orderPart.partTotal ?: 0.0) - (paymentsTotal ?: 0.0)
 
-                BigDecimal partTotalUnpaid = (orderPart.partTotal ?: 0) - (paymentsTotal ?: 0)
+                if (paymentsTotal < (BigDecimal) orderPart.partTotal)
+                    placeWarnings.add("Part ${orderPart.orderPartSeqId} payments total (${ec.l10n.formatCurrency(paymentsTotal ?: 0.0, (String) orderHeader?.currencyUomId)}) is less than order part total (${ec.l10n.formatCurrency(orderPart.partTotal ?: 0.0, (String) orderHeader?.currencyUomId)})")
+                if (!isCustomerInternalOrg && !orderPart.postalContactMechId)
+                    placeWarnings.add("Part ${orderPart.orderPartSeqId} has no shipping address selected")
+                if (!isCustomerInternalOrg && !orderPart.shipmentMethodEnumId)
+                    placeWarnings.add("Part ${orderPart.orderPartSeqId} has no shipment method selected")
 
                 List orderItemSeqIdList = partOrderItemList.orderItemSeqId
                 List partShipmentItemSourceList = []
@@ -340,13 +357,6 @@ h2. General Order Placement and eCommerce Usage
                             .parameters([facilityId:orderPart.facilityId, postalContactMechId:facShipOut.postalContactMechId,
                                          telecomContactMechId:facShipOut.telecomContactMechId]).call()
                 }
-
-                EntityValue customerDetail = ec.entity.find("mantle.party.PartyDetail").condition("partyId", orderPart.customerPartyId).one()
-                EntityValue vendorDetail = ec.entity.find("mantle.party.PartyDetail").condition("partyId", orderPart.vendorPartyId).one()
-                boolean isCustomerInternalOrg = ec.entity.find("mantle.party.PartyRole")
-                        .condition("partyId", orderPart.customerPartyId).condition("roleTypeId", "OrgInternal").one() as boolean
-                boolean isVendorInternalOrg = ec.entity.find("mantle.party.PartyRole")
-                        .condition("partyId", orderPart.vendorPartyId).condition("roleTypeId", "OrgInternal").one() as boolean
 
                 EntityList orderPartPartyList = ec.entity.find("mantle.order.OrderPartPartyDetail")
                         .condition([orderId:orderPart.orderId, orderPartSeqId:orderPart.orderPartSeqId]).orderBy("description").list()
