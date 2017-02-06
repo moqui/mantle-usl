@@ -91,6 +91,7 @@ class ReturnToResponseBasicFlow extends Specification {
         ec.entity.tempResetSequencedIdPrimary("mantle.shipment.Shipment")
         ec.entity.tempResetSequencedIdPrimary("mantle.shipment.ShipmentItemSource")
         ec.destroy()
+        ec.factory.waitWorkerPoolEmpty(50) // up to 5 seconds
 
         logger.info("Return to Response Basic Flow complete, ${totalFieldsChecked} record fields checked")
     }

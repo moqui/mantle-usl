@@ -37,6 +37,7 @@ class OrderToCashTime extends Specification {
 
     def cleanupSpec() {
         ec.destroy()
+        ec.factory.waitWorkerPoolEmpty(50) // up to 5 seconds
     }
 
     def setup() {
