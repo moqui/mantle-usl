@@ -33,15 +33,10 @@ import java.util.concurrent.TimeUnit
  */
 
 class AssetReservationMultipleThreads extends Specification {
-    @Shared
-    protected final static Logger logger = LoggerFactory.getLogger(AssetReservationMultipleThreads.class)
+    @Shared protected final static Logger logger = LoggerFactory.getLogger(AssetReservationMultipleThreads.class)
 
-    @Shared
-    ExecutionContext gec
-
-    @Shared
-    long effectiveTime = System.currentTimeMillis()
-
+    @Shared ExecutionContext gec
+    @Shared long effectiveTime = System.currentTimeMillis()
 
     def setupSpec() {
         // init the framework, get the ec
@@ -60,6 +55,8 @@ class AssetReservationMultipleThreads extends Specification {
         gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetDetail")
         gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetReservation")
         gec.destroy()
+
+        gec.factory.waitWorkerPoolEmpty(50) // up to 5 seconds
     }
     def setup() {
         gec.artifactExecution.disableAuthz()
