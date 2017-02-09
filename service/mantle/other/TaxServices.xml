@@ -19,11 +19,12 @@ along with this software (see the LICENSE.md file). If not, see
     <!-- ========================== -->
 
     <service verb="calculate" noun="SalesTax" type="interface">
+        <!-- Interface for services to implement: mantle.other.TaxServices.calculate#SalesTax -->
         <in-parameters>
             <parameter name="referenceId"><description>This is the orderId:orderPartSeqId or invoiceId, if available.</description></parameter>
             <parameter name="saveResults" type="Boolean"><description>If the tax service supports saving calculated
                 taxes for reporting and filing with authorities set this flag when you want the results saved (this is
-                usually done for invoices).</description></parameter>
+                usually done for invoices but not orders).</description></parameter>
             <parameter name="taxGatewayConfigId" required="true"/>
             <parameter name="customerPartyId"/>
             <parameter name="organizationPartyId"/>
@@ -42,19 +43,14 @@ along with this software (see the LICENSE.md file). If not, see
                     <parameter name="discountCode"/>
                 </parameter></parameter>
                 -->
-                <!-- these may not be needed, we're doing one call per OrderPart anyway:
-                <parameter name="originAddressContactMechId"/>
-                <parameter name="destinationAddressContactMechId"/>
-                -->
             </parameter></parameter>
         </in-parameters>
         <out-parameters>
-            <parameter name="taxResults" type="List"><parameter name="taxResultEntry" type="Map">
+            <parameter name="taxResults" type="List"><parameter name="taxResult" type="Map">
                 <parameter name="itemId"/>
                 <parameter name="taxAmount" type="BigDecimal"/>
                 <parameter name="taxRate" type="BigDecimal"/>
-                <parameter name="geoName"/>
-                <parameter name="authorityName"/>
+                <parameter name="taxAuthorityId"/>
                 <parameter name="taxName"/>
             </parameter></parameter>
         </out-parameters>
@@ -124,7 +120,18 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- call gateway (could be local) service to calculate shipping charges -->
                 <service-call name="${taxGatewayConfig.calculateServiceName}" in-map="context" out-map="context"/>
 
-                <!-- TODO: add tax child OrderItems to db -->
+                <!-- add tax child OrderItems to db -->
+                <iterate list="taxResults" entry="taxResult">
+                    <if condition="!taxResult.taxAmount"><continue/></if>
+                    <set field="taxAmount" from="new BigDecimal(taxResult.taxAmount).setScale(3, BigDecimal.ROUND_UP)"/>
+                    <entity-find-one entity-name="mantle.other.tax.TaxAuthority" value-field="taxAuthority" cache="true">
+                        <field-map field-name="taxAuthorityId" from="taxResult.taxAuthorityId"/></entity-find-one>
+                    <set field="itemDescription" value="${taxAuthority?.description ? taxAuthority.description + ' ' : ''}${taxResult.taxName?:''}"/>
+                    <service-call name="create#mantle.order.OrderItem" out-map="context"
+                            in-map="[orderId:orderId, orderPartSeqId:orderPart.orderPartSeqId, parentItemSeqId:taxResult.itemId,
+                                itemTypeEnumId:'ItemSalesTax', quantity:1, unitAmount:taxAmount, sourcePercentage:taxResult.taxRate,
+                                taxAuthorityId:taxResult.taxAuthorityId, itemDescription:itemDescription]"/>
+                </iterate>
             </iterate>
         </actions>
     </service>
@@ -143,7 +150,24 @@ along with this software (see the LICENSE.md file). If not, see
         <implements service="mantle.other.TaxServices.calculate#SalesTax"/>
         <actions>
             <log level="info" message="Called calculate#SalesTaxLocal (not yet implemented) with context:\n ${context}"/>
-            <!-- TODO: implement this... -->
+            <!-- TODO: implement this for Drools decision table -->
+
+            <!-- example code for a simple tax service:
+            <entity-find-one entity-name="mantle.party.contact.PostalAddress" value-field="destinationAddress">
+                <field-map field-name="contactMechId" from="destinationAddressContactMechId"/></entity-find-one>
+            <if condition="destinationAddress == null || destinationAddress.stateProvinceGeoId != 'USA_NV'"><return/></if>
+            <!- - simple 7% tax rate; lookup or calculate as needed - ->
+            <set field="taxRate" from="0.07"/>
+            <set field="taxAuthorityId" value="SETME"/>
+            <set field="taxResults" from="[]"/>
+            <iterate list="items" entry="item">
+                <if condition="item.itemTypeEnumId != 'ItemProduct'"><continue/></if>
+                <if condition="!item.unitAmount"><continue/></if>
+                <set field="taxAmount" from="taxRate * (item.quantity ?: 1.0) * item.unitAmount"/>
+                <script>taxResults.add([itemId:item.itemId, taxAmount:taxAmount, taxRate:taxRate,
+                    taxAuthorityId:taxAuthorityId, taxName:'Sales Tax'])</script>
+            </iterate>
+            -->
         </actions>
     </service>
 

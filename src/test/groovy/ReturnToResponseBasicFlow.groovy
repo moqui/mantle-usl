@@ -91,6 +91,7 @@ class ReturnToResponseBasicFlow extends Specification {
         ec.entity.tempResetSequencedIdPrimary("mantle.shipment.Shipment")
         ec.entity.tempResetSequencedIdPrimary("mantle.shipment.ShipmentItemSource")
         ec.destroy()
+        ec.factory.waitWorkerPoolEmpty(50) // up to 5 seconds
 
         logger.info("Return to Response Basic Flow complete, ${totalFieldsChecked} record fields checked")
     }
@@ -264,7 +265,7 @@ class ReturnToResponseBasicFlow extends Specification {
         when:
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
-            <orders orderId="55700" entryDate="${effectiveTime}" grandTotal="0" orderRevision="7" currencyUomId="USD"
+            <orders orderId="55700" entryDate="${effectiveTime}" grandTotal="0" currencyUomId="USD"
                     statusId="OrderApproved" placedDate="${effectiveTime}">
                 <parts shipmentMethodEnumId="ShMthGround" telecomContactMechId="CustJqpTeln" postalContactMechId="CustJqpAddr" partTotal="0" customerPartyId="CustJqp" lastUpdatedStamp="1450573654119" facilityId="ORG_ZIZI_RETAIL_WH" vendorPartyId="ORG_ZIZI_RETAIL" carrierPartyId="_NA_" statusId="OrderApproved" orderPartSeqId="01"/>
                 <items orderItemSeqId="01" isModifiedPrice="Y" itemTypeEnumId="ItemProduct" quantity="1"
@@ -374,8 +375,7 @@ class ReturnToResponseBasicFlow extends Specification {
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <!-- OrderHeader status to Completed -->
-            <orders orderId="55700" orderRevision="8" statusId="OrderCompleted">
-                <parts orderPartSeqId="01" statusId="OrderCompleted"/></orders>
+            <orders orderId="55700" statusId="OrderCompleted"><parts orderPartSeqId="01" statusId="OrderCompleted"/></orders>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")

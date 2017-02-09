@@ -21,18 +21,33 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="get" noun="ShipmentDisplayInfo">
         <in-parameters><parameter name="shipmentId"/></in-parameters>
         <out-parameters>
+            <parameter name="shipmentId"/>
             <parameter name="shipment" type="Map"/>
             <parameter name="statusItem" type="Map"/>
             <parameter name="shipmentTypeEnum" type="Map"/>
             <parameter name="isIncoming" type="Boolean"/>
             <parameter name="allowUpdate" type="Boolean"/>
-            <parameter name="fromPartyDetail" type="Map"/>
-            <parameter name="toPartyDetail" type="Map"/>
             <parameter name="statusHistoryList" type="List"><parameter name="auditLog" type="Map"/></parameter>
+
+            <parameter name="fromPartyId"><description>Shipment.fromPartyId or if empty then warehouse Facility.ownerPartyId</description></parameter>
+            <parameter name="fromPartyDetail" type="Map"/>
+            <parameter name="fromContactInfo" type="Map"><description>The from ship info, first by
+                ShipmentRouteSegment.origin* fields then the warehouse Facility
+                (using mantle.facility.ContactServices.get#FacilityDefaultShipOrigin) or if no warehouse or contact info
+                found then from the mantle.party.ContactServices.get#PartyContactInfo service for the fromPartyId.</description></parameter>
+            <parameter name="toPartyDetail" type="Map"/>
+            <parameter name="toContactInfo" type="Map"><description>The to ship info, first by ShipmentRouteSegment.dest*,
+                then from the mantle.party.ContactServices.get#PartyContactInfo service for Shipment.toPartyId.</description></parameter>
+
             <parameter name="shipmentItemDetailList" type="List"><parameter name="shipmentItemDetail" type="Map"/></parameter>
             <parameter name="shipmentRouteSegmentList" type="List"><parameter name="shipmentRouteSegment" type="Map"/></parameter>
             <parameter name="firstRouteSegment" type="Map"/>
+            <parameter name="firstShipmentMethodEnum" type="Map"/>
+            <parameter name="firstCarrierDetail" type="Map"/>
             <parameter name="lastRouteSegment" type="Map"/>
+            <parameter name="originFacility" type="Map"/>
+            <parameter name="destinationFacility" type="Map"/>
+
             <parameter name="shipmentPackageList" type="List"><parameter name="shipmentPackage" type="Map"/></parameter>
             <parameter name="shipmentItemSourceList" type="List"><parameter name="shipmentItemSource"/></parameter>
             <parameter name="orderIdSet" type="Set"><parameter name="orderId"/></parameter>
@@ -40,18 +55,13 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="contentList" type="List"><parameter name="content" type="Map"/></parameter>
         </out-parameters>
         <actions>
-            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
-            <if condition="shipment == null"><return error="true" message="Shipment not found with ID ${shipmentId}"/></if>
+            <service-call name="mantle.shipment.ShipmentServices.get#ShipmentContactInfo" out-map="context" in-map="[shipmentId:shipmentId]"/>
+
             <set field="statusItem" from="shipment.'Shipment#moqui.basic.StatusItem'"/>
             <set field="shipmentTypeEnum" from="shipment.'ShipmentType#moqui.basic.Enumeration'"/>
             <set field="isIncoming" from="shipmentTypeEnum?.enumId == 'ShpTpIncoming' || shipmentTypeEnum?.parentEnumId == 'ShpTpIncoming'"/>
             <set field="allowUpdate" from="shipment.statusId in ['ShipInput', 'ShipScheduled'] ||
                     (isIncoming &amp;&amp; shipment.statusId in ['ShipShipped', 'ShipPicked', 'ShipPacked'])"/>
-
-            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromPartyDetail">
-                <field-map field-name="partyId" from="shipment.fromPartyId"/></entity-find-one>
-            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toPartyDetail">
-                <field-map field-name="partyId" from="shipment.toPartyId"/></entity-find-one>
 
             <entity-find entity-name="moqui.entity.EntityAuditLog" list="statusHistoryList">
                 <econdition field-name="changedEntityName" value="mantle.shipment.Shipment"/>
@@ -62,10 +72,10 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find entity-name="mantle.shipment.ShipmentItemDetail" list="shipmentItemDetailList">
                 <econdition field-name="shipmentId"/><order-by field-name="productId"/></entity-find>
-            <entity-find entity-name="mantle.shipment.ShipmentRouteSegmentDetail" list="shipmentRouteSegmentList">
-                <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
-            <set field="firstRouteSegment" from="shipmentRouteSegmentList ? shipmentRouteSegmentList.get(0) : null"/>
-            <set field="lastRouteSegment" from="shipmentRouteSegmentList ? shipmentRouteSegmentList.get(shipmentRouteSegmentList.size()-1) : null"/>
+
+            <set field="firstShipmentMethodEnum" from="firstRouteSegment?.shipmentMethod"/>
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="firstCarrierDetail">
+                <field-map field-name="partyId" from="firstRouteSegment?.carrierPartyId"/></entity-find-one>
 
             <entity-find-related value-field="shipment" relationship-name="mantle.shipment.ShipmentPackage"
                     list="shipmentPackageList" order-by-list="['shipmentPackageSeqId']"/>
@@ -94,8 +104,9 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="shipment" type="Map"/>
-            <parameter name="firstShipmentRouteSegment" type="Map"/>
-            <parameter name="lastShipmentRouteSegment" type="Map"/>
+            <parameter name="shipmentRouteSegmentList" type="List"><parameter name="shipmentRouteSegment" type="Map"/></parameter>
+            <parameter name="firstRouteSegment" type="Map"/>
+            <parameter name="lastRouteSegment" type="Map"/>
             <parameter name="originFacility" type="Map"/>
             <parameter name="destinationFacility" type="Map"/>
 
@@ -111,6 +122,7 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipment == null"><return error="true" message="Shipment not found with ID ${shipmentId}"/></if>
 
             <!-- get the first ShipmentRouteSegment -->
             <entity-find entity-name="mantle.shipment.ShipmentRouteSegment" list="shipmentRouteSegmentList">
@@ -118,22 +130,22 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="shipmentRouteSegmentSeqId" ignore-if-empty="true"/>
                 <order-by field-name="shipmentRouteSegmentSeqId"/>
             </entity-find>
-            <set field="firstShipmentRouteSegment" from="shipmentRouteSegmentList ? shipmentRouteSegmentList.first() : null"/>
-            <set field="lastShipmentRouteSegment" from="shipmentRouteSegmentList ? shipmentRouteSegmentList.last() : null"/>
+            <set field="firstRouteSegment" from="shipmentRouteSegmentList ? shipmentRouteSegmentList.first() : null"/>
+            <set field="lastRouteSegment" from="shipmentRouteSegmentList ? shipmentRouteSegmentList.last() : null"/>
 
             <entity-find-one entity-name="mantle.facility.Facility" value-field="originFacility">
-                <field-map field-name="facilityId" from="firstShipmentRouteSegment?.originFacilityId"/></entity-find-one>
+                <field-map field-name="facilityId" from="firstRouteSegment?.originFacilityId"/></entity-find-one>
             <entity-find-one entity-name="mantle.facility.Facility" value-field="destinationFacility">
-                <field-map field-name="facilityId" from="lastShipmentRouteSegment?.destinationFacilityId"/></entity-find-one>
+                <field-map field-name="facilityId" from="lastRouteSegment?.destinationFacilityId"/></entity-find-one>
 
             <set field="fromPartyId" from="shipment.fromPartyId ?: warehouseFacility?.ownerPartyId"/>
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromPartyDetail">
                 <field-map field-name="partyId" from="fromPartyId"/></entity-find-one>
 
-            <if condition="firstShipmentRouteSegment?.originFacilityId">
-                <set field="fromContactIdMap" from="[facilityId:firstShipmentRouteSegment?.originFacilityId,
-                        postalContactMechId:firstShipmentRouteSegment?.originPostalContactMechId,
-                        telecomContactMechId:firstShipmentRouteSegment?.originTelecomContactMechId]"/>
+            <if condition="firstRouteSegment?.originFacilityId">
+                <set field="fromContactIdMap" from="[facilityId:firstRouteSegment?.originFacilityId,
+                        postalContactMechId:firstRouteSegment?.originPostalContactMechId,
+                        telecomContactMechId:firstRouteSegment?.originTelecomContactMechId]"/>
                 <!-- will handle the contactMechIds if we have them now, otherwise use the purposes to look up -->
                 <service-call name="mantle.facility.ContactServices.get#FacilityContactInfo" out-map="fromContactInfo"
                         in-map="fromContactIdMap + [postalContactMechPurposeId:'PostalShippingOrigin',
@@ -146,10 +158,10 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toPartyDetail">
                 <field-map field-name="partyId" from="shipment.toPartyId"/></entity-find-one>
-            <if condition="lastShipmentRouteSegment?.destinationFacilityId">
-                <set field="toContactIdMap" from="[facilityId:lastShipmentRouteSegment?.destinationFacilityId,
-                        postalContactMechId:lastShipmentRouteSegment?.destPostalContactMechId,
-                        telecomContactMechId:lastShipmentRouteSegment?.destTelecomContactMechId]"/>
+            <if condition="lastRouteSegment?.destinationFacilityId">
+                <set field="toContactIdMap" from="[facilityId:lastRouteSegment?.destinationFacilityId,
+                        postalContactMechId:lastRouteSegment?.destPostalContactMechId,
+                        telecomContactMechId:lastRouteSegment?.destTelecomContactMechId]"/>
                 <!-- will handle the contactMechIds if we have them now, otherwise use the purposes to look up -->
                 <service-call name="mantle.facility.ContactServices.get#FacilityContactInfo" out-map="fromContactInfo"
                         in-map="toContactIdMap + [postalContactMechPurposeId:'PostalShippingDest',
@@ -848,8 +860,8 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="shipment" type="Map"/>
-            <parameter name="firstShipmentRouteSegment" type="Map"/>
-            <parameter name="lastShipmentRouteSegment" type="Map"/>
+            <parameter name="firstRouteSegment" type="Map"/>
+            <parameter name="lastRouteSegment" type="Map"/>
             <parameter name="originFacility" type="Map"/>
             <parameter name="destinationFacility" type="Map"/>
 
@@ -1386,6 +1398,68 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="update#mantle.shipment.ShipmentRouteSegment"
                     in-map="[shipmentId:shipmentId, shipmentRouteSegmentSeqId:shipmentRouteSegmentList[0].shipmentRouteSegmentSeqId,
                              actualStartDate:shipmentRouteSegmentList[0].actualStartDate?:ec.user.nowTimestamp]"/>
+        </actions>
+    </service>
+
+    <!-- ========== Shipment Notification Services ========== -->
+
+    <service verb="send" noun="ShipmentStoreEmail" authenticate="anonymous-view">
+        <description>Called by SECA rule in Shipment.secas.xml on tx-commit so always run async from triggering thread</description>
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="emailTypeEnumId" required="true"/>
+            <parameter name="toAddresses"><text-email/></parameter>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" distinct="true">
+                <econdition field-name="shipmentId"/><select-field field-name="orderId"/></entity-find>
+            <set field="orderIdSet" from="new HashSet(shipmentItemSourceList*.orderId)"/>
+            <script>orderIdSet.remove(null)</script>
+            <if condition="!orderIdSet"><return/></if>
+
+            <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList">
+                <econdition field-name="orderId" operator="in" from="orderIdSet"/></entity-find>
+            <set field="productStoreIdSet" from="new HashSet(orderHeaderList*.productStoreId)"/>
+            <script>productStoreIdSet.remove(null)</script>
+            <if condition="!productStoreIdSet"><return/></if>
+
+            <entity-find entity-name="mantle.product.store.ProductStoreEmail" list="storeEmailList">
+                <date-filter/><econdition field-name="productStoreId" operator="in" from="productStoreIdSet"/>
+                <econdition field-name="emailTypeEnumId"/>
+            </entity-find>
+            <if condition="storeEmailList">
+                <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+                <set field="toPartyId" from="shipment.toPartyId"/>
+
+                <!-- get to party email address -->
+                <if condition="!toAddresses">
+                    <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="emailInfo"
+                            in-map="[partyId:toPartyId, emailContactMechPurposeId:'EmailShippingDest', defaultToPrimaryPurpose:true]"/>
+                    <set field="toAddresses" from="emailInfo.emailAddress"/>
+                    <!-- get to party userId for toUserId -->
+                    <entity-find entity-name="moqui.security.UserAccount" list="userAccountList" limit="1">
+                        <econdition field-name="partyId" from="toPartyId"/></entity-find>
+                    <if condition="userAccountList"><set field="toUserId" from="userAccountList[0].userId"/></if>
+                </if>
+
+                <!-- send email for each configured -->
+                <iterate list="storeEmailList" entry="storeEmail">
+                    <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore">
+                        <field-map field-name="productStoreId" from="storeEmail.productStoreId"/></entity-find-one>
+                    <!-- simple bodyParameters, let the screen do data prep -->
+                    <set field="bodyParameters" from="[shipmentId:shipmentId, orderIdSet:new TreeSet(orderIdSet),
+                        storeDomain:productStore.storeDomain, profileUrlPath:productStore.profileUrlPath,
+                        headerImagePath:storeEmail.headerImagePath, detailLinkPath:storeEmail.detailLinkPath]"/>
+
+                    <if condition="!storeEmail.emailTemplateId"><continue/></if>
+                    <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="true"
+                            in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId,
+                                toAddresses:toAddresses, bodyParameters:bodyParameters, toUserId:toUserId]"/>
+                    <script>if (sendOut.emailMessageId) { ec.service.sync().name("create#mantle.shipment.ShipmentEmailMessage")
+                            .parameter("shipmentId", shipmentId).parameter("emailMessageId", sendOut.emailMessageId).disableAuthz().call() }</script>
+                    <message>Email sent to ${toAddresses}${sendOut.emailMessageId ? ', message ID ' + sendOut.emailMessageId : ''}</message>
+                </iterate>
+            </if>
         </actions>
     </service>
 

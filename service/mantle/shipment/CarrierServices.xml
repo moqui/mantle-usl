@@ -121,8 +121,12 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
                 <set field="carrierPartyId" from="carrierPartyId ?: orderPart.carrierPartyId"/>
 
-                <if condition="!orderHeader.productStoreId"><return error="true"
-                        message="Could not get order shipping rate, order is not associated with a store and no gateway config ID specified."/></if>
+                <if condition="!carrierPartyId"><return/></if>
+                <if condition="!orderHeader.productStoreId">
+                    <!-- this shouldn't generally happen as not called when there is no store, but if it does return quietly -->
+                    <return/>
+                    <!-- <return error="true" message="Could not get order shipping rate, order is not associated with a store and no gateway config ID specified."/> -->
+                </if>
 
                 <entity-find-one entity-name="mantle.product.store.ProductStoreShippingGateway"
                         value-field="productStoreShippingGateway">
@@ -132,16 +136,19 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="shippingGatewayConfigId" from="productStoreShippingGateway?.shippingGatewayConfigId"/>
             </if>
             <entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig" cache="true"/>
-            <if condition="shippingGatewayConfig == null"><return error="true"
-                    message="Could not get order shipping rate, no gateway configuration found."/></if>
+            <if condition="shippingGatewayConfig == null">
+                <!-- this is now called on item updates and such where there may be no carrier/etc selected yet, so just return quietly -->
+                <return/>
+                <!-- <return error="true" message="Could not get order shipping rate, no gateway configuration found for order ${orderId} carrier ${carrierPartyId}."/> -->
+            </if>
             <if condition="!shippingGatewayConfig.getOrderRateServiceName"><return error="true"
                     message="Could not get order shipping rate, no order rate service on gateway configuration [${shippingGatewayConfig.shippingGatewayConfigId}]."/></if>
 
             <!-- if order part has shipping (ItemShipping) items clear them out first -->
-            <entity-delete-by-condition entity-name="mantle.order.OrderItem">
+            <if condition="createOrderItem"><entity-delete-by-condition entity-name="mantle.order.OrderItem">
                 <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
                 <econdition field-name="itemTypeEnumId" value="ItemShipping"/>
-            </entity-delete-by-condition>
+            </entity-delete-by-condition></if>
 
             <!-- call gateway (could be local) service to calculate shipping charges -->
             <service-call name="${shippingGatewayConfig.getOrderRateServiceName}" in-map="context" out-map="context"/>
@@ -162,7 +169,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
                 <!-- NOTE: shouldn't need to exclude ItemShipping type items, calling service (estimate#OrderPartShipping) deletes them -->
                 <!-- NOTE: there should be no tax in place when this is run, tax calc should be after as shipping may be taxed -->
-                <!-- TODO: filter out non-product and other general non-shipping items -->
+                <econdition field-name="itemTypeEnumId" value="ItemProduct"/>
                 <order-by field-name="orderItemSeqId"/>
             </entity-find>
             <entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig" cache="true"/>
@@ -174,17 +181,19 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.party.ContactServices.get#PostalAddressGeoIdSet" out-map="context"
                     in-map="[contactMechId:postalContactMechId]"/>
 
-            <set field="itemCount" from="0" type="BigDecimal"/>
-            <set field="totalQuantity" from="0" type="BigDecimal"/>
-            <set field="totalWeight" from="0" type="BigDecimal"/>
+            <set field="itemCount" from="0.0" type="BigDecimal"/>
+            <set field="totalQuantity" from="0.0" type="BigDecimal"/>
+            <set field="totalWeight" from="0.0" type="BigDecimal"/>
+            <set field="totalAmount" from="0.0" type="BigDecimal"/>
             <iterate list="orderItemList" entry="orderItem">
                 <set field="product" from="orderItem.'mantle.product.Product'"/>
                 <set field="typeEnum" from="product?.'ProductType#moqui.basic.Enumeration'"/>
                 <if condition="(!product?.chargeShipping || product?.chargeShipping == 'Y') &amp;&amp;
                         product?.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse']">
-                    <set field="itemCount" from="itemCount + 1"/>
+                    <set field="itemCount" from="itemCount + 1.0"/>
 
-                    <set field="totalQuantity" from="totalQuantity + (orderItem.quantity ?: 0)"/>
+                    <set field="totalQuantity" from="totalQuantity + (orderItem.quantity ?: 1.0)"/>
+                    <set field="totalAmount" from="totalAmount + ((orderItem.quantity ?: 1.0) * (orderItem.unitAmount ?: 0.0))"/>
 
                     <entity-find-one entity-name="mantle.product.ProductDimension" value-field="shippingWeight">
                         <field-map field-name="productId" from="orderItem.productId"/>
@@ -192,13 +201,13 @@ along with this software (see the LICENSE.md file). If not, see
                     </entity-find-one>
                     <!-- TODO: this assumes all weights are the same unit, add some unit conversion to a standard like WT_lb -->
                     <!-- NOTE: this defaults to 1, maybe make this configurable somehow -->
-                    <set field="totalWeight" from="totalWeight + ((shippingWeight?.value ?: 1) * orderItem.quantity)"/>
+                    <set field="totalWeight" from="totalWeight + ((shippingWeight?.value ?: 1.0) * orderItem.quantity)"/>
                 </if>
             </iterate>
 
             <if condition="itemCount">
                 <!-- start with shippingTotal=0 so it can be added to by the rules -->
-                <set field="shippingTotal" from="0" type="BigDecimal"/>
+                <set field="shippingTotal" from="0.0" type="BigDecimal"/>
 
                 <!-- run the OrderShippingEstimateKS knowledge session rules -->
                 <if condition="ec.factory.getToolFactory('KIE')"><then>

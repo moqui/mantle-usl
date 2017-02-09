@@ -79,6 +79,8 @@ class OrderToCashBasicFlow extends Specification {
         ec.entity.tempResetSequencedIdPrimary("mantle.order.OrderHeader")
         ec.entity.tempResetSequencedIdPrimary("mantle.order.OrderItemBilling")
         ec.destroy()
+
+        ec.factory.waitWorkerPoolEmpty(50) // up to 5 seconds
     }
 
     def setup() {

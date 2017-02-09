@@ -25,7 +25,7 @@ import org.moqui.Moqui
         WorkPlanToCashBasicFlow.class, RestApiTests.class ])
 class MantleUslSuite {
     @AfterClass
-    public static void destroyMoqui() {
-        Moqui.destroyActiveExecutionContextFactory();
+    static void destroyMoqui() {
+        Moqui.destroyActiveExecutionContextFactory()
     }
 }
