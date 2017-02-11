@@ -49,10 +49,8 @@ along with this software (see the LICENSE.md file). If not, see
             for (storePromo in storePromoList) { try {
                 Map parmMap = new HashMap(context)
                 parmMap.put("itemDescription", storePromo.itemDescription)
-                if (storePromo.parameterJson) {
-                    Object jsonObj = new groovy.json.JsonSlurper().parseText((String) storePromo.parameterJson)
-                    if (jsonObj instanceof Map) parmMap.putAll((Map) jsonObj)
-                }
+                List promoParameterList = storePromo.parameters
+                for (promoParameter in promoParameterList) parmMap.put(promoParameter.parameterName, promoParameter.parameterValue)
                 parmMap.put("storePromotionId", storePromo.storePromotionId)
 
                 Map serviceRegister = storePromo.serviceRegister
@@ -70,16 +68,17 @@ along with this software (see the LICENSE.md file). If not, see
         <implements service="mantle.product.PromotionServices.apply#Promotion"/>
         <in-parameters>
             <parameter name="discountPercent" type="BigDecimal" required="true">
-                <description>Specify this in ProductStorePromotion.parameterJson like: {"discountPercent":10}</description></parameter>
+                <description>Specify this in a ProductStorePromoParameter record with parameterName="discountPercent" and parameterValue="10"</description></parameter>
             <parameter name="itemsWithPromo" type="Boolean" default="false">
-                <description>If true apply to product items that already have another promotion</description></parameter>
+                <description>If true apply to product item quantities that already have another promotion</description></parameter>
         </in-parameters>
         <actions>
             <!-- is the customer a new customer? -->
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
             <entity-find-count entity-name="mantle.order.OrderPart" count-field="ordersCount">
-                <econdition field-name="orderId" operator="not-equals"/>
                 <econdition field-name="customerPartyId" from="orderPart.customerPartyId"/>
+                <econdition field-name="orderId" operator="not-equals"/>
+                <econdition field-name="statusId" operator="not-in" value="OrderRejected,OrderCancelled,OrderWishList,OrderGiftRegistry"/>
             </entity-find-count>
             <if condition="ordersCount"><return/></if>
 
@@ -91,16 +90,66 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="prodItemList" entry="orderItem">
                 <service-call name="mantle.order.OrderServices.get#OrderItemTotal" out-map-add-to-existing="false"
                         in-map="[orderItem:orderItem, getChildrenTotals:true]" out-map="orderItemTotalOut"/>
-                <set field="prodItemTotal" from="orderItemTotalOut.itemPlusChildrenTotal"/>
-                <if condition="!itemsWithPromo &amp;&amp; orderItemTotalOut.hasPromo"><continue/></if>
-                <if condition="prodItemTotal &lt;= 0.0"><continue/></if>
+                <if condition="!orderItemTotalOut.combinedAmount"><continue/></if>
+                <if condition="itemsWithPromo"><then>
+                    <set field="promoQuantity" from="orderItem.quantity"/>
+                </then><else>
+                    <set field="promoQuantity" from="orderItem.quantity - orderItemTotalOut.promoQuantityUsed"/>
+                </else></if>
+                <if condition="promoQuantity &lt;= 0.0"><continue/></if>
                 <!-- create promo item -->
-                <set field="discountAmount" from="-(prodItemTotal*(discountPercent/100.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
-                <service-call name="create#mantle.order.OrderItem" out-map="context"
+                <set field="discountAmount" from="-(orderItemTotalOut.combinedAmount * (discountPercent/100.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
-                                 itemTypeEnumId:'ItemDiscount', quantity:1, unitAmount:discountAmount,
-                                 sourcePercentage:discountPercent, sourceReferenceId:storePromotionId, isPromo:'Y',
-                                 itemDescription:ec.resource.expand(itemDescription, '')?:'Promotion']"/>
+                                 itemTypeEnumId:'ItemDiscount', quantity:promoQuantity, unitAmount:discountAmount, sourcePercentage:discountPercent,
+                                 sourceReferenceId:storePromotionId, isPromo:'Y', promoQuantity:promoQuantity,
+                                 itemDescription:ec.resource.expand(itemDescription, '')?:'New Customer Discount']"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="apply" noun="BuyGetDiscount">
+        <description>Apply discountPercent to getQuantity based on buyQuantity for a single item for each buy+get quantity.
+            Configure with ProductStorePromoParameter records like this for buy 3 get 1 free (100% discount):
+            buyQuantity:3, getQuantity:1, discountPercent:100}</description>
+        <implements service="mantle.product.PromotionServices.apply#Promotion"/>
+        <in-parameters>
+            <parameter name="buyQuantity" type="BigDecimal" required="true"/>
+            <parameter name="getQuantity" type="BigDecimal" required="true"/>
+            <parameter name="discountPercent" type="BigDecimal" required="true"/>
+            <parameter name="itemsWithPromo" type="Boolean" default="false">
+                <description>If true apply to product items that already have another promotion</description></parameter>
+        </in-parameters>
+        <actions>
+            <set field="buyGetQuantity" from="buyQuantity + getQuantity"/>
+            <!-- apply promo to each eligible item -->
+            <entity-find entity-name="mantle.order.OrderItem" list="prodItemList">
+                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                <econdition field-name="itemTypeEnumId" value="ItemProduct"/>
+            </entity-find>
+            <iterate list="prodItemList" entry="orderItem">
+                <service-call name="mantle.order.OrderServices.get#OrderItemTotal" out-map-add-to-existing="false"
+                        in-map="[orderItem:orderItem, getChildrenTotals:true]" out-map="orderItemTotalOut"/>
+                <if condition="!orderItemTotalOut.combinedAmount"><continue/></if>
+
+                <if condition="itemsWithPromo"><then>
+                    <set field="eligibleQuantity" from="orderItem.quantity ?: 1.0"/>
+                </then><else>
+                    <set field="eligibleQuantity" from="(orderItem.quantity ?: 1.0) - orderItemTotalOut.promoQuantityUsed"/>
+                </else></if>
+
+                <set field="timesToApply" from="(eligibleQuantity / buyGetQuantity).setScale(0, BigDecimal.ROUND_DOWN)"/>
+                <set field="itemQuantity" from="timesToApply * getQuantity"/>
+                <set field="promoQuantity" from="timesToApply * buyGetQuantity"/><!-- quantity 'consumed' by the promo is buy + get -->
+                <!-- <log level="warn" message="eligibleQuantity ${eligibleQuantity} timesToApply ${timesToApply} itemQuantity ${itemQuantity} promoQuantity ${promoQuantity}"/> -->
+                <if condition="timesToApply == 0"><continue/></if>
+
+                <!-- create promo item -->
+                <set field="discountAmount" from="-(orderItemTotalOut.combinedAmount*(discountPercent/100.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
+                        in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
+                                 itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:discountAmount, sourcePercentage:discountPercent,
+                                 sourceReferenceId:storePromotionId, isPromo:'Y', promoQuantity:promoQuantity,
+                                 itemDescription:ec.resource.expand(itemDescription, '')?:('Buy ' + buyQuantity + ' Get ' + getQuantity + ' at ' + discountPercent + '% off')]"/>
             </iterate>
         </actions>
     </service>
