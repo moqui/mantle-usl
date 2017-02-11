@@ -821,7 +821,7 @@ h2. General Order Placement and eCommerce Usage
             <parameter name="paymentId"/>
         </out-parameters>
         <actions>
-            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
             <if condition="orderPartSeqId"><then>
                 <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
             </then><else>
@@ -1285,12 +1285,11 @@ h2. General Order Placement and eCommerce Usage
             <parameter name="quantity" type="BigDecimal"/>
             <parameter name="unitAmount" type="BigDecimal"/>
             <parameter name="selectedAmount" type="BigDecimal"/>
+            <parameter name="isPromo"/>
             <parameter name="originalValue" type="Map"/>
             <parameter name="eecaOperation"/>
         </in-parameters>
         <actions>
-            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
-
             <if condition="eecaOperation == 'delete'">
                 <service-call name="mantle.order.OrderServices.update#OrderPartTotal" in-map="context"/>
                 <return/>
@@ -1298,9 +1297,10 @@ h2. General Order Placement and eCommerce Usage
 
             <if condition="!originalValue || quantity != originalValue.quantity || unitAmount != originalValue.unitAmount ||
                     selectedAmount != originalValue.selectedAmount || orderPartSeqId != originalValue.orderPartSeqId"><then>
+                <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
                 <service-call name="mantle.order.OrderServices.update#OrderPartTotal" in-map="context"/>
 
-                <if condition="orderHeader.productStoreId &amp;&amp; !(itemTypeEnumId in ['ItemSalesTax', 'ItemShipping', 'ItemVatTax'])">
+                <if condition="orderHeader.productStoreId &amp;&amp; isPromo != 'Y' &amp;&amp; !(itemTypeEnumId in ['ItemShipping', 'ItemSalesTax', 'ItemVatTax'])">
                     <service-call name="mantle.order.OrderServices.handle#OrderMajorChange"
                             in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
                     <if condition="originalValue &amp;&amp; orderPartSeqId != originalValue.orderPartSeqId">
@@ -1331,14 +1331,13 @@ h2. General Order Placement and eCommerce Usage
             <if condition="originalValue &amp;&amp; partTotal != originalValue.partTotal"><return/></if>
 
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
-            <!-- increment order revision for any change on a part -->
-            <service-call name="mantle.order.OrderServices.increment#OrderRevision" in-map="context"/>
-
             <if condition="orderHeader.productStoreId &amp;&amp; (!originalValue || postalContactMechId != originalValue.postalContactMechId ||
-                    carrierPartyId != originalValue.carrierPartyId || shipmentMethodEnumId != originalValue.shipmentMethodEnumId)">
+                    carrierPartyId != originalValue.carrierPartyId || shipmentMethodEnumId != originalValue.shipmentMethodEnumId)"><then>
                 <service-call name="mantle.order.OrderServices.handle#OrderMajorChange"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
-            </if>
+            </then><else>
+                <service-call name="mantle.order.OrderServices.increment#OrderRevision" in-map="context"/>
+            </else></if>
         </actions>
     </service>
     <service verb="handle" noun="OrderMajorChange">
@@ -1367,9 +1366,10 @@ h2. General Order Placement and eCommerce Usage
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
 
                 <script>ec.context.getSharedMap().remove(sharedFlagKey)</script>
+
+                <service-call name="mantle.order.OrderServices.increment#OrderRevision" in-map="context"/>
             </if>
 
-            <service-call name="mantle.order.OrderServices.increment#OrderRevision" in-map="context"/>
         </actions>
     </service>
 
@@ -1381,14 +1381,12 @@ h2. General Order Placement and eCommerce Usage
             <parameter name="orderHeader" type="EntityValue"/>
         </in-parameters>
         <actions>
+            <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/></if>
             <set field="totalSum" from="0.0" type="BigDecimal"/>
-            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
-                <econdition field-name="orderId"/>
-            </entity-find>
+            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList"><econdition field-name="orderId"/></entity-find>
             <iterate list="orderPartList" entry="orderPart">
                 <set field="totalSum" from="totalSum + (orderPart.partTotal ?: 0)"/>
             </iterate>
-            <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/></if>
             <set field="orderHeader.grandTotal" from="totalSum"/>
             <entity-update value-field="orderHeader"/>
         </actions>
@@ -1403,9 +1401,7 @@ h2. General Order Placement and eCommerce Usage
         <actions>
             <set field="totalSum" from="0.0" type="BigDecimal"/>
             <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
-                <econdition field-name="orderId"/>
-                <econdition field-name="orderPartSeqId"/>
-            </entity-find>
+                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/></entity-find>
             <iterate list="orderItemList" entry="orderItem">
                 <service-call name="mantle.order.OrderServices.get#OrderItemTotal" out-map="itemTotalOut"
                         in-map="[orderItem:orderItem]"/>
@@ -1423,10 +1419,12 @@ h2. General Order Placement and eCommerce Usage
     <service verb="increment" noun="OrderRevision">
         <in-parameters>
             <parameter name="orderId"/>
-            <parameter name="orderHeader" type="EntityValue"/>
         </in-parameters>
         <actions>
-            <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/></if>
+            <if condition="!orderId"><return/></if>
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true">
+                <field-map field-name="orderId"/></entity-find-one>
+            <!-- TODO: not using <select-field field-name="orderId,orderRevision"/> because of issue in EntityValue where a bunch of stuff gets set to null -->
             <if condition="orderHeader != null">
                 <set field="orderHeader.orderRevision" from="(orderHeader.orderRevision ?: 1) + 1"/>
                 <entity-update value-field="orderHeader"/>
