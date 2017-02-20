@@ -385,7 +385,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
                     <set field="employmentSalary" from="employmentSalaryList[0]"/>
 
-                    <set field="payAmount"  from="employmentSalary.amount"/>
+                    <set field="payAmount" from="employmentSalary.amount"/>
                     <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
 
                     <!-- handle partial period for salary (first and last, ie by from and thru) -->
@@ -673,7 +673,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="garnishPriority" type="Long"/>
 
             <parameter name="amount" type="BigDecimal"/>
-            <parameter name="basisPayAmount" type="BigDecimal"/>
+            <parameter name="adjustmentBasisAmount" type="BigDecimal">
+                <description>Depending on the adjustment, this can be dollars, hours, etc.</description></parameter>
             <parameter name="stdDeductionAmount" type="BigDecimal"/>
             <parameter name="allowanceDeductionAmount" type="BigDecimal"/>
             <parameter name="allowanceExemptionAmount" type="BigDecimal"/>
@@ -705,16 +706,16 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="rateBasisEnumId" from="payrollAdjustment.rateBasisEnumId"/>
             <if condition="rateBasisEnumId == 'PrbsIncome'"><then>
-                <set field="basisPayAmount" from="taxablePayAmount"/>
+                <set field="adjustmentBasisAmount" from="taxablePayAmount"/>
                 <set field="ytdIncome" from="taxableYtdIncome"/>
             </then><else-if condition="rateBasisEnumId == 'PrbsSocial'">
-                <set field="basisPayAmount" from="socialTaxablePayAmount"/>
+                <set field="adjustmentBasisAmount" from="socialTaxablePayAmount"/>
                 <set field="ytdIncome" from="socialTaxableYtdIncome"/>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsMedical'">
-                <set field="basisPayAmount" from="medicalTaxablePayAmount"/>
+                <set field="adjustmentBasisAmount" from="medicalTaxablePayAmount"/>
                 <set field="ytdIncome" from="medicalTaxableYtdIncome"/>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsMedical'">
-                <set field="basisPayAmount" from="medicalTaxablePayAmount"/>
+                <set field="adjustmentBasisAmount" from="medicalTaxablePayAmount"/>
                 <set field="ytdIncome" from="medicalTaxableYtdIncome"/>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsStraightGross'">
                 <if condition="payrollAdjustment.riskClassCode">
@@ -739,9 +740,26 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="payrollAdjustment.riskClassCode">
                     <then>
                         <!-- TODO: Only against the gross for this Risk Class Code -->
+                        <if condition="timeEntryList">
+                            <then>
+                                <iterate list="timeEntryList" entry="timeEntry">
+                                    timeEntry.workTypeEnumId
+                                    timeEntry.workEffortId
+                                    workEffort.facilityId
+                                    workEffortFacilityDetail.stateGeoId
+                                    workTypeRiskClass.riskClassCode
+
+                                    <!--<set field="timeEntry.vendorInvoiceId" from="invoiceId"/>-->
+                                    <!--<entity-update value-field="timeEntry"/>&lt;!&ndash; do direct update, was selected with for-update &ndash;&gt;-->
+                                </iterate>
+                            </then>
+                            <else>
+                                <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
+                            </else>
+                        </if>
                     </then>
                     <else>
-                        <set field="basisPayAmount" from="payAmount"/>
+                        <set field="adjustmentBasisAmount" from="payAmount"/>
                         <set field="ytdIncome" from="payAmount"/>
                     </else>
                 </if>
@@ -778,7 +796,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="taxAllowances" from="0"/>
                 </else></if>
 
-                <!-- Find applicable PayrollStdDeduction, subtract from basisPayAmount -->
+                <!-- Find applicable PayrollStdDeduction, subtract from adjustmentBasisAmount -->
                 <if condition="payrollAdjustment.applyStdDeduction == 'Y'">
                     <entity-find entity-name="mantle.humanres.employment.PayrollStdDeduction" list="stdDeductionList">
                         <date-filter valid-date="payTimestamp"/>
@@ -794,12 +812,12 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="stdDeductionList">
                         <set field="stdDeduction" from="stdDeductionList[0]"/>
                         <set field="stdDeductionAmount" from="stdDeduction.amount"/>
-                        <set field="basisPayAmount" from="basisPayAmount - stdDeductionAmount"/>
+                        <set field="adjustmentBasisAmount" from="adjustmentBasisAmount - stdDeductionAmount"/>
                     </if>
                 </if>
 
                 <!-- Find applicable PayrollAllowance Deductions, multiply by (taxFederalAllowances or taxStateAllowances)
-                    subtract from basisPayAmount -->
+                    subtract from adjustmentBasisAmount -->
                 <if condition="payrollAdjustment.applyAllowanceDeduction == 'Y' &amp;&amp; taxAllowances">
                     <entity-find entity-name="mantle.humanres.employment.PayrollAllowance" list="allowanceList">
                         <date-filter valid-date="payTimestamp"/>
@@ -810,8 +828,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="allowanceList">
                         <set field="allowance" from="allowanceList[0]"/>
                         <set field="allowanceDeductionAmount" from="allowance.amount * taxAllowances"/>
-                        <set field="basisPayAmount" from="basisPayAmount - allowanceDeductionAmount"/>
-                        <if condition="basisPayAmount &lt; 0"><set field="basisPayAmount" from="0"/></if>
+                        <set field="adjustmentBasisAmount" from="adjustmentBasisAmount - allowanceDeductionAmount"/>
+                        <if condition="adjustmentBasisAmount &lt; 0"><set field="adjustmentBasisAmount" from="0"/></if>
                     </if>
                 </if>
             </if>
@@ -821,18 +839,18 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="payrollAdjustmentId"/>
                 <econdition field-name="ytdMin" operator="less-equals" from="ytdIncome" or-null="true"/>
                 <econdition field-name="ytdMax" operator="greater" from="ytdIncome" or-null="true"/>
-                <econdition field-name="periodMin" operator="less-equals" from="basisPayAmount" or-null="true"/>
-                <econdition field-name="periodMax" operator="greater" from="basisPayAmount" or-null="true"/>
+                <econdition field-name="periodMin" operator="less-equals" from="adjustmentBasisAmount" or-null="true"/>
+                <econdition field-name="periodMax" operator="greater" from="adjustmentBasisAmount" or-null="true"/>
                 <order-by field-name="-rate,-flatAmount"/><!-- should always be one record, but just in case take the highest -->
             </entity-find>
 
-            <!-- <log message="====== ytdIncome=${ytdIncome}, basisPayAmount=${basisPayAmount}, payrollAdjustmentDetailList:\n${payrollAdjustmentDetailList}"/> -->
+            <!-- <log message="====== ytdIncome=${ytdIncome}, adjustmentBasisAmount=${adjustmentBasisAmount}, payrollAdjustmentDetailList:\n${payrollAdjustmentDetailList}"/> -->
 
             <!-- calculate adjustment amount -->
             <if condition="payrollAdjustmentDetailList">
                 <set field="adjustmentDetail" from="payrollAdjustmentDetailList[0]"/>
 
-                <set field="rateBasis" from="basisPayAmount"/>
+                <set field="rateBasis" from="adjustmentBasisAmount"/>
                 <if condition="adjustmentDetail.rateAfterYtdMin == 'Y'">
                     <set field="rateBasis" from="rateBasis - adjustmentDetail.ytdMin"/></if>
                 <if condition="adjustmentDetail.rateAfterPeriodMin == 'Y'">
