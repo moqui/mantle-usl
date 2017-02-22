@@ -31,6 +31,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="sourcePartyId" required="true"/>
             <parameter name="organizationPartyId" required="true"/>
             <auto-parameters entity-name="mantle.ledger.config.PartyAcctgPreference" include="nonpk"/>
+            <parameter name="startYear" format="0000"><description>If specified creates fiscal time periods (year, quarter, month) starting that
+                year and through the following year, otherwise starts now and creates current and next year, quarter, and month</description></parameter>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.ledger.config.PartyAcctgPreference" value-field="existingPartyAcctgPreference">
@@ -119,8 +121,30 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- TODO: CreditCardTypeGlAccount, GlAccountTypePartyDefault, ProductCategoryGlAccount, ProductGlAccount, TaxAuthorityGlAccount, VarianceReasonGlAccount -->
 
             <!-- setup mantle.party.time.TimePeriod for FiscalMonth, FiscalQuarter, FiscalYear -->
-            <service-call name="mantle.ledger.LedgerServices.check#NextFiscalTimePeriods"
-                    in-map="[organizationPartyId:organizationPartyId]"/>
+            <if condition="startYear"><then>
+                <set field="nextYearInt" from="((Calendar) ec.user.nowCalendar).get(Calendar.YEAR) + 1"/>
+                <set field="lastYear" from="ec.l10n.format(nextYearInt, '0000')"/>
+
+                <set field="curYear" from="startYear"/>
+                <set field="prevPeriodId" from="null"/>
+                <while condition="curYear &lt;= lastYear">
+                    <set field="fromDate" from="ec.l10n.parseDate(curYear + '-01-01', 'yyyy-MM-dd')"/>
+                    <service-call name="mantle.party.TimeServices.getOrCreate#TimePeriod" out-map="curYearOut"
+                            in-map="[partyId:organizationPartyId, timePeriodTypeId:'FiscalYear', fromDate:fromDate, previousPeriodId:prevPeriodId]"/>
+                    <service-call name="mantle.party.TimeServices.get#DescendantPeriods" out-map="quartersOut"
+                            in-map="[parentPeriodId:curYearOut.timePeriodId, timePeriodTypeId:'FiscalQuarter', createMissing:true]"/>
+                    <iterate list="quartersOut.timePeriodList" entry="quarterPeriod">
+                        <service-call name="mantle.party.TimeServices.get#DescendantPeriods" out-map="quartersOut"
+                                in-map="[parentPeriodId:quarterPeriod.timePeriodId, timePeriodTypeId:'FiscalMonth', createMissing:true]"/>
+                    </iterate>
+
+                    <set field="prevPeriodId" from="curYearOut.timePeriodId"/>
+                    <set field="curYear" from="((curYear as int) + 1) as String"/>
+                </while>
+            </then><else>
+                <service-call name="mantle.ledger.LedgerServices.check#NextFiscalTimePeriods"
+                        in-map="[organizationPartyId:organizationPartyId]"/>
+            </else></if>
         </actions>
     </service>
 
@@ -1164,6 +1188,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="noTxOrgPartyIds" from="new TreeSet()"/>
             <set field="glAccountRootClassMap" from="[:]"/>
 
+            <log level="info" message="[Recalculate GlAccountOrgSummaries] lastRunTime ${lastRunTime}, ${timePeriodList.size()} time periods, organizations: ${organizationPartyIds}"/>
+
             <!-- for specified or all org create/update GlAccountOrganization.postedBalance -->
             <!-- TODO: consider not doing this and find some other approach... goes back to all posted transactions; we have
                 balanceLastUpdated but then would have to do query for each existing GlAccountOrganization record, and then an
@@ -1182,6 +1208,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <script>noTxOrgPartyIds.add(organizationPartyId)</script>
                         <continue/>
                     </if>
+                    <log level="info" message="[Recalculate GlAccountOrgSummaries] org ${organizationPartyId} has tx posted ${latestTransList[0].postedDate} so recalculating summaries"/>
                 </if>
 
                 <!-- do the big query to get latest totals -->

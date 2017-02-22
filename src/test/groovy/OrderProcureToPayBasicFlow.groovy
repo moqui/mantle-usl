@@ -589,7 +589,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     amount="10,000" glAccountTypeEnumId="GatUnreceivedFixedAsset" glAccountId="139100000"
                     reconcileStatusId="AterNot" isSummary="N" productId="EQUIP_1" invoiceItemSeqId="04"/>
                 <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="05" debitCreditFlag="D"
-                    amount="145" glAccountTypeEnumId="" glAccountId="519000000" reconcileStatusId="AterNot"
+                    amount="145" glAccountTypeEnumId="" glAccountId="519100000" reconcileStatusId="AterNot"
                     isSummary="N" invoiceItemSeqId="05"/>
 
                 <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="06" debitCreditFlag="C"
