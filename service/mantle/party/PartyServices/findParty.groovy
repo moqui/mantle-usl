@@ -31,6 +31,7 @@ ef.selectField("partyId")
 if (partyId) { ef.condition(ec.entity.conditionFactory.makeCondition("partyId", EntityCondition.LIKE, (leadingWildcard ? "%" : "") + partyId + "%").ignoreCase()) }
 if (pseudoId) { ef.condition(ec.entity.conditionFactory.makeCondition("pseudoId", EntityCondition.LIKE, (leadingWildcard ? "%" : "") + pseudoId + "%").ignoreCase()) }
 if (partyTypeEnumId) { ef.condition("partyTypeEnumId", partyTypeEnumId) }
+if (hasDuplicates) { ef.condition("hasDuplicates", hasDuplicates) }
 if (roleTypeId) { ef.condition("roleTypeId", roleTypeId) }
 if (username) { ef.condition(ec.entity.conditionFactory.makeCondition("username", EntityCondition.LIKE, (leadingWildcard ? "%" : "") + username + "%").ignoreCase()) }
 
