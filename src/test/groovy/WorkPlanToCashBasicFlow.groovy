@@ -73,7 +73,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 .parameters([partyId:vendorResult.partyId, postalContactMechPurposeId:'PostalPayment',
                     telecomContactMechPurposeId:'PhonePayment', emailContactMechPurposeId:'EmailPayment', countryGeoId:'USA',
                     address1:'51 W. Center St.', unitNumber:'1234', city:'Orem', stateProvinceGeoId:'USA_UT',
-                    postalCode:'84057', postalCodeExt:'4605', countryCode:'+1', areaCode:'801', contactNumber:'123-4567',
+                    postalCode:'84057', postalCodeExt:'4605', countryCode:'1', areaCode:'801', contactNumber:'123-4567',
                     emailAddress:'vendor.ar@test.com']).call()
         // internal org and accounting config default settings
         ec.service.sync().name("create#mantle.party.PartyRole").parameters([partyId:vendorResult.partyId, roleTypeId:'OrgInternal']).call()
@@ -103,7 +103,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.party.contact.ContactMech contactMechId="${vendorCiResult.telecomContactMechId}" contactMechTypeEnumId="CmtTelecomNumber"/>
             <mantle.party.contact.PartyContactMech partyId="${vendorResult.partyId}" contactMechId="${vendorCiResult.telecomContactMechId}"
                 contactMechPurposeId="PhonePayment" fromDate="${effectiveTime}"/>
-            <mantle.party.contact.TelecomNumber contactMechId="${vendorCiResult.telecomContactMechId}" countryCode="+1"
+            <mantle.party.contact.TelecomNumber contactMechId="${vendorCiResult.telecomContactMechId}" countryCode="1"
                 areaCode="801" contactNumber="123-4567"/>
             <mantle.party.contact.ContactMech contactMechId="${vendorCiResult.emailContactMechId}"
                 contactMechTypeEnumId="CmtEmailAddress" infoString="vendor.ar@test.com"/>
@@ -237,7 +237,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 .parameters([partyId:clientResult.partyId, postalContactMechPurposeId:'PostalBilling',
                     telecomContactMechPurposeId:'PhoneBilling', emailContactMechPurposeId:'EmailBilling', countryGeoId:'USA',
                     address1:'1350 E. Flamingo Rd.', unitNumber:'1234', city:'Las Vegas', stateProvinceGeoId:'USA_NV',
-                    postalCode:'89119', postalCodeExt:'5263', countryCode:'+1', areaCode:'702', contactNumber:'123-4567',
+                    postalCode:'89119', postalCodeExt:'5263', countryCode:'1', areaCode:'702', contactNumber:'123-4567',
                     emailAddress:'client.ap@test.com']).call()
 
         Map clientRepResult = ec.service.sync().name("mantle.party.PartyServices.create#Account")
@@ -263,7 +263,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.party.contact.ContactMech contactMechId="${clientCiResult.telecomContactMechId}" contactMechTypeEnumId="CmtTelecomNumber"/>
             <mantle.party.contact.PartyContactMech partyId="${clientResult.partyId}" contactMechId="${clientCiResult.telecomContactMechId}"
                 contactMechPurposeId="PhoneBilling" fromDate="${effectiveTime}"/>
-            <mantle.party.contact.TelecomNumber contactMechId="${clientCiResult.telecomContactMechId}" countryCode="+1"
+            <mantle.party.contact.TelecomNumber contactMechId="${clientCiResult.telecomContactMechId}" countryCode="1"
                 areaCode="702" contactNumber="123-4567"/>
             <mantle.party.contact.ContactMech contactMechId="${clientCiResult.emailContactMechId}"
                 contactMechTypeEnumId="CmtEmailAddress" infoString="client.ap@test.com"/>
