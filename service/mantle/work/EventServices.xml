@@ -105,12 +105,9 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="end" from="ec.l10n.format(startEndOut.endDate, 'yyyy-MM-dd\'T\'HH:mm:ss')"/>
                 </else></if>
 
-                <if condition="urlGString">
-                    <set field="url" from="ec.resource.expand(urlGString, '')"/>
-                    <else><set field="url" value=""/></else>
-                </if>
-                <set field="eventMap" from="[id:workEffort.workEffortId, title:title, start:start, end:end, url:url, allDay:startEndOut.allDay]"/>
-                <script>eventList.add(eventMap)</script>
+                <if condition="urlGString"><then><set field="url" from="ec.resource.expand(urlGString, '')"/></then>
+                    <else><set field="url" value=""/></else></if>
+                <script>eventList.add([id:workEffort.workEffortId, title:title, start:start, end:end, url:url, allDay:startEndOut.allDay])</script>
             </iterate>
         </actions>
     </service>
@@ -146,5 +143,101 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="assetId"><service-call name="create#mantle.work.effort.WorkEffortAssetAssign"
                     in-map="[workEffortId:workEffortId, assetId:assetId, fromDate:ec.user.nowTimestamp, statusId:'WeaaAssigned']"/></if>
         </actions>
+    </service>
+
+    <service verb="get" noun="NextBusinessDay">
+        <description>Find the next business day skipping Saturday and Sunday unless specified not to, and skipping holidays by
+            organizationPartyId (WorkEffort.ownerPartyId) and workEffortCategoryIds. WorkEffort records must have
+            purposeEnumId=WepHoliday and the a single day date in the WorkEffort.allDayStart field.</description>
+        <in-parameters>
+            <parameter name="startDate" type="Date" required="true"/>
+            <parameter name="skipSaturday" type="Boolean" default="true"/>
+            <parameter name="skipSunday" type="Boolean" default="true"/>
+            <parameter name="organizationPartyId"><description>If specified matches against WorkEffort.ownerPartId to find holidays</description></parameter>
+            <parameter name="workEffortCategoryIds" type="List"><description>If specified matches against WorkEffort records in
+                these categories to find holidays, such as HolidayUsaBank or HolidayUsaFed</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="nextDayDate" type="Date"/>
+            <parameter name="calendarDays" type="Integer"/>
+            <parameter name="skipWeekends" type="Integer"/>
+            <parameter name="skipHolidays" type="Integer"/>
+        </out-parameters>
+        <actions>
+            <script><![CDATA[
+                Calendar nextDayCal = ec.user.nowCalendar
+                nextDayCal.setTime(startDate)
+                nextDayCal.add(Calendar.DAY_OF_MONTH, 1)
+                calendarDays = 1
+                skipWeekends = 0
+                skipHolidays = 0
+                if (skipSaturday && nextDayCal.get(Calendar.DAY_OF_WEEK) == Calendar.SATURDAY) {
+                    nextDayCal.add(Calendar.DAY_OF_MONTH, 1)
+                    calendarDays += 1
+                    skipWeekends += 1
+                }
+                if (skipSunday && nextDayCal.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY) {
+                    nextDayCal.add(Calendar.DAY_OF_MONTH, 1)
+                    calendarDays += 1
+                    skipWeekends += 1
+                }
+                nextDayDate = new java.sql.Date(nextDayCal.getTimeInMillis())
+            ]]></script>
+            <!-- see if it falls on a holiday -->
+            <if condition="organizationPartyId || workEffortCategoryIds">
+                <entity-find-count entity-name="mantle.work.effort.WorkEffortAndCategoryAppl" count-field="holidayCount">
+                    <econdition field-name="purposeEnumId" value="WepHoliday"/>
+                    <econdition field-name="allDayStart" from="nextDayDate"/>
+                    <econditions combine="or">
+                        <econdition field-name="ownerPartyId" from="organizationPartyId" ignore-if-empty="true"/>
+                        <econdition field-name="workEffortCategoryId" operator="in" from="workEffortCategoryIds" ignore-if-empty="true"/>
+                    </econditions>
+                </entity-find-count>
+                <!-- recurse to get next business day (skip weekends and holidays again) -->
+                <if condition="holidayCount">
+                    <service-call name="mantle.work.EventServices.get#NextBusinessDay" out-map="nextOut" in-map="context + [startDate:nextDayDate]"/>
+                    <set field="nextDayDate" from="nextOut.nextDayDate"/>
+                    <set field="calendarDays" from="calendarDays + nextOut.calendarDays"/>
+                    <set field="skipWeekends" from="skipWeekends + nextOut.skipWeekends"/>
+                    <set field="skipHolidays" from="skipHolidays + nextOut.skipHolidays + 1"/>
+                </if>
+            </if>
+        </actions>
+    </service>
+    <service verb="get" noun="FutureBusinessDay">
+        <description>Looks into the future businessDays days, checking each day to see if it is a business day and if not it is
+            skipped over; for example if starting on a Friday and Sat/Sun plus a holiday on Monday are skipped the following Tuesday
+            will be the next business day, and if going forward 5 business days and there are no other holiday then it will move
+            forward 3 more business days (4 so far) to the following Friday, then going to the next business day to get 5 it jumps
+            to the following Monday, in this case we went forward 5 business days and skipped 5 days so calendarDays will be 10</description>
+        <in-parameters>
+            <parameter name="startDate" type="Date" required="true"/>
+            <parameter name="businessDays" type="Integer" required="true"/>
+            <parameter name="skipSaturday" type="Boolean" default="true"/>
+            <parameter name="skipSunday" type="Boolean" default="true"/>
+            <parameter name="organizationPartyId"/>
+            <parameter name="workEffortCategoryIds" type="List"/><!-- for example ['HolidayUsaBank'] -->
+        </in-parameters>
+        <out-parameters>
+            <parameter name="futureDayDate" type="Date"/>
+            <parameter name="calendarDays" type="Integer"/>
+            <parameter name="skipWeekends" type="Integer"/>
+            <parameter name="skipHolidays" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            futureDayDate = startDate
+            calendarDays = 0
+            skipWeekends = 0
+            skipHolidays = 0
+            for (int i = businessDays; i > 0; i--) {
+                Map nextOut = ec.service.sync().name("mantle.work.EventServices.get#NextBusinessDay")
+                        .parameters(context + [startDate:futureDayDate]).call()
+                futureDayDate = nextOut.nextDayDate
+                calendarDays += nextOut.calendarDays
+                skipWeekends += nextOut.skipWeekends
+                skipHolidays += nextOut.skipHolidays
+                // ec.logger.warn("business days left ${i-1} futureDayDate ${futureDayDate} calendarDays ${calendarDays} skipWeekends ${skipWeekends} skipHolidays ${skipHolidays}")
+            }
+        ]]></script></actions>
     </service>
 </services>
