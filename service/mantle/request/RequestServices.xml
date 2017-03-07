@@ -16,14 +16,14 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="create" noun="Request">
         <in-parameters>
-            <auto-parameters include="nonpk"/>
+            <auto-parameters include="nonpk"><exclude field-name="visitId"/></auto-parameters>
             <parameter name="statusId" default-value="ReqDraft"/>
             <parameter name="priority" type="Long" default="5"/>
             <parameter name="requestTypeEnumId" default-value="RfSupport"/>
             <parameter name="requestResolutionEnumId" default-value="RrUnresolved"/>
             <parameter name="requestDate" default="ec.user.nowTimestamp"/>
-            <parameter name="filedByPartyId" default="ec.user.userAccount.partyId"/>
-            <parameter name="assignToPartyId" default="ec.user.userAccount.partyId"/>
+            <parameter name="filedByPartyId" default="ec.user.userAccount?.partyId"/>
+            <parameter name="assignToPartyId" default="ec.user.userAccount?.partyId"/>
             <parameter name="customerPartyId"/>
             <parameter name="clientPartyId"/>
         </in-parameters>
@@ -31,6 +31,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="requestId"/>
         </out-parameters>
         <actions>
+            <set field="visitId" from="ec.user.visitId"/>
             <service-call name="create#mantle.request.Request" out-map="context" in-map="context"/>
             <if condition="filedByPartyId"><service-call name="create#mantle.request.RequestParty"
                     in-map="[requestId:requestId, partyId:filedByPartyId, roleTypeId:'Reporter', fromDate:ec.user.nowTimestamp]"/></if>
@@ -58,6 +59,91 @@ along with this software (see the LICENSE.md file). If not, see
                     in-map="[requestId:requestId, roleTypeId:'Customer', newPartyId:customerPartyId]"/></if>
             <if condition="clientPartyId"><service-call name="mantle.request.RequestServices.replace#RequestParty"
                     in-map="[requestId:requestId, roleTypeId:'CustomerBillTo', newPartyId:clientPartyId]"/></if>
+        </actions>
+    </service>
+
+    <service verb="create" noun="ContactRequest">
+        <in-parameters>
+            <parameter name="statusId" default-value="ReqSubmitted"/>
+            <parameter name="priority" type="Long" default="3"/>
+            <parameter name="requestTypeEnumId" default-value="RqtContact"/>
+            <parameter name="requestResolutionEnumId" default-value="RrUnresolved"/>
+            <parameter name="requestDate" default="ec.user.nowTimestamp"/>
+            <parameter name="productStoreId"/>
+            <parameter name="requestName"/>
+            <parameter name="description"/>
+
+            <parameter name="filedByPartyId" default="ec.user.userAccount?.partyId"/>
+            <parameter name="customerPartyId" default="ec.user.userAccount?.partyId"/>
+            <parameter name="firstName"/>
+            <parameter name="lastName"/>
+
+            <parameter name="emailContactMechId"/>
+            <parameter name="emailAddress"><text-email/></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="requestId"/>
+        </out-parameters>
+        <actions>
+            <set field="visitId" from="ec.user.visitId"/>
+
+            <if condition="!customerPartyId">
+                <if condition="!firstName || !lastName || !emailAddress"><return error="true" message="Please enter your first and last names"/></if>
+                <set field="firstName" from="firstName.trim()"/>
+
+                <!-- search for existing party by email address -->
+                <entity-find entity-name="mantle.party.contact.PartyContactMechInfo" list="emailPcmList">
+                    <date-filter/><econdition field-name="infoString" from="emailAddress"/></entity-find>
+                <iterate list="emailPcmList" entry="emailPcm">
+                    <entity-find-one entity-name="mantle.party.PartyDetail" value-field="party">
+                        <field-map field-name="partyId" from="emailPcm.partyId"/></entity-find-one>
+                    <if condition="party.disabled == 'Y' || party.partyTypeEnumId != 'PtyPerson'"><continue/></if>
+                    <if condition="!firstName.equalsIgnoreCase(party.firstName?.trim())"><continue/></if>
+                    <set field="customerPartyId" from="emailPcm.partyId"/>
+                    <set field="emailContactMechId" from="emailPcm.contactMechId"/>
+                    <break/>
+                </iterate>
+
+                <!-- create a party with the name -->
+                <if condition="!customerPartyId">
+                    <service-call name="mantle.party.PartyServices.create#Person" out-map="createPartyOut"
+                            in-map="[firstName:firstName, lastName:lastName, roleTypeId:'Customer']"/>
+                    <set field="customerPartyId" from="createPartyOut.partyId"/>
+                </if>
+
+                <set field="filedByPartyId" from="customerPartyId"/>
+            </if>
+            <if condition="!emailContactMechId">
+                <if condition="emailAddress"><then>
+                    <!-- find a matching one, if none create -->
+                    <set field="emailAddress" from="emailAddress.trim()"/>
+                    <entity-find entity-name="mantle.party.contact.PartyContactMechInfo" list="existingEmailList">
+                        <date-filter/><econdition field-name="partyId" from="customerPartyId"/>
+                        <econdition field-name="infoString" from="emailAddress"/>
+                    </entity-find>
+                    <if condition="existingEmailList"><then>
+                        <set field="emailContactMechId" from="existingEmailList[0].contactMechId"/>
+                    </then><else>
+                        <service-call name="mantle.party.ContactServices.create#EmailAddress" out-map="emailOut"
+                                in-map="[partyId:customerPartyId, emailAddress:emailAddress, contactMechPurposeId:'EmailPrimary']"/>
+                        <set field="emailContactMechId" from="emailOut.contactMechId"/>
+                    </else></if>
+                </then><else>
+                    <entity-find entity-name="mantle.party.contact.PartyContactMechInfo" list="existingEmailList">
+                        <date-filter/><econdition field-name="partyId" from="customerPartyId"/>
+                        <econdition field-name="contactMechTypeEnumId" value="CmtEmailAddress"/>
+                    </entity-find>
+                    <set field="emailContactMechId" from="existingEmailList ? existingEmailList[0].contactMechId : null"/>
+                </else></if>
+            </if>
+            <if condition="!emailContactMechId"><return error="true" message="Please enter your email address"/></if>
+
+            <service-call name="create#mantle.request.Request" out-map="context" in-map="context"/>
+            <service-call name="create#mantle.request.RequestParty"
+                    in-map="[requestId:requestId, partyId:filedByPartyId, roleTypeId:'Reporter', fromDate:ec.user.nowTimestamp]"/>
+            <service-call name="create#mantle.request.RequestParty"
+                    in-map="[requestId:requestId, partyId:customerPartyId, roleTypeId:'Customer', fromDate:ec.user.nowTimestamp]"/>
+            <message>Thank you, we have received your request. Your request number is ${requestId}</message>
         </actions>
     </service>
 
