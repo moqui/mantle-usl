@@ -322,6 +322,8 @@ h2. General Order Placement and eCommerce Usage
                 }
                 BigDecimal partTotalUnpaid = (orderPart.partTotal ?: 0.0) - (paymentsTotal ?: 0.0)
 
+                if (!orderPart.vendorPartyId) placeWarnings.add("Part ${orderPart.orderPartSeqId} has no vendor")
+                if (!orderPart.customerPartyId) placeWarnings.add("Part ${orderPart.orderPartSeqId} has no customer")
                 if (paymentsTotal < (BigDecimal) orderPart.partTotal)
                     placeWarnings.add("Part ${orderPart.orderPartSeqId} payments total (${ec.l10n.formatCurrency(paymentsTotal ?: 0.0, (String) orderHeader?.currencyUomId)}) is less than order part total (${ec.l10n.formatCurrency(orderPart.partTotal ?: 0.0, (String) orderHeader?.currencyUomId)})")
                 if (!isCustomerInternalOrg && !orderPart.postalContactMechId)
@@ -570,7 +572,7 @@ h2. General Order Placement and eCommerce Usage
             <!-- calculate the price based on quantity, etc, -->
             <if condition="!unitAmount &amp;&amp; productId"><then>
                 <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
-                <entity-find-related-one value-field="orderItem" relationship-name="mantle.order.OrderPart" to-value-field="orderPart"/>
+                <set field="orderPart" from="orderItem.part"/>
 
                 <service-call name="mantle.product.PriceServices.get#ProductPrice" out-map="priceMap"
                               in-map="[productId:productId, quantity:quantity, priceUomId:orderHeader.currencyUomId,
@@ -1427,6 +1429,17 @@ h2. General Order Placement and eCommerce Usage
             <set field="orderPart.partTotal" from="totalSum"/>
             <entity-update value-field="orderPart"/>
 
+            <!-- if there is one Payment associated with the OrderPart with statusId in PmntProposed,PmntPromised update it -->
+            <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                <econdition field-name="statusId" operator="in" value="PmntProposed,PmntPromised"/>
+                <select-field field-name="paymentId"/>
+            </entity-find>
+            <if condition="paymentList.size() == 1">
+                <service-call name="update#mantle.account.payment.Payment"
+                        in-map="[paymentId:paymentList.get(0).paymentId, amount:totalSum]"/>
+            </if>
+
             <!-- now update the OrderHeader.grandTotal -->
             <service-call name="mantle.order.OrderServices.update#OrderHeaderTotal" in-map="[orderId:orderId, orderHeader:orderHeader]"/>
         </actions>
@@ -1528,7 +1541,7 @@ h2. General Order Placement and eCommerce Usage
                 <set field="customerPartyId" from="orderPartList[0].customerPartyId"/>
 
                 <!-- get customer email address -->
-                <if condition="!toAddresses">
+                <if condition="!toAddresses &amp;&amp; customerPartyId">
                     <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="emailInfo"
                             in-map="[partyId:customerPartyId, emailContactMechPurposeId:'EmailOrder', defaultToPrimaryPurpose:true]"/>
                     <set field="toAddresses" from="emailInfo.emailAddress"/>
@@ -1537,6 +1550,7 @@ h2. General Order Placement and eCommerce Usage
                         <econdition field-name="partyId" from="customerPartyId"/></entity-find>
                     <if condition="userAccountList"><set field="toUserId" from="userAccountList[0].userId"/></if>
                 </if>
+                <if condition="!toAddresses"><return message="Not sending email for order ${orderId}, no to address specified or found for customer ${customerPartyId}"/></if>
 
                 <!-- send email for each configured -->
                 <iterate list="storeEmailList" entry="storeEmail">
