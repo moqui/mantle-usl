@@ -514,28 +514,56 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find entity-name="mantle.humanres.employment.PayrollAdjustment" list="allPayrollAdjustmentList">
                 <date-filter valid-date="payTimestamp"/>
+                <econdition field-name="partyRelationshipId" or-null="true"/>
                 <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId" or-null="true"/>
             </entity-find>
 
-            <!-- calculate global and employee adjustments (deductions, etc) - taxable -->
-            <set field="partyRelCondition" from="ec.entity.conditionFactory.makeCondition(
-                [[partyRelationshipId:null], [partyRelationshipId:partyRelationshipId]], 'or', '=', null)"/>
-            <set field="taxableCondition" from="ec.entity.conditionFactory.makeCondition(
-                [partyRelCondition, [isTaxable:'Y', isSocialTaxable:'Y', isMedicalTaxable:'Y']], 'and', '=', 'or')"/>
-            <script>dedPayrollAdjustmentList = allPayrollAdjustmentList.cloneList().filterByCondition(taxableCondition, true)</script>
+            <!-- calculate adjustments and run other calculations by phase -->
+            <!--
+            <moqui.basic.Enumeration sequenceNum="1" description="Incentive Bonus" enumId="PrphBonus" enumTypeId="PayrollPhase"/>
+            <moqui.basic.Enumeration sequenceNum="2" description="Overtime" enumId="PrphOvertime" enumTypeId="PayrollPhase"/>
+            <moqui.basic.Enumeration sequenceNum="3" description="Break Adjust (piece, etc)" enumId="PrphBreak" enumTypeId="PayrollPhase"/>
+            <moqui.basic.Enumeration sequenceNum="4" description="Taxable and Deductible" enumId="PrphTaxable" enumTypeId="PayrollPhase"/>
+            <moqui.basic.Enumeration sequenceNum="5" description="Taxes, WC, etc" enumId="PrphTax" enumTypeId="PayrollPhase"/>
+            <moqui.basic.Enumeration sequenceNum="6" description="Garnish" enumId="PrphGarnish" enumTypeId="PayrollPhase"/>
+            -->
 
+            <set field="calcAdjParameters" from="[partyRelationshipId:partyRelationshipId, employment:employment,
+                    timePeriod:timePeriod, timeEntryList:timeEntryList, timePeriodTypeId:timePeriod.timePeriodTypeId,
+                    payTimestamp:payTimestamp, payAmount:payAmount, homePostalAddress:homePostalAddress]"/>
+
+            <!-- Phase 1: Incentive Bonus Adjustments -->
+            <set field="bonusAdjList" from="allPayrollAdjustmentList.findAll({ 'PrphBonus'.equals(it.payrollPhaseEnumId) })"/>
+            <iterate list="bonusAdjList" entry="payrollAdjustment">
+                <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut" out-map-add-to-existing="false"
+                        in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
+                            taxablePayAmount:taxablePayAmount, socialTaxablePayAmount:socialTaxablePayAmount,
+                            medicalTaxablePayAmount:medicalTaxablePayAmount, taxableYtdIncome:taxableYtdIncome,
+                            socialTaxableYtdIncome:socialTaxableYtdIncome, medicalTaxableYtdIncome:medicalTaxableYtdIncome] + calcAdjParameters"/>
+                <if condition="!calcOut.adjustmentApplies"><continue/></if>
+                <script>adjustmentList.add(calcOut)</script>
+
+                <!-- update taxablePayAmount, socialTaxablePayAmount, medicalTaxablePayAmount -->
+                <if condition="payrollAdjustment.isTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                    <set field="taxablePayAmount" from="taxablePayAmount + calcOut.amount"/></if>
+                <if condition="payrollAdjustment.isSocialTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                    <set field="socialTaxablePayAmount" from="socialTaxablePayAmount + calcOut.amount"/></if>
+                <if condition="payrollAdjustment.isMedicalTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                    <set field="medicalTaxablePayAmount" from="medicalTaxablePayAmount + calcOut.amount"/></if>
+            </iterate>
+
+            <!-- TODO other phases, setup service calls per phase and call -->
+            
+
+            <!-- calculate global and employee adjustments (deductions, etc) - taxable -->
+            <set field="dedPayrollAdjustmentList" from="allPayrollAdjustmentList.findAll({
+                    it.isTaxable == 'Y' || it.isSocialTaxable == 'Y' || it.isMedicalTaxable == 'Y' })"/>
             <iterate list="dedPayrollAdjustmentList" entry="payrollAdjustment">
-                <set field="calcOut" from="null"/>
-                <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut"
-                    in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
-                        partyRelationshipId:partyRelationshipId, employment:employment,
-                        timePeriod:timePeriod, timeEntryList:timeEntryList,
-                        timePeriodTypeId:timePeriod.timePeriodTypeId, payTimestamp:payTimestamp,
-                        payAmount:payAmount, taxablePayAmount:taxablePayAmount,
-                        socialTaxablePayAmount:socialTaxablePayAmount, medicalTaxablePayAmount:medicalTaxablePayAmount,
-                        taxableYtdIncome:taxableYtdIncome, socialTaxableYtdIncome:socialTaxableYtdIncome,
-                        medicalTaxableYtdIncome:medicalTaxableYtdIncome,
-                        homePostalAddress:homePostalAddress]"/>
+                <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut" out-map-add-to-existing="false"
+                        in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
+                            taxablePayAmount:taxablePayAmount, socialTaxablePayAmount:socialTaxablePayAmount,
+                            medicalTaxablePayAmount:medicalTaxablePayAmount, taxableYtdIncome:taxableYtdIncome,
+                            socialTaxableYtdIncome:socialTaxableYtdIncome, medicalTaxableYtdIncome:medicalTaxableYtdIncome] + calcAdjParameters"/>
                 <if condition="!calcOut.adjustmentApplies"><continue/></if>
                 <script>adjustmentList.add(calcOut)</script>
 
@@ -554,21 +582,15 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="medicalTaxableYtdIncome" from="medicalTaxableYtdIncome + medicalTaxablePayAmount"/>
 
             <!-- calculate global and employee adjustments (deductions, etc) - not taxable -->
-            <script>otherPayrollAdjustmentList = allPayrollAdjustmentList.cloneList().filterByCondition(partyRelCondition, true)
+            <script>otherPayrollAdjustmentList = allPayrollAdjustmentList.cloneList()
                     .removeByAnd([isTaxable:'Y']).removeByAnd([isSocialTaxable:'Y']).removeByAnd([isMedicalTaxable:'Y'])</script>
 
             <iterate list="otherPayrollAdjustmentList" entry="payrollAdjustment">
-                <set field="calcOut" from="null"/>
-                <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut"
-                    in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
-                        partyRelationshipId:partyRelationshipId, employment:employment,
-                        timePeriod:timePeriod, timeEntryList:timeEntryList,
-                        timePeriodTypeId:timePeriod.timePeriodTypeId, payTimestamp:payTimestamp,
-                        payAmount:payAmount, taxablePayAmount:taxablePayAmount,
-                        socialTaxablePayAmount:socialTaxablePayAmount, medicalTaxablePayAmount:medicalTaxablePayAmount,
-                        taxableYtdIncome:taxableYtdIncome, socialTaxableYtdIncome:socialTaxableYtdIncome,
-                        medicalTaxableYtdIncome:medicalTaxableYtdIncome,
-                        homePostalAddress:homePostalAddress]"/>
+                <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut" out-map-add-to-existing="false"
+                        in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
+                            taxablePayAmount:taxablePayAmount, socialTaxablePayAmount:socialTaxablePayAmount,
+                            medicalTaxablePayAmount:medicalTaxablePayAmount, taxableYtdIncome:taxableYtdIncome,
+                            socialTaxableYtdIncome:socialTaxableYtdIncome, medicalTaxableYtdIncome:medicalTaxableYtdIncome] + calcAdjParameters"/>
                 <if condition="!calcOut.adjustmentApplies"><continue/></if>
                 <script>adjustmentList.add(calcOut)</script>
             </iterate>
@@ -605,24 +627,21 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
                 <!-- calculate max amount from garnishMinWage (if applicable) or garnishDisposableRatio -->
                 <set field="deductionAmount" from="-adjustment.amount"/><!-- negate it so the code is easier to read -->
-                <if condition="adjustment.payrollAdjustment.garnishMinWageApplies == 'Y' &amp;&amp; garnishMinWage">
-                    <then>
-                        <if condition="disposableRemaining &lt;= garnishMinWage.rangeLow">
-                            <then><!-- do nothing, leave deductionAmount as-is --></then>
-                            <else-if condition="disposableRemaining &gt; garnishMinWage.rangeLow &amp;&amp; disposableRemaining &lt; garnishMinWage.rangeHigh">
-                                <set field="deductionAmount" from="disposableRemaining - garnishMinWage.rangeLow"/>
-                            </else-if>
-                            <else>
-                                <set field="maxDedAmount" from="disposablePayAmount * garnishDisposableRatio"/>
-                                <set field="deductionAmount" from="deductionAmount &gt; maxDedAmount ? maxDedAmount : deductionAmount"/>
-                            </else>
-                        </if>
-                    </then>
-                    <else>
-                        <set field="maxDedAmount" from="disposablePayAmount * garnishDisposableRatio"/>
-                        <set field="deductionAmount" from="deductionAmount &gt; maxDedAmount ? maxDedAmount : deductionAmount"/>
-                    </else>
-                </if>
+                <if condition="adjustment.payrollAdjustment.garnishMinWageApplies == 'Y' &amp;&amp; garnishMinWage"><then>
+                    <if condition="disposableRemaining &lt;= garnishMinWage.rangeLow">
+                        <then><!-- do nothing, leave deductionAmount as-is --></then>
+                        <else-if condition="disposableRemaining &gt; garnishMinWage.rangeLow &amp;&amp; disposableRemaining &lt; garnishMinWage.rangeHigh">
+                            <set field="deductionAmount" from="disposableRemaining - garnishMinWage.rangeLow"/>
+                        </else-if>
+                        <else>
+                            <set field="maxDedAmount" from="disposablePayAmount * garnishDisposableRatio"/>
+                            <set field="deductionAmount" from="deductionAmount &gt; maxDedAmount ? maxDedAmount : deductionAmount"/>
+                        </else>
+                    </if>
+                </then><else>
+                    <set field="maxDedAmount" from="disposablePayAmount * garnishDisposableRatio"/>
+                    <set field="deductionAmount" from="deductionAmount &gt; maxDedAmount ? maxDedAmount : deductionAmount"/>
+                </else></if>
 
                 <!-- ROUND_HALF_DOWN here so the deduction amount is never more than the percentage limit -->
                 <set field="deductionAmount" from="deductionAmount.setScale(2, BigDecimal.ROUND_HALF_DOWN)"/>
