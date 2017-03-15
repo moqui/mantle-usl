@@ -293,7 +293,7 @@ h2. General Order Placement and eCommerce Usage
                 boolean newerInventory = false
                 if (hasShippableItems && orderPart.customerPartyId) {
                     EntityList custSettingList = ec.entity.find("mantle.party.PartySetting").condition('partyId', orderPart.customerPartyId)
-                            .condition('partySettingTypeId', 'CustomerSetting').useCache(true).list()
+                            .condition('partySettingTypeId', 'CustomerSetting').list()
                     singleLot = custSettingList.find({ 'CsstSingleLot'.equals(it.settingValue) }) != null
                     newerInventory = custSettingList.find({ 'CsstNewerInventory'.equals(it.settingValue) }) != null
                 }
@@ -1029,6 +1029,20 @@ h2. General Order Placement and eCommerce Usage
             <if condition="totalAuthorized &lt; orderHeader.grandTotal">
                 <script>approveWarnings.add(ec.resource.expand('Total authorized or later payment total ${ec.l10n.formatCurrency(totalAuthorized, orderHeader.currencyUomId)} is less than order total ${ec.l10n.formatCurrency(orderHeader.grandTotal, orderHeader.currencyUomId)}', null))</script></if>
 
+            <!-- don't go beyond here if there is no customer or vendor -->
+            <set field="noCustomerOrVendor" from="false"/>
+            <iterate list="orderPartList" entry="orderPart">
+                <if condition="!orderPart.vendorPartyId">
+                    <script>approveWarnings.add(ec.resource.expand('Part ${orderPart.orderPartSeqId} has no vendor', null))</script>
+                    <set field="noCustomerOrVendor" from="true"/>
+                </if>
+                <if condition="!orderPart.customerPartyId">
+                    <script>approveWarnings.add(ec.resource.expand('Part ${orderPart.orderPartSeqId} has no customer', null))</script>
+                    <set field="noCustomerOrVendor" from="true"/>
+                </if>
+            </iterate>
+            <if condition="noCustomerOrVendor"><return/></if>
+
             <if condition="isVendorInternalOrg"><then>
                 <!-- ========== Sales Order Validations ========== -->
 
@@ -1063,12 +1077,97 @@ h2. General Order Placement and eCommerce Usage
                     <if condition="orderItemList.size() &lt; 3"><continue/></if>
                     <set field="quantityMax" from="stdDevMaxFromMapField(orderItemList, 'quantity', 3.0)?.maximum"/>
                     <if condition="quantityMax &amp;&amp; orderItem.quantity &gt; quantityMax"><script>approveWarnings.add(ec.resource.expand(
-                            'Item ${orderItem.orderItemSeqId} product ${productId} quantity ${ec.l10n.format(orderItem.quantity, "#,##0.##")} is greater than ${ec.l10n.format(quantityMax, "#,##0.##")}, the average of previously ordered quantities plus 3 standard deviations', null))</script></if>
+                            'Item ${orderItem.orderItemSeqId} product ${productId} quantity ${ec.l10n.format(orderItem.quantity, "0.##")} is greater than ${ec.l10n.format(quantityMax, "#,##0.##")}, the average of previously ordered quantities plus 3 standard deviations', null))</script></if>
                 </iterate>
 
-                <!-- TODO is inventory available? -->
-                <!-- TODO if customer has single lot constraint is inventory available from single lot for each item? -->
-                <!-- TODO is this a large order by percentage of available inventory? more than quantity 10 and 20% of available -->
+                <!-- get AssetReservation records for various validations -->
+                <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetResList">
+                    <econdition field-name="orderId"/><order-by field-name="orderItemSeqId"/></entity-find>
+
+                <!-- see if we need to check for single lot or newer inventory -->
+                <entity-find entity-name="mantle.party.PartySetting" list="custSettingList">
+                    <econdition field-name="partyId" from="customerPartyId"/><econdition field-name="partySettingTypeId" value="CustomerSetting"/></entity-find>
+                <set field="singleLot" from="custSettingList.find({ 'CsstSingleLot'.equals(it.settingValue) }) != null"/>
+                <set field="newerInventory" from="custSettingList.find({ 'CsstNewerInventory'.equals(it.settingValue) }) != null"/>
+
+                <set field="lotIdSetByItemSeqId" from="[:]"/>
+                <set field="oldestLotExpireByItemSeqId" from="[:]"/>
+                <iterate list="assetResList" entry="assetRes">
+                    <set field="orderItemSeqId" from="assetRes.orderItemSeqId"/>
+                    <!-- is inventory available? get from AssetReservation.quantityNotAvailable -->
+                    <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetResList">
+                        <econdition field-name="orderId"/><econdition field-name="quantityNotAvailable" operator="greater" from="0.0"/></entity-find>
+                    <if condition="assetRes.quantityNotAvailable &gt; 0.0"><script>approveWarnings.add(ec.resource.expand(
+                        'Item ${orderItemSeqId} asset ${assetRes.assetId} has ${ec.l10n.format(assetRes.quantityNotAvailable, "0.##")} of ${ec.l10n.format(assetRes.quantity, "0.##")} not available', null))</script></if>
+
+                    <!-- get data for single lot and newer inventory -->
+                    <if condition="singleLot || newerInventory">
+                        <entity-find-one entity-name="mantle.product.asset.AssetLotAndMfgParty" value-field="assetLot">
+                            <field-map field-name="assetId" from="assetRes.assetId"/>
+                            <select-field field-name="lotId,pseudoId,lotNumber,manufacturedDate,expirationDate"/>
+                        </entity-find-one>
+                        <script><![CDATA[
+                            if (singleLot && assetLot?.lotId) addToSetInMap(orderItemSeqId, assetLot.lotId, lotIdSetByItemSeqId)
+                            def oldestLotExpire = oldestLotExpireByItemSeqId.get(orderItemSeqId)
+                            if (newerInventory && assetLot?.expirationDate != null && (oldestLotExpire == null || assetLot.expirationDate < oldestLotExpire))
+                                oldestLotExpireByItemSeqId.put(orderItemSeqId, assetLot.expirationDate)
+                        ]]></script>
+                    </if>
+
+                </iterate>
+
+                <!-- if customer has single lot constraint is inventory available from single lot for each item? -->
+                <if condition="singleLot">
+                    <iterate list="lotIdSetByItemSeqId" entry="lotIdSet" key="orderItemSeqId">
+                        <if condition="lotIdSet != null &amp;&amp; lotIdSet.size() &gt; 1"><script>approveWarnings.add(ec.resource.expand(
+                            'Item ${orderItemSeqId} has inventory in more than one lot: ${lotIdSet}', null))</script></if>
+                    </iterate>
+                </if>
+                <if condition="newerInventory">
+                    <iterate list="orderItemList" entry="orderItem">
+                        <set field="oldestLotExpire" from="oldestLotExpireByItemSeqId.get(orderItem.orderItemSeqId)"/>
+                        <if condition="oldestLotExpire == null"><continue/></if>
+
+                        <set field="newerThanExpireDate" from="null"/>
+                        <!-- get most recent asset issued and lot expire date for it -->
+                        <entity-find entity-name="mantle.product.issuance.AssetIssuanceLotSummary" list="issuanceLotList" limit="1">
+                            <econdition field-name="toPartyId" from="customerPartyId"/>
+                            <econdition field-name="productId" from="orderItem.productId"/>
+                            <select-field field-name="expirationDate,expectedEndOfLife"/>
+                            <order-by field-name="-issuedDate"/>
+                        </entity-find>
+                        <if condition="issuanceLotList">
+                            <set field="newerThanExpireDate" from="issuanceLotList[0].expirationDate ?: issuanceLotList[0].expectedEndOfLife"/></if>
+                        <if condition="newerThanExpireDate == null"><continue/></if>
+                        <if condition="oldestLotExpire &lt; newerThanExpireDate"><script>approveWarnings.add(ec.resource.expand(
+                            'In item ${orderItem.orderItemSeqId} oldest lot ${ec.l10n.format(oldestLotExpire, "yyyy-MM-dd")} older than last lot expire ${ec.l10n.format(newerThanExpireDate, "yyyy-MM-dd")}', null))</script></if>
+                    </iterate>
+                </if>
+
+                <!-- is this a large order by percentage of available inventory? more than quantity 10 and 20% of available -->
+                <iterate list="orderItemList" entry="orderItem">
+                    <set field="productId" from="orderItem.productId"/>
+                    <if condition="!productId"><continue/></if>
+                    <set field="quantity" from="orderItem.quantity"/>
+                    <!-- TODO: make the 10 configurable? -->
+                    <if condition="quantity &lt; 10"><continue/></if>
+                    <set field="curOrderPart" from="orderPartList.find({ it.orderPartSeqId == orderItem.orderPartSeqId })"/>
+                    <set field="curFacilityId" from="curOrderPart?.facilityId"/>
+                    <if condition="!curFacilityId"><continue/></if>
+                    <!-- get current available inventory for product in facility; will not include this order as already reserved -->
+                    <entity-find entity-name="mantle.product.asset.AssetSummaryView" list="atpList">
+                        <econdition field-name="productId"/><econdition field-name="facilityId" from="curFacilityId"/>
+                        <select-field field-name="availableToPromiseTotal"/>
+                    </entity-find>
+                    <if condition="!atpList"><continue/></if>
+                    <set field="availableToPromiseTotal" from="atpList[0].availableToPromiseTotal"/>
+                    <if condition="!availableToPromiseTotal"><continue/></if><!-- if null or zero ATP -->
+                    <!-- TODO: make the 20% configurable? -->
+                    <set field="percentOfAvailable" from="20.0"/>
+                    <set field="curLimit" from="(quantity + availableToPromiseTotal) * (percentOfAvailable/100.0)"/>
+                    <if condition="quantity &gt; curLimit"><script>approveWarnings.add(ec.resource.expand(
+                        'Item ${orderItem.orderItemSeqId} has ${ec.l10n.format(quantity, "0.##")} which is greater than ${percentOfAvailable}% of available inventory (${ec.l10n.format(curLimit, "0.##")})', null))</script></if>
+                </iterate>
 
                 <!-- TODO duplicate/similar order with 24 hours (+/- 12hrs); any other order with any of the products on this order -->
 
