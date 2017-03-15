@@ -227,6 +227,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="workEffortId" required="true"/>
             <parameter name="partyId"><description>For convenience (for multi forms with some rows blank) not set as
                 required, but if not passed no TimeEntry will be created.</description></parameter>
+            <parameter name="moveToTeam"><description>If Y and a teamPartyId is specified add partyId Party to the team and
+                remove from all other teams</description></parameter>
         </in-parameters>
         <out-parameters><parameter name="workEffortId"/></out-parameters>
         <actions>
@@ -255,6 +257,22 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <service-call name="mantle.work.TimeServices.store#TimeEntry" in-map="context" out-map="context"/>
+
+            <if condition="teamPartyId &amp;&amp; moveToTeam == 'Y'">
+                <set field="effectiveThruDate" from="workEffort.actualStartDate ?: ec.user.nowTimestamp"/>
+                <!-- remove from any existing teams -->
+                <entity-find entity-name="mantle.party.PartyRelationship" list="existingRelList">
+                    <date-filter valid-date="effectiveThruDate"/><econdition field-name="relationshipTypeEnumId" value="PrtMember"/>
+                    <econdition field-name="fromPartyId" from="partyId"/><econdition field-name="toRoleTypeId" value="OrgTeam"/>
+                </entity-find>
+                <iterate list="existingRelList" entry="existingRel">
+                    <set field="existingRel.thruDate" from="effectiveThruDate"/>
+                    <entity-update value-field="existingRel"/>
+                </iterate>
+                <!-- add to current team -->
+                <service-call name="create#mantle.party.PartyRelationship" in-map="[fromPartyId:partyId, fromRoleTypeId:'Worker',
+                        relationshipTypeEnumId:'PrtMember', toPartyId:teamPartyId, toRoleTypeId:'OrgTeam', fromDate:effectiveThruDate]"/>
+            </if>
         </actions>
     </service>
 
@@ -290,28 +308,52 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="facility" from="workEffort.facility"/>
             </if>
 
+            <set field="teamMemberInfoList" from="[]"/>
+
+            <!-- get all TimeEntry records for this team and WorkEffort; this will include temporary team members with a TimeEntry but no PartyRelationship to the team -->
+            <set field="memberIds" from="new HashSet()"/>
+            <if condition="workEffort != null">
+                <entity-find entity-name="mantle.work.time.TimeEntry" list="teamTimeEntryList">
+                    <econdition field-name="teamPartyId" from="partyId"/>
+                    <econdition field-name="workEffortId"/>
+                </entity-find>
+                <iterate list="teamTimeEntryList" entry="timeEntry">
+                    <script>memberIds.add(timeEntry.partyId)</script>
+                    <entity-find-one entity-name="mantle.party.PartyDetail" value-field="memberDetail">
+                        <field-map field-name="partyId" from="timeEntry.partyId"/></entity-find-one>
+                    <set field="teamMemberInfo" from="memberDetail.getMap()"/>
+                    <set field="teamMemberInfo.fromPartyId" from="timeEntry.partyId"/><!-- so fits with direct team members -->
+                    <set field="teamMemberInfo.timeEntry" from="timeEntry"/>
+                    <set field="teamMemberInfo.teWorkTypeEnum" from="timeEntry.workType"/>
+
+                    <entity-find-count entity-name="mantle.party.PartyRelationship" count-field="memberRelCount">
+                        <date-filter valid-date="workEffort?.actualStartDate"/>
+                        <econdition field-name="fromPartyId" from="timeEntry.partyId"/>
+                        <econdition field-name="toPartyId" from="partyId"/>
+                        <econdition field-name="toRoleTypeId" value="OrgTeam"/>
+                        <econdition field-name="relationshipTypeEnumId" value="PrtMember"/>
+                    </entity-find-count>
+                    <set field="teamMemberInfo.teamMember" from="memberRelCount ? 'Y' : 'N'"/>
+                    <script>teamMemberInfoList.add(teamMemberInfo)</script>
+                </iterate>
+            </if>
+
+            <!-- now get team members excluding those with time entries -->
             <entity-find entity-name="mantle.party.PartyFromAndRelationship" list="teamMemberList">
                 <date-filter valid-date="workEffort?.actualStartDate"/>
+                <econdition field-name="fromPartyId" operator="not-in" from="memberIds" ignore-if-empty="true"/>
                 <econdition field-name="toPartyId" from="partyId"/>
                 <econdition field-name="toRoleTypeId" value="OrgTeam"/>
                 <econdition field-name="relationshipTypeEnumId" value="PrtMember"/>
-                <order-by field-name="firstName,lastName,organizationName"/>
             </entity-find>
-            <set field="teamMemberInfoList" from="[]"/>
             <iterate list="teamMemberList" entry="teamMember">
                 <set field="teamMemberInfo" from="teamMember.getMap()"/>
+                <set field="teamMemberInfo.teamMember" value="Y"/>
                 <script>teamMemberInfoList.add(teamMemberInfo)</script>
-                <if condition="workEffort != null">
-                    <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList">
-                        <econdition field-name="partyId" from="teamMember.fromPartyId"/>
-                        <econdition field-name="workEffortId"/>
-                    </entity-find>
-                    <if condition="timeEntryList">
-                        <set field="teamMemberInfo.timeEntry" from="timeEntryList[0]"/>
-                        <set field="teamMemberInfo.teWorkTypeEnum" from="teamMemberInfo.timeEntry.workType"/>
-                    </if>
-                </if>
             </iterate>
+
+            <order-map-list list="teamMemberInfoList"><order-by field-name="firstName"/><order-by field-name="lastName"/>
+                <order-by field-name="organizationName"/></order-map-list>
         </actions>
     </service>
 
