@@ -87,6 +87,8 @@ class OrderToCashTime extends Specification {
             ec.user.logoutUser()
 
             ec.user.loginUser("john.doe", "moqui")
+            // explicitly approve order as john.doe (has pre-approve warnings for unavailable inventory so must be done explicitly)
+            ec.service.sync().name("mantle.order.OrderServices.approve#Order").parameters([orderId:cartOrderId]).call()
             ec.service.sync().name("mantle.shipment.ShipmentServices.ship#OrderPart")
                     .parameters([orderId:cartOrderId, orderPartSeqId:orderPartSeqId]).call()
             ec.user.logoutUser()

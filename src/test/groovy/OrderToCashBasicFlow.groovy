@@ -129,6 +129,11 @@ class OrderToCashBasicFlow extends Specification {
 
         ec.user.logoutUser()
 
+        // explicitly approve order as john.doe (has pre-approve warnings for unavailable inventory so must be done explicitly)
+        ec.user.loginUser("john.doe", "moqui")
+        ec.service.sync().name("mantle.order.OrderServices.approve#Order").parameters([orderId:cartOrderId]).call()
+        ec.user.logoutUser()
+
         // NOTE: this has sequenced IDs so is sensitive to run order!
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.order.OrderHeader orderId="${cartOrderId}" entryDate="${effectiveTime}" placedDate="${effectiveTime}"
