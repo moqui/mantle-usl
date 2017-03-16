@@ -445,6 +445,7 @@ class ReturnToResponseBasicFlow extends Specification {
         // ========== ship/etc order as admin
 
         ec.user.loginUser("john.doe", "moqui")
+        ec.service.sync().name("mantle.order.OrderServices.approve#Order").parameters([orderId:orderId]).call()
         ec.service.sync().name("mantle.shipment.ShipmentServices.ship#OrderPart")
                 .parameters([orderId:orderId, orderPartSeqId:orderPartSeqId]).call()
 
