@@ -332,9 +332,9 @@ class AccountingActivities extends Specification {
                         invoiceItemSeqId="08" debitCreditFlag="D" acctgTransEntrySeqId="08"/>
                 <mantle.ledger.transaction.AcctgTransEntry amount="34" glAccountId="611240000" reconcileStatusId="AterNot"
                         invoiceItemSeqId="09" debitCreditFlag="D" acctgTransEntrySeqId="09"/>
-                <mantle.ledger.transaction.AcctgTransEntry amount="321.12" glAccountId="791000000" reconcileStatusId="AterNot"
+                <mantle.ledger.transaction.AcctgTransEntry amount="321.12" glAccountId="791100000" reconcileStatusId="AterNot"
                         invoiceItemSeqId="10" debitCreditFlag="D" acctgTransEntrySeqId="10"/>
-                <mantle.ledger.transaction.AcctgTransEntry amount="444.55" glAccountId="792000000" reconcileStatusId="AterNot"
+                <mantle.ledger.transaction.AcctgTransEntry amount="444.55" glAccountId="791300000" reconcileStatusId="AterNot"
                         invoiceItemSeqId="11" debitCreditFlag="D" acctgTransEntrySeqId="11"/>
                 <mantle.ledger.transaction.AcctgTransEntry amount="1824.25" glAccountId="210000000" reconcileStatusId="AterNot"
                         glAccountTypeEnumId="GatAccountsPayable" debitCreditFlag="C" acctgTransEntrySeqId="12"/>

@@ -44,16 +44,48 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <service verb="get" noun="ProductPrice" authenticate="anonymous-view">
-        <description>Use the ProductPrice entity to determine the price to charge or pay for a Product.</description>
+    <service verb="get" noun="ProductPriceByType">
         <in-parameters>
             <parameter name="productId" required="true"/>
-            <parameter name="quantity" type="BigDecimal" default="1"/>
+            <parameter name="priceTypeEnumId" required="true"/>
+            <parameter name="quantity" type="BigDecimal" default="1.0"/>
+            <parameter name="validDate" type="Timestamp" default="ec.user.nowTimestamp"/>
             <parameter name="priceUomId" default-value="USD"/>
             <parameter name="pricePurposeEnumId" default-value="PppPurchase"/>
-
             <parameter name="productStoreId"/><parameter name="vendorPartyId"/><parameter name="customerPartyId"/>
-
+        </in-parameters>
+        <out-parameters>
+            <parameter name="price" type="BigDecimal"/>
+            <parameter name="productPriceId"/>
+            <parameter name="priceUomId"/>
+        </out-parameters>
+        <actions>
+            <entity-find entity-name="mantle.product.ProductPrice" list="currentPriceListAll" cache="true">
+                <date-filter valid-date="validDate"/><econdition field-name="priceTypeEnumId"/>
+                <econdition field-name="productId"/><econdition field-name="priceUomId"/>
+                <econdition field-name="pricePurposeEnumId" or-null="true"/>
+                <!-- get most recent price records first, get highest qualifying (<=quantity) minQuantity records first -->
+                <order-by field-name="-fromDate,-minQuantity"/>
+            </entity-find>
+            <if condition="currentPriceListAll.size() == 0"><return/></if>
+            <!-- filter by minQuantity after to maximize cache hits, simplify clearing -->
+            <set field="currentPriceList" from="currentPriceListAll.findAll({ Map it -&gt; ((BigDecimal) it.minQuantity) &lt;= ((BigDecimal) quantity) })"/>
+            <!-- use the maximal match, priority customer, vendor, then store (each if applicable/specified) -->
+            <set field="productPrice" from="findMaximalMatch(currentPriceList,
+                    [customerPartyId:customerPartyId, vendorPartyId:vendorPartyId, productStoreId:productStoreId])"/>
+            <set field="productPriceId" from="productPrice?.productPriceId"/>
+            <set field="price" from="productPrice?.price"/>
+        </actions>
+    </service>
+    <service verb="get" noun="ProductPrice" authenticate="anonymous-view">
+        <description>Use ProductPrice records plus modifier services to determine the price to charge or pay for a Product.</description>
+        <in-parameters>
+            <parameter name="productId" required="true"/>
+            <parameter name="quantity" type="BigDecimal" default="1.0"/>
+            <parameter name="validDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="priceUomId" default-value="USD"/>
+            <parameter name="pricePurposeEnumId" default-value="PppPurchase"/>
+            <parameter name="productStoreId"/><parameter name="vendorPartyId"/><parameter name="customerPartyId"/>
             <!-- TODO: to support look for records with this first and then with null: <parameter name="agreementId"/> -->
             <!-- TODO: to support look for records with this first and then with null: <parameter name="agreementItemSeqId"/> -->
         </in-parameters>
@@ -63,40 +95,15 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="listPrice" type="BigDecimal"/>
             <parameter name="listProductPriceId"/>
             <parameter name="priceUomId"/>
-            <parameter name="productPriceId"/>
         </out-parameters>
         <actions>
-            <!-- get PptCurrent price -->
-            <entity-find entity-name="mantle.product.ProductPrice" list="currentPriceListAll" cache="true">
-                <date-filter/><econdition field-name="priceTypeEnumId" value="PptCurrent"/>
-                <econdition field-name="productId"/><econdition field-name="priceUomId"/>
-                <econdition field-name="pricePurposeEnumId" or-null="true"/>
-                <!-- get most recent price records first, get highest qualifying (<=quantity) minQuantity records first -->
-                <order-by field-name="-fromDate,-minQuantity"/>
-            </entity-find>
-            <!-- filter by minQuantity after to maximize cache hits, simplify clearing -->
-            <set field="currentPriceList" from="currentPriceListAll.findAll({ Map it -&gt; ((BigDecimal) it.minQuantity) &lt;= ((BigDecimal) quantity) })"/>
-            <!-- use the maximal match, priority customer, vendor, then store (each if applicable/specified) -->
-            <set field="productPrice" from="findMaximalMatch(currentPriceList,
-                    [customerPartyId:customerPartyId, vendorPartyId:vendorPartyId, productStoreId:productStoreId])"/>
-            <set field="productPriceId" from="productPrice?.productPriceId"/>
-            <set field="price" from="productPrice?.price"/>
+            <service-call name="mantle.product.PriceServices.get#ProductPriceByType" out-map="currentOut" in-map="context + [priceTypeEnumId:'PptCurrent']"/>
+            <set field="productPriceId" from="currentOut.productPriceId"/>
+            <set field="price" from="currentOut.price"/>
 
-            <!-- get PptList price -->
-            <entity-find entity-name="mantle.product.ProductPrice" list="listPriceListAll" cache="true">
-                <date-filter/><econdition field-name="priceTypeEnumId" value="PptList"/>
-                <econdition field-name="productId"/><econdition field-name="priceUomId"/>
-                <econdition field-name="pricePurposeEnumId" or-null="true"/>
-                <!-- get most recent price records first, get highest qualifying (<=quantity) minQuantity records first -->
-                <order-by field-name="-fromDate,-minQuantity"/>
-            </entity-find>
-            <!-- filter by minQuantity after to maximize cache hits, simplify clearing -->
-            <set field="listPriceList" from="listPriceListAll.findAll({ Map it -&gt; ((BigDecimal) it.minQuantity) &lt;= ((BigDecimal) quantity) })"/>
-            <!-- use the maximal match, priority customer, vendor, then store (each if applicable/specified) -->
-            <set field="listProductPrice" from="findMaximalMatch(listPriceList,
-                    [customerPartyId:customerPartyId, vendorPartyId:vendorPartyId, productStoreId:productStoreId])"/>
-            <set field="listProductPriceId" from="listProductPrice?.productPriceId"/>
-            <set field="listPrice" from="listProductPrice?.price"/>
+            <service-call name="mantle.product.PriceServices.get#ProductPriceByType" out-map="listOut" in-map="context + [priceTypeEnumId:'PptList']"/>
+            <set field="listProductPriceId" from="listOut.productPriceId"/>
+            <set field="listPrice" from="listOut.price"/>
 
             <if condition="!price"><set field="price" from="listPrice ?: BigDecimal.ZERO"/></if>
 

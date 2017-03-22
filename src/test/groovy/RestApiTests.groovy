@@ -122,6 +122,7 @@ class RestApiTests extends Specification {
                 shippingPostalContactMechId:'CustJqpAddr', shippingTelecomContactMechId:'CustJqpTeln',
                 carrierPartyId:'_NA_', shipmentMethodEnumId:'ShMthGround', moquiSessionToken:token] | ['paymentId', '55800']
         "post" | "s1/mantle/orders/55800/place" | [moquiSessionToken:token] | ['"statusChanged": true']
+        "post" | "s1/mantle/orders/55800/approve" | [moquiSessionToken:token] | ['"statusChanged": true']
         "get" | "s1/mantle/payments/55800" | null | ['CustJqpCc', 'PiCreditCard', 'PmntAuthorized', 'ORG_ZIZI_RETAIL']
         "get" | "s1/mantle/orders/55800/items/01/reservations" | null |
                 ['"assetReservationId": "55800"', '"orderId": "55800"', '"productId": "DEMO_1_1"']
