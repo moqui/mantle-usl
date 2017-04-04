@@ -24,15 +24,69 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="orderPartSeqId" required="true"/>
             <parameter name="shippingGatewayConfigId" required="true"/>
             <parameter name="createOrderItem" type="Boolean" default="true"/>
-            <parameter name="shipmentMethodEnumId"><description>Overrides the OrderPart.shipmentMethodEnumId if specified.</description></parameter>
-            <parameter name="carrierPartyId"><description>Overrides the OrderPart.carrierPartyId if specified.</description></parameter>
-            <parameter name="postalContactMechId"><description>Overrides the OrderPart.postalContactMechId if specified.</description></parameter>
+            <parameter name="carrierPartyId"><description>Overrides OrderPart.carrierPartyId if specified</description></parameter>
+            <parameter name="shipmentMethodEnumId"><description>Overrides OrderPart.shipmentMethodEnumId if specified</description></parameter>
+            <parameter name="postalContactMechId"><description>Overrides OrderPart.postalContactMechId if specified</description></parameter>
+            <parameter name="packageInfoList" type="List"><description>Response from a get#OrderPackageInfo interface call</description></parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="shippingTotal" required="true"/>
-            <parameter name="orderItemSeqId"/>
+            <parameter name="orderItemSeqId"><description>Return if an OrderItem record was created</description></parameter>
+            <parameter name="postalContactMechId"><description>Return if address was validated and replaced</description></parameter>
         </out-parameters>
     </service>
+    <service verb="get" noun="ShippingRatesBulk" type="interface">
+        <in-parameters>
+            <parameter name="shippingGatewayConfigId" required="true"/>
+            <parameter name="carrierShipmentMethodList" type="List" required="true"><parameter name="carrierMethodMap" type="Map">
+                <parameter name="carrierPartyId" required="true"/>
+                <parameter name="shipmentMethodEnumId" required="true"/>
+            </parameter></parameter>
+            <parameter name="fromPartyId" required="true"/>
+            <parameter name="toPartyId" required="true"/>
+            <parameter name="originFacilityId"/>
+            <parameter name="originPostalContactMechId" required="true"/>
+            <parameter name="destPostalContactMechId" required="true"/>
+            <parameter name="packageInfoList" type="List"><description>Response from a get#OrderPackageInfo interface call</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="shippingRateInfoList" type="List">
+                <description>Depending on implementation not all fields may be populated</description>
+                <parameter name="rateInfo" type="Map">
+                    <parameter name="carrierPartyId" required="true"/>
+                    <parameter name="shipmentMethodEnumId" required="true"/>
+                    <parameter name="shippingTotal" required="true"/>
+                    <parameter name="currency"/>
+                    <parameter name="days" type="Integer"/>
+                    <parameter name="durationTerms"/>
+                    <parameter name="serviceName"/>
+                    <parameter name="carrierImageUrl"/>
+                </parameter>
+            </parameter>
+            <parameter name="originPostalContactMechId"><description>Return if address was validated and replaced</description></parameter>
+            <parameter name="destPostalContactMechId"><description>Return if address was validated and replaced</description></parameter>
+        </out-parameters>
+    </service>
+    <service verb="get" noun="AutoPackageInfo" type="interface">
+        <in-parameters>
+            <parameter name="itemInfoList" type="List">
+                <description>This may be a EntityList of OrderItem records but does not have to be</description>
+                <parameter name="itemInfo" type="Map">
+                    <parameter name="productId"/>
+                    <parameter name="quantity"/><parameter name="selectedAmount"/>
+                </parameter>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="packageInfoList" type="List"><parameter name="packageInfo" type="Map">
+                <parameter name="shipmentBoxTypeId"/>
+                <parameter name="weight" type="BigDecimal"/>
+                <parameter name="weightUomId" default-value="WT_lb"/>
+                <parameter name="quantityByProductId" type="Map"/>
+            </parameter></parameter>
+        </out-parameters>
+    </service>
+
     <service verb="get" noun="ShippingRate" type="interface">
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
@@ -65,6 +119,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shippingGatewayConfigId" required="true"/>
         </in-parameters>
     </service>
+
     <service verb="validate" noun="ShippingPostalAddress" type="interface">
         <description>Implementation should validate the PostalAddress and set ContactMech.trustLevelEnumId and validateMessage
             and if an exact match may call update#PartyPostalAddress or the similar Facility service to store the cleansed address
@@ -112,8 +167,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="validateAddressServiceName" from="shippingGatewayConfig.validateAddressServiceName"/>
             <if condition="!validateAddressServiceName"><log level="error" message="No ShippingGatewayConfig with ID ${shippingGatewayConfigId} has no validateAddressServiceName, not validating address"/><return/></if>
 
-            <service-call name="${validateAddressServiceName}" out-map="context"
-                    in-map="[contactMechId:contactMechId, partyId:partyId, facilityId:facilityId, shippingGatewayConfigId:shippingGatewayConfigId]"/>
+            <service-call name="${validateAddressServiceName}" out-map="context" in-map="context"/>
 
             <if condition="contactMechId != origContactMechId">
                 <if condition="orderId">
@@ -165,8 +219,8 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="calculate" noun="OrderPartShipping">
-        <description>If there are any shipping charge items (type ItemShipping) in the part deletes them. Calls the
-            service specified in ShippingGatewayConfig.getOrderRateServiceName for the OrderPart.</description>
+        <description>If there are any shipping charge items (type ItemShipping) in the part deletes them if createOrderItem=true (default).
+            Calls the service specified in ShippingGatewayConfig.getOrderRateServiceName for the OrderPart.</description>
         <in-parameters>
             <parameter name="orderId" required="true"/>
             <parameter name="orderPartSeqId" required="true"/>
@@ -188,17 +242,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="carrierPartyId" from="carrierPartyId ?: orderPart.carrierPartyId"/>
 
                 <if condition="!carrierPartyId"><return/></if>
-                <if condition="!orderHeader.productStoreId">
+                <set field="productStoreId" from="orderHeader.productStoreId"/>
+                <if condition="!productStoreId">
                     <!-- this shouldn't generally happen as not called when there is no store, but if it does return quietly -->
                     <return/>
                     <!-- <return error="true" message="Could not get order shipping rate, order is not associated with a store and no gateway config ID specified."/> -->
                 </if>
 
-                <entity-find-one entity-name="mantle.product.store.ProductStoreShippingGateway"
-                        value-field="productStoreShippingGateway">
-                    <field-map field-name="productStoreId" from="orderHeader.productStoreId"/>
-                    <field-map field-name="carrierPartyId"/>
-                </entity-find-one>
+                <entity-find-one entity-name="mantle.product.store.ProductStoreShippingGateway" value-field="productStoreShippingGateway">
+                    <field-map field-name="productStoreId"/><field-map field-name="carrierPartyId"/></entity-find-one>
                 <set field="shippingGatewayConfigId" from="productStoreShippingGateway?.shippingGatewayConfigId"/>
             </if>
             <entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig" cache="true"/>
@@ -209,7 +261,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <set field="getOrderRateServiceName" from="shippingGatewayConfig.getOrderRateServiceName"/>
             <if condition="!getOrderRateServiceName"><return error="true"
-                    message="Could not get order shipping rate, no order rate service on gateway configuration [${shippingGatewayConfig.shippingGatewayConfigId}]."/></if>
+                    message="Could not get order shipping rate, no order rate service on gateway ${shippingGatewayConfig.shippingGatewayConfigId}"/></if>
 
             <!-- if order part has shipping (ItemShipping) items clear them out first -->
             <if condition="createOrderItem"><entity-delete-by-condition entity-name="mantle.order.OrderItem">
@@ -217,22 +269,136 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="itemTypeEnumId" value="ItemShipping"/>
             </entity-delete-by-condition></if>
 
+            <!-- get auto package info if service available -->
+            <set field="getAutoPackageInfoName" from="shippingGatewayConfig.getAutoPackageInfoName"/>
+            <if condition="getAutoPackageInfoName">
+                <entity-find entity-name="mantle.order.OrderItem" list="itemInfoList">
+                    <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/></entity-find>
+                <service-call name="${getAutoPackageInfoName}" out-map="context" in-map="context"/>
+                <!-- returns packageInfoList, passed to order rate service below -->
+            </if>
+
             <!-- call gateway (could be local) service to calculate shipping charges -->
             <service-call name="${getOrderRateServiceName}" in-map="context" out-map="context"/>
         </actions>
     </service>
+    <service verb="get" noun="OrderShippingRatesBulk">
+        <description>
+            Calls the service specified in ShippingGatewayConfig.getOrderRateServiceName if set for each configured gateway (by carrier) or
+            ShippingGatewayConfig.getOrderRateServiceName for each carrier/method individually (with createOrderItem=false).</description>
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId" required="true"/>
+            <parameter name="postalContactMechId"><description>Overrides the OrderPart.postalContactMechId if specified.</description></parameter>
+            <parameter name="carrierShipmentMethodList" type="List">
+                <description>If not specified and OrderHeader.productStoreId is populated all ProductStoreShipOption values will be used</description>
+                <parameter name="carrierMethodMap" type="Map">
+                    <parameter name="carrierPartyId" required="true"/>
+                    <parameter name="shipmentMethodEnumId" required="true"/>
+                </parameter>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="shippingRateInfoList" type="List">
+                <description>See get#ShippingRatesBulk service interface for details</description>
+                <parameter name="rateInfo" type="Map"/>
+            </parameter>
+            <parameter name="postalContactMechId"><description>Returned if address was validated and replaced</description></parameter>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+            <set field="productStoreId" from="orderHeader.productStoreId"/>
+            <if condition="!productStoreId"><return/></if>
+
+            <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
+
+            <!-- if no options requested get all on store -->
+            <if condition="!carrierShipmentMethodList">
+                <entity-find entity-name="mantle.product.store.ProductStoreShipOption" list="carrierShipmentMethodList" cache="true">
+                    <econdition field-name="productStoreId"/><order-by field-name="sequenceNum"/></entity-find>
+            </if>
+
+            <!-- find all gateways configured and carriers for each -->
+            <set field="carrierIdSet" from="new HashSet(carrierShipmentMethodList*.carrierPartyId)"/>
+            <entity-find entity-name="mantle.product.store.ProductStoreShippingGateway" list="storeGatewayList">
+                <econdition field-name="productStoreId"/><econdition field-name="carrierPartyId" operator="in" from="carrierIdSet"/></entity-find>
+            <set field="carriersByGateway" from="[:]"/>
+            <iterate list="storeGatewayList" entry="storeGateway">
+                <script>addToSetInMap(storeGateway.shippingGatewayConfigId, storeGateway.carrierPartyId, carriersByGateway)</script></iterate>
+
+            <!-- get the rates -->
+            <set field="shippingRateInfoList" from="[]"/>
+            <iterate list="carriersByGateway" entry="carrierPartyIdSet" key="shippingGatewayConfigId">
+                <entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig" cache="true">
+                    <field-map field-name="shippingGatewayConfigId"/></entity-find-one>
+                <if condition="shippingGatewayConfig == null"><continue/></if>
+
+                <set field="curCarrierMethodList" from="carrierShipmentMethodList.findAll({ it.carrierPartyId in carrierPartyIdSet })"/>
+
+                <!-- get auto package info if service available -->
+                <set field="getAutoPackageInfoName" from="shippingGatewayConfig.getAutoPackageInfoName"/>
+                <if condition="getAutoPackageInfoName">
+                    <entity-find entity-name="mantle.order.OrderItem" list="itemInfoList">
+                        <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/></entity-find>
+                    <service-call name="${getAutoPackageInfoName}" out-map="context" in-map="context"/>
+                    <!-- returns packageInfoList, passed to order rate service below -->
+                </if>
+
+                <!-- run the bulk or individual rate services -->
+                <if condition="shippingGatewayConfig.getShippingRatesBulkName"><then>
+                    <set field="fromPartyId" from="orderPart.vendorPartyId"/>
+                    <if condition="!fromPartyId"><continue/></if>
+                    <set field="toPartyId" from="orderPart.customerPartyId"/>
+                    <if condition="!toPartyId"><continue/></if>
+
+                    <set field="originFacilityId" from="orderPart.facilityId"/>
+                    <if condition="!originFacilityId"><continue/></if>
+                    <service-call name="mantle.facility.ContactServices.get#FacilityDefaultShipOrigin" out-map="facOriginOut"
+                            in-map="[facilityId:originFacilityId]"/>
+                    <if condition="!facOriginOut.postalContactMechId"><continue/></if>
+
+                    <set field="destPostalContactMechId" from="postalContactMechId ?: orderPart.postalContactMechId"/>
+                    <if condition="!destPostalContactMechId"><continue/></if>
+
+                    <service-call name="${shippingGatewayConfig.getShippingRatesBulkName}" out-map="bulkOut"
+                            in-map="[shippingGatewayConfigId:shippingGatewayConfigId, carrierShipmentMethodList:curCarrierMethodList,
+                                    fromPartyId:fromPartyId, toPartyId:toPartyId, originFacilityId:originFacilityId,
+                                    originPostalContactMechId:facOriginOut.postalContactMechId,
+                                    destPostalContactMechId:destPostalContactMechId, packageInfoList:packageInfoList]"/>
+                    <script>if (bulkOut.shippingRateInfoList) shippingRateInfoList.addAll(bulkOut.shippingRateInfoList)</script>
+                    <if condition="!postalContactMechId &amp;&amp; bulkOut.destPostalContactMechId &amp;&amp; bulkOut.destPostalContactMechId != orderPart.postalContactMechId">
+                        <set field="orderPart.postalContactMechId" from="bulkOut.destPostalContactMechId"/>
+                        <entity-update value-field="orderPart"/>
+                    </if>
+                    <set field="postalContactMechId" from="bulkOut.destPostalContactMechId"/>
+                </then><else-if condition="shippingGatewayConfig.getOrderRateServiceName">
+                    <iterate list="curCarrierMethodList" entry="curCarrierMethod">
+                        <service-call name="${shippingGatewayConfig.getOrderRateServiceName}" out-map="singleOut"
+                                in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, shippingGatewayConfigId:shippingGatewayConfigId,
+                                    createOrderItem:false, carrierPartyId:curCarrierMethod.carrierPartyId,
+                                    shipmentMethodEnumId:curCarrierMethod.shipmentMethodEnumId,
+                                    postalContactMechId:postalContactMechId, packageInfoList:packageInfoList]"/>
+                        <script>shippingRateInfoList.add(singleOut + [carrierPartyId:curCarrierMethod.carrierPartyId,
+                                shipmentMethodEnumId:curCarrierMethod.shipmentMethodEnumId])</script>
+                    </iterate>
+                </else-if></if>
+            </iterate>
+        </actions>
+    </service>
 
     <service verb="get" noun="ShipmentRates">
+        <description>Get a rate quote for each package in a shipment</description>
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
             <parameter name="shipmentRouteSegmentSeqId"><description>Defaults to the first route segment</description></parameter>
         </in-parameters>
         <actions>
-            <!-- TODO -->
+            <!-- TODO (FUTURE) -->
         </actions>
     </service>
 
     <service verb="request" noun="ShipmentLabels">
+        <description>Request labels (shipping transaction) for the specified package or all packages in a shipment, for a route segment in the shipment</description>
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
             <parameter name="shipmentPackageSeqId"/>
