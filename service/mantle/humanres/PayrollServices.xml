@@ -236,6 +236,7 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="invoiceList" entry="invoice">
                 <!-- if paymentInstrumentEnumId is PiAch look for employee's BankAccount -->
                 <set field="toPaymentMethodId" from="null"/>
+                <set field="toUseInstrumentEnumId" from="paymentInstrumentEnumId"/>
                 <if condition="paymentInstrumentEnumId == 'PiAch'">
                     <entity-find entity-name="mantle.account.method.PaymentMethod" list="toPaymentMethodList">
                         <date-filter/>
@@ -246,6 +247,8 @@ along with this software (see the LICENSE.md file). If not, see
                     </entity-find>
                     <if condition="toPaymentMethodList">
                         <set field="toPaymentMethodId" from="toPaymentMethodList[0].paymentMethodId"/></if>
+                    <!-- if there is no bank account, fall back to a PiCompanyCheck instrument -->
+                    <if condition="!toPaymentMethodId"><set field="toUseInstrumentEnumId" value="PiCompanyCheck"/></if>
                 </if>
                 <!-- get the Employment.distGroupEnumId if set, using invoice.partyRelationshipId -->
                 <set field="distGroupEnumId" from="null"/>
@@ -255,9 +258,10 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="invEmployment?.distGroupEnumId">
                         <set field="distGroupEnumId" from="invEmployment.distGroupEnumId"/></if>
                 </if>
-
+                <!-- make the payment -->
                 <service-call name="mantle.account.PaymentServices.create#InvoicePayment" out-map="paymentOut"
-                    in-map="context + [invoiceId:invoice.invoiceId, partyRelationshipId:invoice.partyRelationshipId]"/>
+                    in-map="context + [invoiceId:invoice.invoiceId, partyRelationshipId:invoice.partyRelationshipId,
+                        paymentInstrumentEnumId:toUseInstrumentEnumId]"/>
             </iterate>
         </actions>
     </service>
@@ -389,56 +393,55 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; fromTimestamp">
                 <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is no longer employed"/></if>
 
-            <if condition="salaryFlag == 'Y'">
-                <then>
-                    <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
-                    <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
-                        <date-filter valid-date="thruTimestamp"/>
-                        <econdition field-name="partyRelationshipId"/>
-                        <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
-                        <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
-                    </entity-find>
+            <if condition="salaryFlag == 'Y'"><then>
+                <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
+                <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
+                    <date-filter valid-date="thruTimestamp"/>
+                    <econdition field-name="partyRelationshipId"/>
+                    <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+                    <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
+                </entity-find>
 
-                    <if condition="!employmentSalaryList">
-                        <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
-                    <set field="employmentSalary" from="employmentSalaryList[0]"/>
+                <if condition="!employmentSalaryList">
+                    <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
+                <set field="employmentSalary" from="employmentSalaryList[0]"/>
 
-                    <set field="payAmount" from="employmentSalary.amount"/>
-                    <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
+                <set field="payAmount" from="employmentSalary.amount"/>
+                <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
 
-                    <!-- handle partial period for salary (first and last, ie by from and thru) -->
-                    <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; fromTimestamp">
-                        <set field="partialFrom" from="employment.fromDate"/></if>
-                    <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; thruTimestamp">
-                        <set field="partialThru" from="employment.thruDate"/></if>
-                    <if condition="partialFrom || partialThru">
-                        <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
-                            <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
-                        <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time)"/>
-                            <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
-                        <!-- TODO: this is messy, consider working days, etc? -->
-                        <!-- for now do a simple ratio of milliseconds -->
-                        <set field="partialTime" from="partialThru.time - partialFrom.time"/>
-                        <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
-                        <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
-                    </if>
-                </then>
-                <else>
-                    <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
-                        <econdition field-name="partyId" from="employment.fromPartyId"/>
-                        <econdition field-name="clientPartyId" from="employment.toPartyId"/>
-                        <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp"/>
-                        <econdition field-name="thruDate" operator="less-equals" from="thruTimestamp"/>
-                    </entity-find>
-                    <iterate list="timeEntryList" entry="timeEntry">
-                        <!-- NOTE: this service gets the higher of hourly and piece amounts -->
-                        <service-call name="mantle.work.TimeServices.get#TimeEntryAmount" out-map="getTeaOut"
-                                in-map="[timeEntryId:timeEntry.timeEntryId, timeEntry:timeEntry, ratePurposeEnumId:ratePurposeEnumId]"/>
-                        <set field="payAmount" from="payAmount + getTeaOut.amountTotal"/>
-                        <set field="currencyUomId" from="getTeaOut.currencyUomId"/>
-                    </iterate>
-                </else>
-            </if>
+                <!-- handle partial period for salary (first and last, ie by from and thru) -->
+                <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; fromTimestamp">
+                    <set field="partialFrom" from="employment.fromDate"/></if>
+                <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; thruTimestamp">
+                    <set field="partialThru" from="employment.thruDate"/></if>
+                <if condition="partialFrom || partialThru">
+                    <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
+                        <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
+                    <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time)"/>
+                        <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
+                    <!-- TODO: this is messy, consider working days, etc? -->
+                    <!-- for now do a simple ratio of milliseconds -->
+                    <set field="partialTime" from="partialThru.time - partialFrom.time"/>
+                    <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
+                    <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                </if>
+            </then><else>
+                <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
+                    <econdition field-name="partyId" from="employment.fromPartyId"/>
+                    <econdition field-name="clientPartyId" from="employment.toPartyId"/>
+                    <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp"/>
+                    <econdition field-name="thruDate" operator="less-equals" from="thruTimestamp"/>
+                </entity-find>
+                <iterate list="timeEntryList" entry="timeEntry">
+                    <!-- NOTE: this service gets the higher of hourly and piece amounts -->
+                    <service-call name="mantle.work.TimeServices.get#TimeEntryAmount" out-map="getTeaOut"
+                            in-map="[timeEntryId:timeEntry.timeEntryId, timeEntry:timeEntry, ratePurposeEnumId:ratePurposeEnumId]"/>
+                    <set field="payAmount" from="payAmount + getTeaOut.amountTotal"/>
+                    <set field="currencyUomId" from="getTeaOut.currencyUomId"/>
+                </iterate>
+                <!-- round total to 2 decimal places -->
+                <set field="payAmount" from="payAmount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+            </else></if>
         </actions>
     </service>
 
