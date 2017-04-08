@@ -16,59 +16,78 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="get" noun="StoreShippingOptions" authenticate="anonymous-all">
         <in-parameters>
-            <parameter name="productStoreId" required="true"/>
+            <parameter name="productStoreId"><description>If not specified returns list all ShipmentMethod type Enumeration values with _NA_ carrier</description></parameter>
             <parameter name="orderId"/><parameter name="orderPartSeqId"/>
             <parameter name="postalContactMechId"><description>Overrides the OrderPart.postalContactMechId if specified.</description></parameter>
+            <parameter name="getRates" type="Boolean" default="false"/>
         </in-parameters>
         <out-parameters>
-            <parameter name="shippingOptions" type="List"><parameter name="option" type="Map"/></parameter>
+            <parameter name="shippingOptions" type="List"><parameter name="option" type="Map">
+                <parameter name="carrierPartyId"/><parameter name="carrierName"/>
+                <parameter name="shipmentMethodEnumId"/><parameter name="shipmentMethodDescription"/>
+                <parameter name="shippingTotal" type="BigDecimal"/>
+            </parameter></parameter>
             <parameter name="postalContactMechId"><description>Return if address was validated and replaced</description></parameter>
         </out-parameters>
         <actions>
             <set field="shippingOptions" from="[]"/>
-            <entity-find entity-name="mantle.product.store.ProductStoreShipOption" list="shipOptionList" cache="true">
-                <econdition field-name="productStoreId"/><order-by field-name="sequenceNum"/></entity-find>
-
-            <if condition="!shipOptionList">
+            <if condition="productStoreId">
                 <set field="shipOptionList" from="[]"/>
-                <entity-find entity-name="mantle.product.store.ProductStoreShippingGateway" list="pssgList" cache="true">
-                    <econdition field-name="productStoreId"/></entity-find>
-                <iterate list="pssgList" entry="pssg">
-                    <entity-find entity-name="mantle.shipment.carrier.CarrierShipmentMethod" list="csmList" cache="true">
-                        <econdition field-name="carrierPartyId" from="pssg.carrierPartyId"/>
-                        <order-by field-name="sequenceNum"/></entity-find>
-                    <script>shipOptionList.addAll(csmList)</script>
+                <!-- main source of store options -->
+                <entity-find entity-name="mantle.product.store.ProductStoreShipOption" list="shipOptionList" cache="true">
+                    <econdition field-name="productStoreId"/><order-by field-name="sequenceNum"/></entity-find>
+                <!-- default to all CarrierShipmentMethod records for each carrier in a gateway associated with the store -->
+                <if condition="!shipOptionList">
+                    <set field="shipOptionList" from="[]"/>
+                    <entity-find entity-name="mantle.product.store.ProductStoreShippingGateway" list="pssgList" cache="true">
+                        <econdition field-name="productStoreId"/></entity-find>
+                    <iterate list="pssgList" entry="pssg">
+                        <entity-find entity-name="mantle.shipment.carrier.CarrierShipmentMethod" list="csmList" cache="true">
+                            <econdition field-name="carrierPartyId" from="pssg.carrierPartyId"/>
+                            <order-by field-name="sequenceNum"/></entity-find>
+                        <script>shipOptionList.addAll(csmList)</script>
+                    </iterate>
+                </if>
+                <!-- get rates -->
+                <if condition="getRates &amp;&amp; shipOptionList &amp;&amp; orderId &amp;&amp; orderPartSeqId">
+                    <service-call name="mantle.shipment.CarrierServices.get#OrderShippingRatesBulk" out-map="ratesBulkOut"
+                            in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, postalContactMechId:postalContactMechId,
+                            carrierShipmentMethodList:shipOptionList]"/>
+                    <set field="postalContactMechId" from="ratesBulkOut.postalContactMechId"/>
+
+                    <!-- make sure there is a return value for each in carrierShipmentMethodList -->
+                    <set field="newShipOptionList" from="[]"/>
+                    <set field="shippingRateInfoList" from="ratesBulkOut.shippingRateInfoList"/>
+                    <if condition="shippingRateInfoList">
+                        <iterate list="shipOptionList" entry="shipOption">
+                            <set field="shippingRateInfo" from="shippingRateInfoList.find({ it.carrierPartyId == shipOption.carrierPartyId &amp;&amp; it.shipmentMethodEnumId == shipOption.shipmentMethodEnumId })"/>
+                            <if condition="shippingRateInfo != null"><then><script>newShipOptionList.add(shippingRateInfo)</script></then>
+                                <else><script>newShipOptionList.add(shipOption)</script></else></if>
+                        </iterate>
+                        <set field="shipOptionList" from="newShipOptionList"/>
+                    </if>
+                </if>
+                <!-- make output list -->
+                <iterate list="shipOptionList" entry="shipOption">
+                    <entity-find-one entity-name="mantle.party.PartyDetail" value-field="carrierDetail" cache="true">
+                        <field-map field-name="partyId" from="shipOption.carrierPartyId"/></entity-find-one>
+                    <entity-find-one entity-name="moqui.basic.Enumeration" value-field="shipmentMethodEnum">
+                        <field-map field-name="enumId" from="shipOption.shipmentMethodEnumId"/></entity-find-one>
+                    <set field="shippingOption" from="new HashMap(shipOption)"/>
+                    <set field="shippingOption.carrierName" from="ec.resource.expand('PartyNameTemplate','',carrierDetail)"/>
+                    <set field="shippingOption.shipmentMethodDescription" from="shipmentMethodEnum.description"/>
+                    <script>shippingOptions.add(shippingOption)</script>
                 </iterate>
             </if>
-
-            <if condition="shipOptionList &amp;&amp; orderId &amp;&amp; orderPartSeqId">
-                <service-call name="mantle.shipment.CarrierServices.get#OrderShippingRatesBulk" out-map="ratesBulkOut"
-                        in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, postalContactMechId:postalContactMechId,
-                            carrierShipmentMethodList:shipOptionList]"/>
-                <set field="postalContactMechId" from="ratesBulkOut.postalContactMechId"/>
-
-                <!-- make sure there is a return value for each in carrierShipmentMethodList -->
-                <set field="newShipOptionList" from="[]"/>
-                <set field="shippingRateInfoList" from="ratesBulkOut.shippingRateInfoList"/>
-                <if condition="shippingRateInfoList">
-                    <iterate list="shipOptionList" entry="shipOption">
-                        <set field="shippingRateInfo" from="shippingRateInfoList.find({ it.carrierPartyId == shipOption.carrierPartyId &amp;&amp; it.shipmentMethodEnumId == shipOption.shipmentMethodEnumId })"/>
-                        <if condition="shippingRateInfo != null"><then><script>newShipOptionList.add(shippingRateInfo)</script></then>
-                            <else><script>newShipOptionList.add(shipOption)</script></else></if>
-                    </iterate>
-                    <set field="shipOptionList" from="newShipOptionList"/>
-                </if>
+            <!-- default to all CarrierShipmentMethod records for each carrier in a gateway associated with the store -->
+            <if condition="!shippingOptions">
+                <entity-find entity-name="moqui.basic.Enumeration" list="methodEnumList">
+                    <econdition field-name="enumTypeId" value="ShipmentMethod"/><order-by field-name="sequenceNum,description"/></entity-find>
+                <iterate list="methodEnumList" entry="methodEnum">
+                    <script>shippingOptions.add([carrierPartyId:'_NA_', carrierName:'',
+                            shipmentMethodEnumId:methodEnum.enumId, shipmentMethodDescription:methodEnum.description])</script>
+                </iterate>
             </if>
-            <iterate list="shipOptionList" entry="shipOption">
-                <entity-find-one entity-name="mantle.party.PartyDetail" value-field="carrierDetail" cache="true">
-                    <field-map field-name="partyId" from="shipOption.carrierPartyId"/></entity-find-one>
-                <entity-find-one entity-name="moqui.basic.Enumeration" value-field="shipmentMethodEnum">
-                    <field-map field-name="enumId" from="shipOption.shipmentMethodEnumId"/></entity-find-one>
-                <set field="shippingOption" from="new HashMap(shipOption)"/>
-                <set field="shippingOption.carrierName" from="ec.resource.expand('PartyNameTemplate','',carrierDetail)"/>
-                <set field="shippingOption.shipmentMethodDescription" from="shipmentMethodEnum.description"/>
-                <script>shippingOptions.add(shippingOption)</script>
-            </iterate>
 
             <!-- old approach using one calc/estimate call per option:
             <iterate list="shipOptionList" entry="shipOption">
