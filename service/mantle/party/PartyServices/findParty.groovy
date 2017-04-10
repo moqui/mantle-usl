@@ -24,7 +24,7 @@ ExecutionContext ec = context.ec
 
 // NOTE: doing a find with a static view-entity because the Entity Facade will only select the fields specified and the
 //     join in the associated member-entities
-EntityFind ef = ec.entity.find("mantle.party.FindPartyView")
+EntityFind ef = ec.entity.find("mantle.party.FindPartyView").distinct(true)
 // don't do distinct, SQL quandary with distinct, limited select, and order by with upper needing to be selected; seems to get good results in general without: .distinct(true)
 
 ef.selectField("partyId")
@@ -76,8 +76,8 @@ if (contactOwnerPartyId) {
 
 if (orderByField) {
     if (orderByField.contains("combinedName")) {
-        if (orderByField.contains("-")) ef.orderBy("-^organizationName,-^firstName,-^lastName")
-        else ef.orderBy("^organizationName,^firstName,^lastName")
+        if (orderByField.contains("-")) ef.orderBy("-organizationName,-firstName,-lastName")
+        else ef.orderBy("organizationName,firstName,lastName")
     } else {
         ef.orderBy(orderByField)
     }
