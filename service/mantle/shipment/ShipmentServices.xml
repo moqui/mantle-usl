@@ -180,6 +180,91 @@ along with this software (see the LICENSE.md file). If not, see
                         telecomContactMechPurposeId:'PhoneShippingDest', emailContactMechPurposeId:'EmailShippingDest']"/>
         </actions>
     </service>
+    <service verb="get" noun="ShipmentShippingOptions">
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="shipmentRouteSegmentSeqId"/>
+            <parameter name="getRates" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="shippingOptions" type="List"><parameter name="option" type="Map">
+                <parameter name="carrierPartyId"/><parameter name="carrierName"/>
+                <parameter name="shipmentMethodEnumId"/><parameter name="shipmentMethodDescription"/>
+                <parameter name="shippingTotal" type="BigDecimal"/>
+            </parameter></parameter>
+            <parameter name="postalContactMechId"><description>Return if address was validated and replaced</description></parameter>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipmentRouteSegmentSeqId"><then>
+                <entity-find-one entity-name="mantle.shipment.ShipmentRouteSegment" value-field="routeSegment"/>
+            </then><else>
+                <entity-find entity-name="mantle.shipment.ShipmentRouteSegment" list="routeSegmentList">
+                    <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
+                <set field="routeSegment" from="routeSegmentList[0]"/>
+            </else></if>
+            <set field="shippingGatewayConfigId" from="routeSegment.shippingGatewayConfigId"/>
+            <if condition="!shippingGatewayConfigId">
+                <set field="shippingGatewayConfigId" from="ec.user.getPreference('DefaultShipmentGatewayConfigId')"/></if>
+
+            <!-- include all CarrierShipmentMethod records -->
+            <entity-find entity-name="mantle.shipment.carrier.CarrierShipmentMethod" list="shipOptionList" cache="true">
+                <order-by field-name="sequenceNum"/></entity-find>
+            <!-- get rates -->
+            <entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig" cache="true">
+                <field-map field-name="shippingGatewayConfigId"/></entity-find-one>
+            <if condition="getRates &amp;&amp; shipOptionList &amp;&amp; shippingGatewayConfig?.getShippingRatesBulkName">
+                <set field="packageInfoList" from="[]"/>
+                <entity-find entity-name="mantle.shipment.ShipmentPackage" list="packageList">
+                    <econdition field-name="shipmentId"/><order-by field-name="shipmentPackageSeqId"/></entity-find>
+                <iterate list="packageList" entry="pkg">
+                    <script>packageInfoList.add([shipmentBoxTypeId:pkg.shipmentBoxTypeId, weight:pkg.weight, weightUomId:pkg.weightUomId])</script></iterate>
+
+                <set field="originPostalContactMechId" from="routeSegment.originPostalContactMechId"/>
+                <if condition="!originPostalContactMechId &amp;&amp; routeSegment.originFacilityId">
+                    <service-call name="mantle.facility.ContactServices.get#FacilityDefaultShipOrigin" out-map="facOriginOut"
+                            in-map="[facilityId:routeSegment.originFacilityId]"/>
+                    <set field="originPostalContactMechId" from="facOriginOut.postalContactMechId"/>
+                </if>
+                <if condition="packageList &amp;&amp; originPostalContactMechId">
+                    <service-call name="${shippingGatewayConfig.getShippingRatesBulkName}" out-map="bulkOut"
+                            in-map="[shippingGatewayConfigId:shippingGatewayConfigId, carrierShipmentMethodList:shipOptionList,
+                            fromPartyId:shipment.fromPartyId, toPartyId:shipment.toPartyId, originFacilityId:routeSegment.originFacilityId,
+                            originPostalContactMechId:originPostalContactMechId,
+                            destPostalContactMechId:routeSegment.destPostalContactMechId, packageInfoList:packageInfoList]"/>
+                    <!-- if the dest address was validated/cleansed and new record created then update -->
+                    <if condition="bulkOut.destPostalContactMechId &amp;&amp; bulkOut.destPostalContactMechId != routeSegment.destPostalContactMechId">
+                        <set field="routeSegment.destPostalContactMechId" from="bulkOut.destPostalContactMechId"/>
+                        <entity-update value-field="routeSegment"/>
+                    </if>
+                    <!-- make sure there is a return value for each in carrierShipmentMethodList -->
+                    <set field="newShipOptionList" from="[]"/>
+                    <set field="shippingRateInfoList" from="bulkOut.shippingRateInfoList"/>
+                    <if condition="shippingRateInfoList">
+                        <iterate list="shipOptionList" entry="shipOption">
+                            <set field="shippingRateInfo" from="shippingRateInfoList.find({ it.carrierPartyId == shipOption.carrierPartyId &amp;&amp; it.shipmentMethodEnumId == shipOption.shipmentMethodEnumId })"/>
+                            <if condition="shippingRateInfo != null"><then><script>newShipOptionList.add(shippingRateInfo)</script></then>
+                                <else><script>newShipOptionList.add(shipOption)</script></else></if>
+                        </iterate>
+                        <set field="shipOptionList" from="newShipOptionList"/>
+                    </if>
+                </if>
+            </if>
+            <!-- make output list -->
+            <set field="shippingOptions" from="[]"/>
+            <iterate list="shipOptionList" entry="shipOption">
+                <entity-find-one entity-name="mantle.party.Party" value-field="carrierParty" cache="true">
+                    <field-map field-name="partyId" from="shipOption.carrierPartyId"/></entity-find-one>
+                <entity-find-one entity-name="moqui.basic.Enumeration" value-field="shipmentMethodEnum">
+                    <field-map field-name="enumId" from="shipOption.shipmentMethodEnumId"/></entity-find-one>
+                <set field="shippingOption" from="new HashMap(shipOption)"/>
+                <set field="shippingOption.carrierName" from="carrierParty.pseudoId"/>
+                <set field="shippingOption.shipmentMethodDescription" from="shipmentMethodEnum.description"/>
+                <script>shippingOptions.add(shippingOption)</script>
+            </iterate>
+            <order-map-list list="shippingOptions"><order-by field-name="carrierName"/></order-map-list>
+        </actions>
+    </service>
 
     <!-- ========================================================= -->
     <!-- ========== Shipment Create and Modify Services ========== -->
