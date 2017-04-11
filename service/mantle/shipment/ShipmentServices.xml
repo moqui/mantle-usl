@@ -520,6 +520,7 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="orderId" required="true"/>
             <parameter name="orderPartSeqId" required="true"/>
+            <parameter name="tryAutoPackage" type="Boolean" default="true"/>
         </in-parameters>
         <out-parameters>
             <parameter name="shipmentId"/>
@@ -527,7 +528,7 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <!-- create#OrderPartShipment has transaction=cache so make it not init the tx cache with transaction=use-or-begin -->
             <service-call name="mantle.shipment.ShipmentServices.create#OrderPartShipment" out-map="context"
-                    in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
+                    in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, tryAutoPackage:tryAutoPackage]"/>
 
             <!-- pack all items (creating ShipmentPackageContent and AssetIssuance records) -->
             <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
@@ -559,6 +560,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="createRouteSegment" type="Boolean" default="true"/>
             <parameter name="originFacilityId"/>
             <parameter name="destinationFacilityId"/>
+            <parameter name="tryAutoPackage" type="Boolean" default="true"/>
+            <parameter name="shippingGatewayConfigId" default="ec.user.getPreference('DefaultShipmentGatewayConfigId')"/>
         </in-parameters>
         <out-parameters>
             <parameter name="shipmentId"/>
@@ -595,17 +598,16 @@ along with this software (see the LICENSE.md file). If not, see
                         fromPartyId:orderPart.vendorPartyId, toPartyId:orderPart.customerPartyId,
                         systemMessageRemoteId:orderHeader.systemMessageRemoteId]"/>
 
-            <if condition="createPackage">
-                <service-call name="create#mantle.shipment.ShipmentPackage" in-map="context" out-map="context"/></if>
             <if condition="createRouteSegment">
                 <service-call name="create#mantle.shipment.ShipmentRouteSegment" out-map="context"
                         in-map="[shipmentId:shipmentId, carrierPartyId:orderPart.carrierPartyId,
-                            shipmentMethodEnumId:shipmentMethodEnumId,
-                            destPostalContactMechId:orderPart.postalContactMechId,
-                            destTelecomContactMechId:orderPart.telecomContactMechId,
-                            originFacilityId:originFacilityId, destinationFacilityId:destinationFacilityId,
-                            shipmentMethodEnumId:orderPart.shipmentMethodEnumId]"/>
+                            shipmentMethodEnumId:orderPart.shipmentMethodEnumId, shippingGatewayConfigId:shippingGatewayConfigId,
+                            destPostalContactMechId:orderPart.postalContactMechId, destTelecomContactMechId:orderPart.telecomContactMechId,
+                            originFacilityId:originFacilityId, destinationFacilityId:destinationFacilityId]"/>
             </if>
+
+            <if condition="createPackage">
+                <service-call name="create#mantle.shipment.ShipmentPackage" in-map="context" out-map="context"/></if>
             <if condition="shipmentPackageSeqId &amp;&amp; shipmentRouteSegmentSeqId">
                 <service-call name="create#mantle.shipment.ShipmentPackageRouteSeg"
                         in-map="[shipmentId:shipmentId, shipmentPackageSeqId:shipmentPackageSeqId,
@@ -614,6 +616,10 @@ along with this software (see the LICENSE.md file). If not, see
 
             <service-call name="mantle.shipment.ShipmentServices.add#OrderPartToShipment"
                     in-map="[shipmentId:shipmentId, orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
+
+            <if condition="shippingGatewayConfigId &amp;&amp; tryAutoPackage">
+                <service-call name="mantle.shipment.ShipmentServices.create#ShipmentAutoPackages"
+                    in-map="[shipmentId:shipmentId, shipmentRouteSegmentSeqId:shipmentRouteSegmentSeqId]"/></if>
         </actions>
     </service>
 
@@ -1242,6 +1248,61 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.order.OrderServices.checkComplete#OrderPart"
                         in-map="[orderId:orderItem.orderId, orderPartSeqId:orderItem.orderPartSeqId]"/>
             </if>
+        </actions>
+    </service>
+
+    <service verb="create" noun="ShipmentAutoPackages">
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="shipmentRouteSegmentSeqId"><description>Defaults to the first route segment</description></parameter>
+            <parameter name="resetExisting" type="Boolean" default="false"><description>If false (default) does nothing if there are
+                existing packages with content</description></parameter>
+        </in-parameters>
+        <actions>
+            <service-call name="mantle.shipment.CarrierServices.get#ShipmentGatewayDetails" in-map="context" out-map="context"/>
+            <set field="getAutoPackageInfoName" from="shippingGatewayConfig?.getAutoPackageInfoName"/>
+            <if condition="!getAutoPackageInfoName"><return/></if>
+
+            <entity-find entity-name="mantle.shipment.ShipmentItem" list="itemInfoList">
+                <econdition field-name="shipmentId"/></entity-find>
+            <service-call name="${getAutoPackageInfoName}" out-map="context" in-map="context"/>
+            <if condition="!packageInfoList"><return/></if>
+
+            <!-- unless resetExisting see if there are ShipmentPackageContent records -->
+            <if condition="!resetExisting">
+                <entity-find entity-name="mantle.shipment.ShipmentPackageContent" list="packageContentList">
+                    <econdition field-name="shipmentId"/></entity-find>
+                <if condition="packageContentList">
+                    <return message="Packages already have content (product quantities) assigned, not creating auto packages"/></if>
+            </if>
+
+            <!-- make sure no packages have labels, etc -->
+            <entity-find entity-name="mantle.shipment.ShipmentPackageRouteSeg" list="packageRouteSegList">
+                <econdition field-name="shipmentId"/><econdition field-name="shipmentRouteSegmentSeqId"/></entity-find>
+            <iterate list="packageRouteSegList" entry="packageRouteSeg">
+                <if condition="packageRouteSeg.trackingCode || packageRouteSeg.labelDate || packageRouteSeg.labelUrl">
+                    <return message="Package ${packageRouteSeg.shipmentPackageSeqId} already has a tracking code or label, not creating auto packages"/></if>
+            </iterate>
+            <!-- NOTE: no data changes before this point, after this point errors/etc need to be errors and cause rollback -->
+            <!-- clear out any existing packages -->
+            <iterate list="packageRouteSegList" entry="packageRouteSeg"><entity-delete value-field="packageRouteSeg"/></iterate>
+            <entity-delete-by-condition entity-name="mantle.shipment.ShipmentPackageContent"><econdition field-name="shipmentId"/></entity-delete-by-condition>
+            <entity-delete-by-condition entity-name="mantle.shipment.ShipmentPackage"><econdition field-name="shipmentId"/></entity-delete-by-condition>
+
+            <!-- create new packages -->
+            <iterate list="packageInfoList" entry="packageInfo">
+                <service-call name="create#mantle.shipment.ShipmentPackage" out-map="packageOut"
+                        in-map="[shipmentId:shipmentId, shipmentBoxTypeId:packageInfo.shipmentBoxTypeId,
+                            weight:packageInfo.weight, weightUomId:packageInfo.weightUomId]"/>
+                <service-call name="create#mantle.shipment.ShipmentPackageRouteSeg"
+                        in-map="[shipmentId:shipmentId, shipmentPackageSeqId:packageOut.shipmentPackageSeqId,
+                                shipmentRouteSegmentSeqId:shipmentRouteSegmentSeqId]"/>
+                <iterate list="packageInfo.quantityByProductId" entry="quantity" key="productId">
+                    <service-call name="create#mantle.shipment.ShipmentPackageContent"
+                            in-map="[shipmentId:shipmentId, shipmentPackageSeqId:packageOut.shipmentPackageSeqId,
+                                productId:productId, quantity:quantity]"/>
+                </iterate>
+            </iterate>
         </actions>
     </service>
 
