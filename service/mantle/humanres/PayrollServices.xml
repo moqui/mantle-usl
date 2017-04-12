@@ -117,7 +117,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="amountByAdjustmentId" from="[:]"/>
                 <set field="amountByTypeDescription" from="[:]"/>
                 <iterate list="adjustmentList" entry="adjustment">
-                    <set field="adjTotal" from="adjustment.quantity * adjustment.amount"/>
+                    <!-- amounts will be negative as deductions so negate -->
+                    <set field="adjTotal" from="-(adjustment.quantity * adjustment.amount)"/>
                     <if condition="adjustment.payrollAdjustmentId"><then>
                         <script>addToBigDecimalInMap(adjustment.payrollAdjustmentId, adjTotal, amountByAdjustmentId)</script>
                     </then><else>
@@ -236,6 +237,7 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="invoiceList" entry="invoice">
                 <!-- if paymentInstrumentEnumId is PiAch look for employee's BankAccount -->
                 <set field="toPaymentMethodId" from="null"/>
+                <set field="toUseInstrumentEnumId" from="paymentInstrumentEnumId"/>
                 <if condition="paymentInstrumentEnumId == 'PiAch'">
                     <entity-find entity-name="mantle.account.method.PaymentMethod" list="toPaymentMethodList">
                         <date-filter/>
@@ -246,6 +248,8 @@ along with this software (see the LICENSE.md file). If not, see
                     </entity-find>
                     <if condition="toPaymentMethodList">
                         <set field="toPaymentMethodId" from="toPaymentMethodList[0].paymentMethodId"/></if>
+                    <!-- if there is no bank account, fall back to a PiCompanyCheck instrument -->
+                    <if condition="!toPaymentMethodId"><set field="toUseInstrumentEnumId" value="PiCompanyCheck"/></if>
                 </if>
                 <!-- get the Employment.distGroupEnumId if set, using invoice.partyRelationshipId -->
                 <set field="distGroupEnumId" from="null"/>
@@ -255,9 +259,10 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="invEmployment?.distGroupEnumId">
                         <set field="distGroupEnumId" from="invEmployment.distGroupEnumId"/></if>
                 </if>
-
+                <!-- make the payment -->
                 <service-call name="mantle.account.PaymentServices.create#InvoicePayment" out-map="paymentOut"
-                    in-map="context + [invoiceId:invoice.invoiceId, partyRelationshipId:invoice.partyRelationshipId]"/>
+                    in-map="context + [invoiceId:invoice.invoiceId, partyRelationshipId:invoice.partyRelationshipId,
+                        paymentInstrumentEnumId:toUseInstrumentEnumId]"/>
             </iterate>
         </actions>
     </service>
@@ -376,7 +381,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
 
             <set field="salaryFlag" from="emplPosition.salaryFlag ?: 'N'"/>
-            <set field="payAmount" from="0"/>
+            <set field="payAmount" from="0.0"/>
 
             <if condition="employment.timePeriodTypeId != timePeriod.timePeriodTypeId">
                 <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is not paid in this type of period"/></if>
@@ -389,56 +394,55 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; fromTimestamp">
                 <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is no longer employed"/></if>
 
-            <if condition="salaryFlag == 'Y'">
-                <then>
-                    <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
-                    <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
-                        <date-filter valid-date="thruTimestamp"/>
-                        <econdition field-name="partyRelationshipId"/>
-                        <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
-                        <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
-                    </entity-find>
+            <if condition="salaryFlag == 'Y'"><then>
+                <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
+                <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
+                    <date-filter valid-date="thruTimestamp"/>
+                    <econdition field-name="partyRelationshipId"/>
+                    <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+                    <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
+                </entity-find>
 
-                    <if condition="!employmentSalaryList">
-                        <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
-                    <set field="employmentSalary" from="employmentSalaryList[0]"/>
+                <if condition="!employmentSalaryList">
+                    <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
+                <set field="employmentSalary" from="employmentSalaryList[0]"/>
 
-                    <set field="payAmount" from="employmentSalary.amount"/>
-                    <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
+                <set field="payAmount" from="employmentSalary.amount"/>
+                <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
 
-                    <!-- handle partial period for salary (first and last, ie by from and thru) -->
-                    <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; fromTimestamp">
-                        <set field="partialFrom" from="employment.fromDate"/></if>
-                    <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; thruTimestamp">
-                        <set field="partialThru" from="employment.thruDate"/></if>
-                    <if condition="partialFrom || partialThru">
-                        <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
-                            <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
-                        <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time)"/>
-                            <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
-                        <!-- TODO: this is messy, consider working days, etc? -->
-                        <!-- for now do a simple ratio of milliseconds -->
-                        <set field="partialTime" from="partialThru.time - partialFrom.time"/>
-                        <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
-                        <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
-                    </if>
-                </then>
-                <else>
-                    <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
-                        <econdition field-name="partyId" from="employment.fromPartyId"/>
-                        <econdition field-name="clientPartyId" from="employment.toPartyId"/>
-                        <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp"/>
-                        <econdition field-name="thruDate" operator="less-equals" from="thruTimestamp"/>
-                    </entity-find>
-                    <iterate list="timeEntryList" entry="timeEntry">
-                        <!-- NOTE: this service gets the higher of hourly and piece amounts -->
-                        <service-call name="mantle.work.TimeServices.get#TimeEntryAmount" out-map="getTeaOut"
-                                in-map="[timeEntryId:timeEntry.timeEntryId, timeEntry:timeEntry, ratePurposeEnumId:ratePurposeEnumId]"/>
-                        <set field="payAmount" from="payAmount + getTeaOut.amountTotal"/>
-                        <set field="currencyUomId" from="getTeaOut.currencyUomId"/>
-                    </iterate>
-                </else>
-            </if>
+                <!-- handle partial period for salary (first and last, ie by from and thru) -->
+                <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; fromTimestamp">
+                    <set field="partialFrom" from="employment.fromDate"/></if>
+                <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; thruTimestamp">
+                    <set field="partialThru" from="employment.thruDate"/></if>
+                <if condition="partialFrom || partialThru">
+                    <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
+                        <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
+                    <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time)"/>
+                        <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
+                    <!-- TODO: this is messy, consider working days, etc? -->
+                    <!-- for now do a simple ratio of milliseconds -->
+                    <set field="partialTime" from="partialThru.time - partialFrom.time"/>
+                    <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
+                    <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                </if>
+            </then><else>
+                <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
+                    <econdition field-name="partyId" from="employment.fromPartyId"/>
+                    <econdition field-name="clientPartyId" from="employment.toPartyId"/>
+                    <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp"/>
+                    <econdition field-name="thruDate" operator="less-equals" from="thruTimestamp"/>
+                </entity-find>
+                <iterate list="timeEntryList" entry="timeEntry">
+                    <!-- NOTE: this service gets the higher of hourly and piece amounts -->
+                    <service-call name="mantle.work.TimeServices.get#TimeEntryAmount" out-map="getTeaOut"
+                            in-map="[timeEntryId:timeEntry.timeEntryId, timeEntry:timeEntry, ratePurposeEnumId:ratePurposeEnumId]"/>
+                    <set field="payAmount" from="payAmount + getTeaOut.amountTotal"/>
+                    <set field="currencyUomId" from="getTeaOut.currencyUomId"/>
+                </iterate>
+                <!-- round total to 2 decimal places -->
+                <set field="payAmount" from="payAmount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+            </else></if>
         </actions>
     </service>
 
@@ -498,15 +502,19 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!payDate"><set field="payDate" from="timePeriod.thruDate"/></if>
             <set field="payTimestamp" from="ec.l10n.parseTimestamp(&quot;${payDate} 12:00:00.000&quot;, '')"/>
 
+            <!-- is this employee's income social and medical taxable? NOTE: special cases here, and not all potential yet handled: -->
+            <!-- see https://www.irs.gov/individuals/international-taxpayers/aliens-employed-in-the-u-s-social-security-taxes -->
+            <set field="socialMedicalExempt" from="emplPosition.taxExemptEnumId == 'EtxForeignAg'"/>
+
             <!-- set initial taxablePayAmount, socialTaxablePayAmount, medicalTaxablePayAmount -->
             <set field="taxablePayAmount" from="payAmount"/>
-            <set field="socialTaxablePayAmount" from="payAmount"/>
-            <set field="medicalTaxablePayAmount" from="payAmount"/>
+            <set field="socialTaxablePayAmount" from="socialMedicalExempt ? 0.0 : payAmount"/>
+            <set field="medicalTaxablePayAmount" from="socialMedicalExempt ? 0.0 : payAmount"/>
 
             <!-- calc taxableYtdIncome, socialTaxableYtdIncome, medicalTaxableYtdIncome -->
-            <set field="taxableYtdIncome" from="0"/>
-            <set field="socialTaxableYtdIncome" from="0"/>
-            <set field="medicalTaxableYtdIncome" from="0"/>
+            <set field="taxableYtdIncome" from="0.0"/>
+            <set field="socialTaxableYtdIncome" from="0.0"/>
+            <set field="medicalTaxableYtdIncome" from="0.0"/>
             <set field="thisYearList" from="ec.user.getPeriodRange('year', '0')"/>
             <set field="yearStart" from="new java.sql.Date(thisYearList[0].time)"/>
             <set field="yearEnd" from="new java.sql.Date(thisYearList[1].time)"/>
@@ -538,7 +546,7 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
 
             <!-- calculate adjustments and run other calculations by phase, including those with no phase after the other taxable/deductible phase -->
-            <set field="phaseEnumIdList" from="['PrphBonus', 'PrphOvertime', 'PrphBreak', 'PrphDeductible', null, 'PrphTax', 'PrphGarnish', 'PrphExpenses']"/>
+            <set field="phaseEnumIdList" from="['PrphBonus', 'PrphBreak', 'PrphOvertime', 'PrphDeductible', null, 'PrphTax', 'PrphGarnish', 'PrphExpenses']"/>
 
             <set field="calcAdjParameters" from="[partyRelationshipId:partyRelationshipId, employment:employment,
                     timePeriod:timePeriod, timeEntryList:timeEntryList, timePeriodTypeId:timePeriod.timePeriodTypeId,
@@ -782,133 +790,109 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="adjustmentBasisAmount" from="medicalTaxablePayAmount"/>
                 <set field="adjustmentYtdAmount" from="medicalTaxableYtdIncome"/>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsStraightGross'">
-                <if condition="payrollAdjustment.riskClassCode">
-                    <then>
-                        <set field="adjustmentBasisAmount" value="0"/>
-                        <!--<set field="adjustmentYtdAmount" value="0"/>-->
-                        <if condition="timeEntryList">
-                            <then>
-                                <iterate list="timeEntryList" entry="timeEntry">
-                                    <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
-                                        <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
-                                    <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
-                                        <!-- TODO: This is insufficient; straight time gross is much more complicated than time entries -->
-                                        <!-- California defines this as: -->
-                                        <!-- When determining the basis of premium, the following are included as payroll:
-                                             gross wages; salaries; commissions; all bonuses; most profit sharing; vacation,
-                                             holiday and sick pay; overtime ("straight time" portion only); the market value
-                                             of gifts; and automobile allowances (less reimbursement for documented expenses).
+                <if condition="payrollAdjustment.riskClassCode"><then>
+                    <set field="adjustmentBasisAmount" value="0"/>
+                    <!--<set field="adjustmentYtdAmount" value="0"/>-->
+                    <if condition="timeEntryList"><then>
+                        <iterate list="timeEntryList" entry="timeEntry">
+                            <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
+                                <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
+                            <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
+                                <!-- TODO: This is insufficient; straight time gross is much more complicated than time entries -->
+                                <!-- California defines this as: -->
+                                <!-- When determining the basis of premium, the following are included as payroll:
+                                     gross wages; salaries; commissions; all bonuses; most profit sharing; vacation,
+                                     holiday and sick pay; overtime ("straight time" portion only); the market value
+                                     of gifts; and automobile allowances (less reimbursement for documented expenses).
 
-                                             The following items are excluded from payroll when determining the basis of premium:
-                                             meals or lodging (unless the classification phraseology specifically includes them
-                                             or unless they are provided in lieu of wages); tips; overtime excess pay (the
-                                             increase above the regular hourly wage); severance pay (except for accrued vacation,
-                                             sick pay, commissions, and bonuses); employer contributions to qualified insurance,
-                                             stock, or retirement plans; stock options; and the value of an automobile furnished
-                                             to an employee. In addition, the following are not included as payroll for premium
-                                             computation: employee discounts for merchandise; meals provided at no charge at the
-                                             work location; residual payments for commercials; or a uniform allowance. -->
-                                    </if>
-                                </iterate>
-                            </then>
-                            <else>
-                                <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
-                            </else>
-                        </if>
-                    </then>
-                    <else>
-                        <set field="adjustmentBasisAmount" value="0.0"/>
-                        <!--<set field="adjustmentYtdAmount" value="0"/>-->
-                        <if condition="timeEntryList">
-                            <then>
-                                <iterate list="timeEntryList" entry="timeEntry">
-                                    <!-- TODO: This is insufficient; straight time gross is much more complicated than time entries -->
-                                    <!-- California defines this as: -->
-                                    <!-- When determining the basis of premium, the following are included as payroll:
-                                         gross wages; salaries; commissions; all bonuses; most profit sharing; vacation,
-                                         holiday and sick pay; overtime ("straight time" portion only); the market value
-                                         of gifts; and automobile allowances (less reimbursement for documented expenses).
+                                     The following items are excluded from payroll when determining the basis of premium:
+                                     meals or lodging (unless the classification phraseology specifically includes them
+                                     or unless they are provided in lieu of wages); tips; overtime excess pay (the
+                                     increase above the regular hourly wage); severance pay (except for accrued vacation,
+                                     sick pay, commissions, and bonuses); employer contributions to qualified insurance,
+                                     stock, or retirement plans; stock options; and the value of an automobile furnished
+                                     to an employee. In addition, the following are not included as payroll for premium
+                                     computation: employee discounts for merchandise; meals provided at no charge at the
+                                     work location; residual payments for commercials; or a uniform allowance. -->
+                            </if>
+                        </iterate>
+                    </then><else>
+                        <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
+                    </else></if>
+                </then><else>
+                    <set field="adjustmentBasisAmount" value="0.0"/>
+                    <!--<set field="adjustmentYtdAmount" value="0"/>-->
+                    <if condition="timeEntryList"><then>
+                        <iterate list="timeEntryList" entry="timeEntry">
+                            <!-- TODO: This is insufficient; straight time gross is much more complicated than time entries -->
+                            <!-- California defines this as: -->
+                            <!-- When determining the basis of premium, the following are included as payroll:
+                                 gross wages; salaries; commissions; all bonuses; most profit sharing; vacation,
+                                 holiday and sick pay; overtime ("straight time" portion only); the market value
+                                 of gifts; and automobile allowances (less reimbursement for documented expenses).
 
-                                         The following items are excluded from payroll when determining the basis of premium:
-                                         meals or lodging (unless the classification phraseology specifically includes them
-                                         or unless they are provided in lieu of wages); tips; overtime excess pay (the
-                                         increase above the regular hourly wage); severance pay (except for accrued vacation,
-                                         sick pay, commissions, and bonuses); employer contributions to qualified insurance,
-                                         stock, or retirement plans; stock options; and the value of an automobile furnished
-                                         to an employee. In addition, the following are not included as payroll for premium
-                                         computation: employee discounts for merchandise; meals provided at no charge at the
-                                         work location; residual payments for commercials; or a uniform allowance. -->
-                                </iterate>
-                            </then>
-                            <else>
-                                <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
-                            </else>
-                        </if>
-                    </else>
-                </if>
+                                 The following items are excluded from payroll when determining the basis of premium:
+                                 meals or lodging (unless the classification phraseology specifically includes them
+                                 or unless they are provided in lieu of wages); tips; overtime excess pay (the
+                                 increase above the regular hourly wage); severance pay (except for accrued vacation,
+                                 sick pay, commissions, and bonuses); employer contributions to qualified insurance,
+                                 stock, or retirement plans; stock options; and the value of an automobile furnished
+                                 to an employee. In addition, the following are not included as payroll for premium
+                                 computation: employee discounts for merchandise; meals provided at no charge at the
+                                 work location; residual payments for commercials; or a uniform allowance. -->
+                        </iterate>
+                    </then><else>
+                        <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
+                    </else></if>
+                </else></if>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsHours'">
-                <if condition="payrollAdjustment.riskClassCode">
-                    <then>
-                        <set field="adjustmentBasisAmount" value="0.0"/>
-                        <!--<set field="adjustmentYtdAmount" value="0"/>-->
-                        <if condition="timeEntryList">
-                            <then>
-                                <iterate list="timeEntryList" entry="timeEntry">
-                                    <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
-                                        <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
-                                    <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
-                                        <!-- Do not include timeEntry.breakHours, those are for non-paid breaks -->
-                                        <set field="adjustmentBasisAmount" from="adjustmentBasisAmount + timeEntry.hours"/>
-                                    </if>
-                                </iterate>
-                            </then>
-                            <else>
-                                <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
-                            </else>
-                        </if>
-                    </then>
-                    <else>
-                        <set field="adjustmentBasisAmount" value="0.0"/>
-                        <!--<set field="adjustmentYtdAmount" value="0"/>-->
-                        <if condition="timeEntryList">
-                            <then>
-                                <iterate list="timeEntryList" entry="timeEntry">
-                                    <!-- Do not include timeEntry.breakHours, those are for non-paid breaks -->
-                                    <set field="adjustmentBasisAmount" from="adjustmentBasisAmount + timeEntry.hours"/>
-                                </iterate>
-                            </then>
-                            <else>
-                                <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
-                            </else>
-                        </if>
-                    </else>
-                </if>
+                <if condition="payrollAdjustment.riskClassCode"><then>
+                    <set field="adjustmentBasisAmount" value="0.0"/>
+                    <!--<set field="adjustmentYtdAmount" value="0"/>-->
+                    <if condition="timeEntryList"><then>
+                        <iterate list="timeEntryList" entry="timeEntry">
+                            <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
+                                <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
+                            <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
+                                <!-- Do not include timeEntry.breakHours, those are for non-paid breaks -->
+                                <set field="adjustmentBasisAmount" from="adjustmentBasisAmount + timeEntry.hours"/>
+                            </if>
+                        </iterate>
+                    </then><else>
+                        <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
+                    </else></if>
+                </then><else>
+                    <set field="adjustmentBasisAmount" value="0.0"/>
+                    <!--<set field="adjustmentYtdAmount" value="0"/>-->
+                    <if condition="timeEntryList"><then>
+                        <iterate list="timeEntryList" entry="timeEntry">
+                            <!-- Do not include timeEntry.breakHours, those are for non-paid breaks -->
+                            <set field="adjustmentBasisAmount" from="adjustmentBasisAmount + timeEntry.hours"/>
+                        </iterate>
+                    </then><else>
+                        <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
+                    </else></if>
+                </else></if>
             </else-if><else>
                 <!-- gross pay, PrbsGross -->
-                <if condition="payrollAdjustment.riskClassCode">
-                    <then>
-                        <set field="adjustmentBasisAmount" value="0.0"/>
-                        <set field="adjustmentYtdAmount" value="0.0"/>
-                        <if condition="timeEntryList">
-                            <then>
-                                <iterate list="timeEntryList" entry="timeEntry">
-                                    <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
-                                        <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
-                                    <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
-                                        <!-- TODO: Only against the gross for this Risk Class Code -->
-                                    </if>
-                                </iterate>
-                            </then>
-                            <else>
-                                <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
-                            </else>
-                        </if>
-                    </then>
-                    <else>
-                        <set field="adjustmentBasisAmount" from="payAmount"/>
-                        <set field="adjustmentYtdAmount" from="payAmount"/> <!-- TODO: Is this what we want here? -->
-                    </else>
-                </if>
+                <if condition="payrollAdjustment.riskClassCode"><then>
+                    <set field="adjustmentBasisAmount" value="0.0"/>
+                    <set field="adjustmentYtdAmount" value="0.0"/>
+                    <if condition="timeEntryList"><then>
+                        <iterate list="timeEntryList" entry="timeEntry">
+                            <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
+                                <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
+                            <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
+                                <!-- TODO: Only against the gross for this Risk Class Code -->
+                            </if>
+                        </iterate>
+                    </then><else>
+                        <return error="true" message="Time Entry List not present for Risk Class Code Payroll Adjustment Calculation."/>
+                    </else></if>
+                </then><else>
+                    <set field="adjustmentBasisAmount" from="payAmount"/>
+                    <set field="adjustmentYtdAmount" from="payAmount"/> <!-- TODO: Is this what we want here? -->
+                </else></if>
             </else></if>
 
             <!-- check state and federal filing status constraints, if any; if there are but none match skip the PayrollAdjustment -->
@@ -939,7 +923,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="homePostalAddress.stateProvinceGeoId != taxAuthority.taxAuthGeoId"><return/></if>
                     <set field="taxAllowances" from="employment.taxStateAllowances"/>
                 </else-if><else>
-                    <set field="taxAllowances" from="0"/>
+                    <set field="taxAllowances" from="0.0"/>
                 </else></if>
 
                 <!-- Find applicable PayrollStdDeduction, subtract from adjustmentBasisAmount -->
@@ -1065,6 +1049,62 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="create" noun="GarnishmentDetail">
+        <in-parameters>
+            <auto-parameters entity-name="mantle.humanres.employment.PayrollAdjustmentDetail"/>
+        </in-parameters>
+        <actions>
+            <if condition="rate &gt; 0 || flatAmount &gt; 0">
+                <return error="true" message="Garnishment rates/amounts must be negative adjustments."/>
+            </if>
+            <service-call name="create#mantle.humanres.employment.PayrollAdjustmentDetail" in-map="context"/>
+        </actions>
+    </service>
+    <service verb="update" noun="GarnishmentDetail">
+        <in-parameters>
+            <auto-parameters entity-name="mantle.humanres.employment.PayrollAdjustmentDetail"/>
+        </in-parameters>
+        <actions>
+            <if condition="rate &gt; 0 || flatAmount &gt; 0">
+                <return error="true" message="Garnishment rates/amounts must be negative adjustments."/>
+            </if>
+            <service-call name="update#mantle.humanres.employment.PayrollAdjustmentDetail" in-map="context"/>
+        </actions>
+    </service>
+    <service verb="create" noun="PayrollAdjustmentAndDetail">
+        <in-parameters>
+            <auto-parameters entity-name="mantle.humanres.employment.PayrollAdjustmentAndDetail"/>
+            <parameter name="isNegative"/>
+        </in-parameters>
+        <out-parameters>
+            <auto-parameters entity-name="mantle.humanres.employment.PayrollAdjustmentAndDetail"/>
+        </out-parameters>
+        <actions>
+            <if condition="isNegative &amp;&amp; (rate &gt; 0 || flatAmount &gt; 0)">
+                <return error="true" message="Garnishment rates/amounts must be negative adjustments."/>
+            </if>
+            <service-call name="create#mantle.humanres.employment.PayrollAdjustment" in-map="context" out-map="newPayrollAdjustment"/>
+            <set field="payrollAdjustmentId" from="newPayrollAdjustment.payrollAdjustmentId"/>
+            <service-call name="create#mantle.humanres.employment.PayrollAdjustmentDetail" in-map="context"/>
+        </actions>
+    </service>
+    <service verb="update" noun="PayrollAdjustmentAndDetail">
+        <in-parameters>
+            <auto-parameters entity-name="mantle.humanres.employment.PayrollAdjustmentAndDetail"/>
+            <parameter name="isNegative"/>
+        </in-parameters>
+        <out-parameters>
+            <auto-parameters entity-name="mantle.humanres.employment.PayrollAdjustmentAndDetail"/>
+        </out-parameters>
+        <actions>
+            <if condition="isNegative &amp;&amp; (rate &gt; 0 || flatAmount &gt; 0)">
+                <return error="true" message="Garnishment rates/amounts must be negative adjustments."/>
+            </if>
+            <service-call name="update#mantle.humanres.employment.PayrollAdjustment" in-map="context"/>
+            <service-call name="update#mantle.humanres.employment.PayrollAdjustmentDetail" in-map="context"/>
+        </actions>
+    </service>
+
     <!-- ========== Payroll Tax Reporting Services ========== -->
 
     <service verb="get" noun="EmploymentInfo">
@@ -1159,10 +1199,9 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="employerPhoneString"/>
 
             <!-- TODO: These are only the federal taxable/social/medical amounts.  They probably should not be separate, but
-                       should be in the wageAndTaxinfoByTaxAuthorityId Map, as these amounts differ for states and possibily
-                       localities.
-                       e.g. PA taxes pension plans such as 401k
-                       e.g. NC only taxes income that was made in their state; if you work out of state, it is not taxed. -->
+                   should be in the wageAndTaxInfoByTaxAuthorityId Map, as these amounts differ for states and possibly localities.
+                   e.g. PA taxes pension plans such as 401k
+                   e.g. NC only taxes income that was made in their state; if you work out of state, it is not taxed. -->
             <parameter name="taxablePayAmount" type="BigDecimal"/>
             <parameter name="socialTaxablePayAmount" type="BigDecimal"/>
             <parameter name="medicalTaxablePayAmount" type="BigDecimal"/>
@@ -1186,9 +1225,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="payDate" operator="less-equals" from="timePeriod.thruDate"/>
                 <econdition field-name="internalPayroll" value="Y"/>
             </entity-find>
-            <set field="taxablePayAmount" from="0"/>
-            <set field="socialTaxablePayAmount" from="0"/>
-            <set field="medicalTaxablePayAmount" from="0"/>
+            <set field="taxablePayAmount" from="0.0"/>
+            <set field="socialTaxablePayAmount" from="0.0"/>
+            <set field="medicalTaxablePayAmount" from="0.0"/>
             <iterate list="payHistoryList" entry="payHistory">
                 <set field="taxablePayAmount" from="taxablePayAmount + payHistory.taxablePayAmount"/>
                 <set field="socialTaxablePayAmount" from="socialTaxablePayAmount + payHistory.socialTaxablePayAmount"/>
@@ -1269,6 +1308,14 @@ along with this software (see the LICENSE.md file). If not, see
                     <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
 
                 <set field="curTaxFormId" from="employment.taxFormId ?: emplPosition.taxFormId ?: defaultTaxFormId"/>
+                <if condition="curTaxFormId == 'UsaIrsW2'">
+                    <!-- see if there is no SSN for employee and if so use UsaIrs1099Misc -->
+                    <entity-find-one entity-name="mantle.party.PartyIdentification" value-field="employeeSsnPi">
+                        <field-map field-name="partyId" from="employment.fromPartyId"/>
+                        <field-map field-name="partyIdTypeEnumId" value="PtidSsn"/>
+                    </entity-find-one>
+                    <if condition="!employeeSsnPi?.idValue"><set field="curTaxFormId" value="UsaIrs1099Misc"/></if>
+                </if>
                 <if condition="curTaxFormId == 'UsaIrs1099Misc'"><then>
                     <service-call name="mantle.humanres.PayrollServices.get#UsaIrs1099MiscFormData"
                             out-map="formOut" out-map-add-to-existing="false"
@@ -1340,8 +1387,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="formMap.w2_f" from="employeeHomeString"/>
 
             <set field="formMap.w2_01" from="ec.l10n.format(taxablePayAmount, '#,##0.00')"/>
-            <set field="formMap.w2_03" from="ec.l10n.format(socialTaxablePayAmount, '#,##0.00')"/>
-            <set field="formMap.w2_05" from="ec.l10n.format(medicalTaxablePayAmount, '#,##0.00')"/>
+            <if condition="socialTaxablePayAmount"><set field="formMap.w2_03" from="ec.l10n.format(socialTaxablePayAmount, '#,##0.00')"/></if>
+            <if condition="medicalTaxablePayAmount"><set field="formMap.w2_05" from="ec.l10n.format(medicalTaxablePayAmount, '#,##0.00')"/></if>
 
             <set field="federalWageAndTaxInfo" from="wageAndTaxInfoByTaxAuthorityId.get(federalTaxAuthorityId)"/>
             <set field="formMap.w2_02" from="ec.l10n.format(federalWageAndTaxInfo?.incomeTaxWithheldAmount, '#,##0.00')"/>
