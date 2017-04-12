@@ -221,7 +221,7 @@ class OrderToCashBasicFlow extends Specification {
         ec.user.loginUser("john.doe", "moqui")
 
         shipResult = ec.service.sync().name("mantle.shipment.ShipmentServices.ship#OrderPart")
-                .parameters([orderId:cartOrderId, orderPartSeqId:orderPartSeqId]).call()
+                .parameters([orderId:cartOrderId, orderPartSeqId:orderPartSeqId, tryAutoPackage:false]).call()
 
         // NOTE: this has sequenced IDs so is sensitive to run order!
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
