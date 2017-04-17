@@ -182,7 +182,7 @@ class OrderToCashBasicFlow extends Specification {
 
             <mantle.product.asset.Asset assetId="55400" acquireCost="8" acquireCostUomId="USD" productId="DEMO_1_1"
                 statusId="AstAvailable" assetTypeEnumId="AstTpInventory" originalQuantity="400" quantityOnHandTotal="400"
-                availableToPromiseTotal="199" facilityId="ORG_ZIZI_RETAIL_WH" ownerPartyId="ORG_ZIZI_RETAIL"
+                availableToPromiseTotal="199" facilityId="ZIRET_WH" ownerPartyId="ORG_ZIZI_RETAIL"
                 hasQuantity="Y" assetName="Demo Product One-One"/>
             <mantle.product.issuance.AssetReservation assetReservationId="55500" assetId="55400" orderId="${cartOrderId}"
                 orderItemSeqId="01" reservedDate="${effectiveTime}" quantity="1" productId="DEMO_1_1" sequenceNum="0"
@@ -192,7 +192,7 @@ class OrderToCashBasicFlow extends Specification {
 
             <mantle.product.asset.Asset assetId="DEMO_3_1A" assetTypeEnumId="AstTpInventory" statusId="AstAvailable"
                 ownerPartyId="ORG_ZIZI_RETAIL" productId="DEMO_3_1" hasQuantity="Y" quantityOnHandTotal="5"
-                availableToPromiseTotal="0" receivedDate="1265184000000" facilityId="ORG_ZIZI_RETAIL_WH"/>
+                availableToPromiseTotal="0" receivedDate="1265184000000" facilityId="ZIRET_WH"/>
             <mantle.product.issuance.AssetReservation assetReservationId="55501" assetId="DEMO_3_1A" productId="DEMO_3_1"
                 orderId="${cartOrderId}" orderItemSeqId="02" reservationOrderEnumId="AsResOrdFifoRec" quantity="5"
                 reservedDate="${effectiveTime}" sequenceNum="0"/>
@@ -202,7 +202,7 @@ class OrderToCashBasicFlow extends Specification {
             <!-- this is an auto-created Asset based on the inventory issuance -->
             <mantle.product.asset.Asset assetId="55500" assetTypeEnumId="AstTpInventory" statusId="AstAvailable"
                 ownerPartyId="ORG_ZIZI_RETAIL" productId="DEMO_2_1" hasQuantity="Y" quantityOnHandTotal="0"
-                availableToPromiseTotal="-7" receivedDate="${effectiveTime}" facilityId="ORG_ZIZI_RETAIL_WH"/>
+                availableToPromiseTotal="-7" receivedDate="${effectiveTime}" facilityId="ZIRET_WH"/>
             <mantle.product.issuance.AssetReservation assetReservationId="55502" assetId="55500" productId="DEMO_2_1"
                 orderId="${cartOrderId}" orderItemSeqId="03" reservationOrderEnumId="AsResOrdFifoRec"
                 quantity="7" quantityNotAvailable="7" reservedDate="${effectiveTime}"/>

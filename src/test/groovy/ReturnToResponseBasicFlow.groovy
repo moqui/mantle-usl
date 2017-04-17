@@ -131,7 +131,7 @@ class ReturnToResponseBasicFlow extends Specification {
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
-            <returns returnId="55700" facilityId="ORG_ZIZI_RETAIL_WH" entryDate="${effectiveTime}"
+            <returns returnId="55700" facilityId="ZIRET_WH" entryDate="${effectiveTime}"
                     shipmentMethodEnumId="ShMthGround" vendorPartyId="ORG_ZIZI_RETAIL" telecomContactMechId="CustJqpTeln"
                     postalContactMechId="CustJqpAddr" carrierPartyId="_NA_" currencyUomId="USD" statusId="ReturnRequested"
                     paymentMethodId="CustJqpCc" customerPartyId="CustJqp">
@@ -205,7 +205,7 @@ class ReturnToResponseBasicFlow extends Specification {
                         returnId="55700" returnItemSeqId="02"/>
                 </items>
                 <routeSegments shipmentRouteSegmentSeqId="01" shipmentMethodEnumId="ShMthGround"
-                    destinationFacilityId="ORG_ZIZI_RETAIL_WH" originPostalContactMechId="CustJqpAddr"
+                    destinationFacilityId="ZIRET_WH" originPostalContactMechId="CustJqpAddr"
                     carrierPartyId="_NA_" originTelecomContactMechId="CustJqpTeln"/>
             </shipments>
         </entity-facade-xml>""").check(dataCheckErrors)
@@ -267,7 +267,7 @@ class ReturnToResponseBasicFlow extends Specification {
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <orders orderId="55700" entryDate="${effectiveTime}" grandTotal="0" currencyUomId="USD"
                     statusId="OrderApproved" placedDate="${effectiveTime}">
-                <parts shipmentMethodEnumId="ShMthGround" telecomContactMechId="CustJqpTeln" postalContactMechId="CustJqpAddr" partTotal="0" customerPartyId="CustJqp" lastUpdatedStamp="1450573654119" facilityId="ORG_ZIZI_RETAIL_WH" vendorPartyId="ORG_ZIZI_RETAIL" carrierPartyId="_NA_" statusId="OrderApproved" orderPartSeqId="01"/>
+                <parts shipmentMethodEnumId="ShMthGround" telecomContactMechId="CustJqpTeln" postalContactMechId="CustJqpAddr" partTotal="0" customerPartyId="CustJqp" lastUpdatedStamp="1450573654119" facilityId="ZIRET_WH" vendorPartyId="ORG_ZIZI_RETAIL" carrierPartyId="_NA_" statusId="OrderApproved" orderPartSeqId="01"/>
                 <items orderItemSeqId="01" isModifiedPrice="Y" itemTypeEnumId="ItemProduct" quantity="1"
                         itemDescription="Demo Product One-One" productId="DEMO_1_1" unitAmount="0" orderPartSeqId="01">
                     <reservations assetReservationId="55700" assetId="55400" reservedDate="${effectiveTime}" quantity="1"
@@ -358,7 +358,7 @@ class ReturnToResponseBasicFlow extends Specification {
                 </packages>
                 <routeSegments shipmentRouteSegmentSeqId="01" shipmentMethodEnumId="ShMthGround"
                         actualStartDate="${effectiveTime}" destTelecomContactMechId="CustJqpTeln"
-                        originFacilityId="ORG_ZIZI_RETAIL_WH" destPostalContactMechId="CustJqpAddr"/>
+                        originFacilityId="ZIRET_WH" destPostalContactMechId="CustJqpAddr"/>
             </shipments>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked

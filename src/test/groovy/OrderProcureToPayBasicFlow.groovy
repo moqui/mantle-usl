@@ -34,7 +34,7 @@ class OrderProcureToPayBasicFlow extends Specification {
     @Shared Map setInfoOut, shipResult, sendPmtResult
     @Shared String vendorPartyId = 'ZiddlemanInc', customerPartyId = 'ORG_ZIZI_RETAIL'
     @Shared String priceUomId = 'USD', currencyUomId = 'USD'
-    @Shared String facilityId = 'ORG_ZIZI_RETAIL_WH'
+    @Shared String facilityId = 'ZIRET_WH'
     @Shared long effectiveTime = System.currentTimeMillis()
     @Shared java.sql.Date eolDate
     @Shared String equip1AssetId, equip2AssetId, currentFiscalMonthId
@@ -1057,7 +1057,7 @@ class OrderProcureToPayBasicFlow extends Specification {
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <assets assetId="55406" productId="DEMO_1_1" statusId="AstAvailable" assetTypeEnumId="AstTpInventory"
                     receivedDate="${effectiveTime}" acquiredDate="${effectiveTime}" quantityOnHandTotal="10" availableToPromiseTotal="10"
-                    facilityId="ORG_ZIZI_RETAIL_WH" classEnumId="AsClsInventoryFin" ownerPartyId="ORG_ZIZI_RETAIL" hasQuantity="Y"/>
+                    facilityId="ZIRET_WH" classEnumId="AsClsInventoryFin" ownerPartyId="ORG_ZIZI_RETAIL" hasQuantity="Y"/>
             <mantle.product.asset.PhysicalInventory physicalInventoryId="55401" physicalInventoryDate="${effectiveTime}"
                     comments="Test found 10 DEMO_1_1" partyId="EX_JOHN_DOE">
                 <mantle.product.asset.AssetDetail assetDetailId="55419" assetId="55406" productId="DEMO_1_1"
