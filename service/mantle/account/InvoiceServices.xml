@@ -100,9 +100,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
                 <econdition field-name="invoiceId"/><order-by field-name="invoiceItemSeqId"/></entity-find>
             <!-- extract related order IDs -->
-            <set field="orderIdSet" from="new TreeSet()"/>
-            <iterate list="orderItemBillingList" entry="orderItemBilling">
-                <script>orderIdSet.add(orderItemBilling.orderId)</script></iterate>
+            <set field="orderIdSet" from="new TreeSet(orderItemBillingList*.orderId)"/>
             <!-- get promised payments for associated orders -->
             <if condition="orderIdSet">
                 <entity-find entity-name="mantle.account.payment.Payment" list="orderPromisedPaymentList">
@@ -193,6 +191,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="invoiceTotal" type="BigDecimal"/>
             <parameter name="appliedPaymentsTotal" type="BigDecimal"/>
             <parameter name="unpaidTotal" type="BigDecimal"/>
+            <parameter name="settlementTerm" type="Map"/>
+            <parameter name="orderIdSet" type="Set"><parameter name="orderId"/></parameter>
 
             <parameter name="invoiceItemList" type="List"><parameter name="invoiceItem" type="Map"/></parameter>
             <parameter name="itemTypeSummaryMapList" type="List"><parameter name="itemTypeSummary" type="Map"/></parameter>
@@ -210,6 +210,10 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="statusId" from="invoice?.statusId"/></entity-find-one>
             <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="context"/>
             <entity-find-related-one value-field="invoice" relationship-name="mantle.account.invoice.SettlementTerm" to-value-field="settlementTerm"/>
+
+            <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
+                <econdition field-name="invoiceId"/><order-by field-name="invoiceItemSeqId"/></entity-find>
+            <set field="orderIdSet" from="new TreeSet(orderItemBillingList*.orderId)"/>
 
             <entity-find entity-name="mantle.account.invoice.InvoiceItem" list="invoiceItemList">
                 <econdition field-name="invoiceId"/></entity-find>
@@ -261,14 +265,14 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="toPartyId" required="true"/>
             <parameter name="fromPartyId"/>
             <parameter name="periodDays" type="Integer" default="30"/>
-            <parameter name="asOfDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="asOfDate" type="Date"/>
         </in-parameters>
         <out-parameters>
             <parameter name="toParty" type="Map"/>
             <parameter name="toContactInfo" type="Map"><description>From the mantle.party.ContactServices.get#PartyContactInfo service.</description></parameter>
             <parameter name="toBillingRep" type="Map"/>
             <parameter name="periodDays" type="Integer"/>
-            <parameter name="asOfDate" type="Timestamp"/>
+            <parameter name="asOfTimestamp" type="Timestamp"/>
             <parameter name="currencyUomId"/>
 
             <parameter name="receivableInfoList" type="List"><parameter name="receivableInfo" type="Map">
@@ -285,6 +289,7 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <set field="periodDaysBd" from="new BigDecimal(periodDays)"/>
+            <set field="asOfTimestamp" from="asOfDate ? ec.l10n.parseTimestamp(ec.l10n.format(asOfDate, 'yyyy-MM-dd') + ' 23:59:59.999', 'yyyy-MM-dd HH:mm:ss.SSS') : ec.user.nowTimestamp"/>
 
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toParty">
                 <field-map field-name="partyId" from="toPartyId"/></entity-find-one>
@@ -313,7 +318,7 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="fromPartyIds" entry="fromPartyId">
                 <set field="invoiceList" from="[]"/>
                 <set field="unpaidTotal" from="0.0"/>
-                <set field="receivableAgingList" from="new ArrayList([0.0, 0.0, 0.0, 0.0, 0.0])"/>
+                <set field="receivableAgingList" from="new ArrayList([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])"/>
                 <set field="receivableDueAgingList" from="new ArrayList([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])"/>
                 <iterate list="allInvoiceList" entry="invoice">
                     <if condition="invoice.fromPartyId != fromPartyId"><continue/></if>
@@ -322,10 +327,11 @@ along with this software (see the LICENSE.md file). If not, see
                         unpaidTotal += invoice.unpaidTotal
                         if (invoice.currencyUomId) currencyUomId = invoice.currencyUomId
 
-                        Integer invoiceDateDays = invoice.invoiceDate != null ? asOfDate - invoice.invoiceDate : null
-                        Integer invoiceDateIdx = invoiceDateDays != null ? ((invoiceDateDays as BigDecimal) / periodDaysBd).setScale(0, BigDecimal.ROUND_DOWN).intValue() : null
-                        if (invoiceDateIdx != null && invoiceDateIdx > 4) invoiceDateIdx = 4
-                        Integer dueDateDays = invoice.dueDate != null ? asOfDate - invoice.dueDate : null
+                        Integer invoiceDateDays = invoice.invoiceDate != null ? asOfTimestamp - invoice.invoiceDate : null
+                        Integer invoiceDateIdx = invoiceDateDays != null ? (invoiceDateDays < 0 ? 0 :
+                                ((invoiceDateDays as BigDecimal) / periodDaysBd).setScale(0, BigDecimal.ROUND_DOWN).intValue() + 1) : null
+                        if (invoiceDateIdx != null && invoiceDateIdx > 5) invoiceDateIdx = 5
+                        Integer dueDateDays = invoice.dueDate != null ? asOfTimestamp - invoice.dueDate : null
                         Integer dueDateIdx = dueDateDays != null ? (dueDateDays < 0 ? 0 :
                                 ((dueDateDays as BigDecimal) / periodDaysBd).setScale(0, BigDecimal.ROUND_DOWN).intValue() + 1) : null
                         if (dueDateIdx != null && dueDateIdx > 5) dueDateIdx = 5
@@ -339,8 +345,9 @@ along with this software (see the LICENSE.md file). If not, see
                     agingSummaryList.add([description:'By Due Date', current:receivableDueAgingList[0], period0:receivableDueAgingList[1],
                             period1:receivableDueAgingList[2], period2:receivableDueAgingList[3], period3:receivableDueAgingList[4],
                             periodRemaining:receivableDueAgingList[5], total:receivableDueAgingList.sum()])
-                    agingSummaryList.add([description:'By Invoice Date', period0:receivableAgingList[0], period1:receivableAgingList[1],
-                            period2:receivableAgingList[2], period3:receivableAgingList[3], periodRemaining:receivableAgingList[4], total:receivableAgingList.sum()])
+                    agingSummaryList.add([description:'By Invoice Date', current:receivableAgingList[0], period0:receivableAgingList[1],
+                            period1:receivableAgingList[2], period2:receivableAgingList[3], period3:receivableAgingList[4],
+                            periodRemaining:receivableAgingList[5], total:receivableAgingList.sum()])
                 </script>
 
                 <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromParty">
