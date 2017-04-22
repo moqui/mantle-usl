@@ -14,6 +14,10 @@ along with this software (see the LICENSE.md file). If not, see
 -->
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.1.xsd">
 
+    <!-- =========================================== -->
+    <!-- ========== Invoice View Services ========== -->
+    <!-- =========================================== -->
+
     <service verb="get" noun="InvoiceDisplayInfo">
         <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
         <out-parameters>
@@ -166,9 +170,10 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="calculate" noun="MissingInvoiceTotals" transaction-timeout="600">
         <description>This is a simple service not meant for very large Invoice tables and mainly for migration from older versions
             of mantle-usl before the invoiceTotal, appliedPaymentsTotal, and unpaidTotal fields were added.</description>
+        <in-parameters><parameter name="calculateAll" type="Boolean" default="false"/></in-parameters>
         <actions>
             <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceList">
-                <econdition field-name="invoiceTotal" operator="is-null"/></entity-find>
+                <econdition field-name="invoiceTotal" operator="is-null" ignore="calculateAll"/></entity-find>
             <iterate list="invoiceList" entry="invoice">
                 <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoice.invoiceId]"
                         out-map="totalOut" out-map-add-to-existing="false"/>
@@ -181,7 +186,7 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="get" noun="InvoicePrintInfo">
-        <in-parameters><parameter name="invoiceId"/></in-parameters>
+        <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
         <out-parameters>
             <parameter name="invoice" type="Map"/>
             <parameter name="currentStatus" type="Map"/>
@@ -251,6 +256,112 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="partyId" from="toBillingRelList?.first?.fromPartyId"/></entity-find-one>
         </actions>
     </service>
+    <service verb="get" noun="ReceivableStatementInfo">
+        <in-parameters>
+            <parameter name="toPartyId" required="true"/>
+            <parameter name="fromPartyId"/>
+            <parameter name="periodDays" type="Integer" default="30"/>
+            <parameter name="asOfDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="toParty" type="Map"/>
+            <parameter name="toContactInfo" type="Map"><description>From the mantle.party.ContactServices.get#PartyContactInfo service.</description></parameter>
+            <parameter name="toBillingRep" type="Map"/>
+            <parameter name="periodDays" type="Integer"/>
+            <parameter name="asOfDate" type="Timestamp"/>
+            <parameter name="currencyUomId"/>
+
+            <parameter name="receivableInfoList" type="List"><parameter name="receivableInfo" type="Map">
+                <parameter name="fromPartyId"/>
+                <parameter name="fromParty" type="Map"/>
+                <parameter name="fromContactInfo" type="Map"><description>From the mantle.party.ContactServices.get#PartyContactInfo service.</description></parameter>
+                <parameter name="logoImageLocation"/>
+                <parameter name="invoiceList"><parameter name="invoice" type="Map"/></parameter>
+                <parameter name="unpaidTotal" type="BigDecimal"/>
+                <parameter name="agingSummaryList"><parameter name="agingSummary" type="Map"/></parameter>
+                <parameter name="receivableAgingList"><parameter name="unpaidAmount" type="BigDecimal"/></parameter>
+                <parameter name="receivableDueAgingList"><parameter name="unpaidAmount" type="BigDecimal"/></parameter>
+            </parameter></parameter>
+        </out-parameters>
+        <actions>
+            <set field="periodDaysBd" from="new BigDecimal(periodDays)"/>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toParty">
+                <field-map field-name="partyId" from="toPartyId"/></entity-find-one>
+            <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="toContactInfo"
+                    in-map="[partyId:toPartyId, postalContactMechPurposeId:'PostalBilling',
+                        telecomContactMechPurposeId:'PhoneBilling', emailContactMechPurposeId:'EmailBilling']"/>
+            <entity-find entity-name="mantle.party.PartyRelationship" list="toBillingRelList">
+                <date-filter/>
+                <econdition field-name="toPartyId" from="toPartyId"/>
+                <econdition field-name="relationshipTypeEnumId" value="PrtRepresentative"/>
+                <econdition field-name="fromRoleTypeId" value="ClientBilling"/>
+            </entity-find>
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toBillingRep">
+                <field-map field-name="partyId" from="toBillingRelList?.first?.fromPartyId"/></entity-find-one>
+
+            <entity-find entity-name="mantle.account.invoice.Invoice" list="allInvoiceList">
+                <econdition field-name="statusId" operator="in" value="InvoiceFinalized,InvoiceSent"/>
+                <econdition field-name="unpaidTotal" operator="not-equals" from="0.0"/>
+                <econdition field-name="toPartyId"/>
+                <econdition field-name="fromPartyId" ignore-if-empty="true"/>
+                <order-by field-name="invoiceDate"/>
+            </entity-find>
+            <set field="fromPartyIds" from="new TreeSet(allInvoiceList*.fromPartyId)"/>
+
+            <set field="receivableInfoList" from="[]"/>
+            <iterate list="fromPartyIds" entry="fromPartyId">
+                <set field="invoiceList" from="[]"/>
+                <set field="unpaidTotal" from="0.0"/>
+                <set field="receivableAgingList" from="new ArrayList([0.0, 0.0, 0.0, 0.0, 0.0])"/>
+                <set field="receivableDueAgingList" from="new ArrayList([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])"/>
+                <iterate list="allInvoiceList" entry="invoice">
+                    <if condition="invoice.fromPartyId != fromPartyId"><continue/></if>
+                    <script><![CDATA[
+                        invoiceList.add(invoice)
+                        unpaidTotal += invoice.unpaidTotal
+                        if (invoice.currencyUomId) currencyUomId = invoice.currencyUomId
+
+                        Integer invoiceDateDays = invoice.invoiceDate != null ? asOfDate - invoice.invoiceDate : null
+                        Integer invoiceDateIdx = invoiceDateDays != null ? ((invoiceDateDays as BigDecimal) / periodDaysBd).setScale(0, BigDecimal.ROUND_DOWN).intValue() : null
+                        if (invoiceDateIdx != null && invoiceDateIdx > 4) invoiceDateIdx = 4
+                        Integer dueDateDays = invoice.dueDate != null ? asOfDate - invoice.dueDate : null
+                        Integer dueDateIdx = dueDateDays != null ? (dueDateDays < 0 ? 0 :
+                                ((dueDateDays as BigDecimal) / periodDaysBd).setScale(0, BigDecimal.ROUND_DOWN).intValue() + 1) : null
+                        if (dueDateIdx != null && dueDateIdx > 5) dueDateIdx = 5
+
+                        if (invoiceDateIdx != null) receivableAgingList[invoiceDateIdx] = receivableAgingList[invoiceDateIdx] + invoice.unpaidTotal
+                        if (dueDateIdx != null) receivableDueAgingList[dueDateIdx] = receivableDueAgingList[dueDateIdx] + invoice.unpaidTotal
+                    ]]></script>
+                </iterate>
+                <script>
+                    agingSummaryList = []
+                    agingSummaryList.add([description:'By Due Date', current:receivableDueAgingList[0], period0:receivableDueAgingList[1],
+                            period1:receivableDueAgingList[2], period2:receivableDueAgingList[3], period3:receivableDueAgingList[4],
+                            periodRemaining:receivableDueAgingList[5], total:receivableDueAgingList.sum()])
+                    agingSummaryList.add([description:'By Invoice Date', period0:receivableAgingList[0], period1:receivableAgingList[1],
+                            period2:receivableAgingList[2], period3:receivableAgingList[3], periodRemaining:receivableAgingList[4], total:receivableAgingList.sum()])
+                </script>
+
+                <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromParty">
+                    <field-map field-name="partyId" from="fromPartyId"/></entity-find-one>
+                <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="fromContactInfo"
+                        in-map="[partyId:fromPartyId, postalContactMechPurposeId:'PostalPayment',
+                            telecomContactMechPurposeId:'PhonePayment', emailContactMechPurposeId:'EmailPayment']"/>
+                <service-call name="mantle.party.PartyServices.get#PartyContentLocation" out-map="logoImageOut"
+                        in-map="[partyId:fromPartyId, partyContentTypeEnumIdList:['PcntLogoImage', 'PcntPrimaryImage']]"/>
+                <set field="logoImageLocation" from="logoImageOut.contentLocation"/>
+                <script>receivableInfoList.add([fromPartyId:fromPartyId, fromParty:fromParty, fromContactInfo:fromContactInfo,
+                            logoImageLocation:logoImageOut.contentLocation, invoiceList:invoiceList, unpaidTotal:unpaidTotal,
+                            agingSummaryList:agingSummaryList, receivableAgingList:receivableAgingList,
+                            receivableDueAgingList:receivableDueAgingList])</script>
+            </iterate>
+        </actions>
+    </service>
+
+    <!-- ==================================================== -->
+    <!-- ========== Invoice Create/Update Services ========== -->
+    <!-- ==================================================== -->
 
     <service verb="create" noun="Invoice">
         <description>Create an invoice manually (also used for an order part, shipment, project/work, etc). Initial
