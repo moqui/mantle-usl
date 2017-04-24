@@ -425,30 +425,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="agreementAndTermList"><set field="settlementTermId" from="agreementAndTermList[0].settlementTermId"/></if>
             </if>
 
-            <!-- if no dueDate specified calculate based on invoiceDate and SettlementTerm -->
-            <if condition="dueDate == null &amp;&amp; settlementTermId">
-                <entity-find-one entity-name="mantle.account.invoice.SettlementTerm" value-field="settlementTerm"/>
-                <script><![CDATA[
-                    def dueDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(invoiceDate.time), ec.entity.databaseTimeZone.toZoneId())
-
-                    switch (settlementTerm.termTypeEnumId) {
-                        case 'TtFinPaymentDayNextMonth':
-                            dueDateDt = dueDateDt.plusMonths(1)
-                        case 'TtFinPaymentDayCurMonth':
-                            int dayOfMonth = settlementTerm.termValue as long ?: 1
-                            int maxDays = dueDateDt.range(java.time.temporal.ChronoField.DAY_OF_MONTH).getMaximum()
-                            if (dayOfMonth > maxDays) dayOfMonth = maxDays
-                            dueDateDt = dueDateDt.withDayOfMonth(dayOfMonth)
-                            break
-                        default:
-                            dueDateDt = dueDateDt.plusDays((settlementTerm.termValue as long) ?: 0)
-                    }
-                    dueDate = java.sql.Timestamp.from(dueDateDt.toInstant())
-                    // could happen for TtFinPaymentDayCurMonth with a day less than today; handle differently?
-                    if (dueDate < invoiceDate) dueDate = invoiceDate
-                ]]></script>
-            </if>
-
             <service-call name="create#mantle.account.invoice.Invoice" in-map="context" out-map="context"/>
         </actions>
     </service>
@@ -480,6 +456,46 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <service-call name="update#mantle.account.invoice.Invoice" in-map="context" out-map="context"/>
+        </actions>
+    </service>
+    <service verb="checkSet" noun="InvoiceDueDate">
+        <in-parameters><parameter name="invoiceId"/></in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+            <set field="origDueDate" from="invoice.dueDate"/>
+            <set field="invoiceDate" from="invoice.invoiceDate"/>
+            <if condition="invoiceDate != null &amp;&amp; invoice.settlementTermId">
+                <entity-find-one entity-name="mantle.account.invoice.SettlementTerm" value-field="settlementTerm">
+                    <field-map field-name="settlementTermId" from="invoice.settlementTermId"/></entity-find-one>
+                <script><![CDATA[
+                    def dueDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(invoiceDate.time), ec.entity.databaseTimeZone.toZoneId())
+
+                    switch (settlementTerm.termTypeEnumId) {
+                        case 'TtFinPaymentDayNextMonth':
+                            dueDateDt = dueDateDt.plusMonths(1)
+                            // fall through intentionally
+                        case 'TtFinPaymentDayCurMonth':
+                            int dayOfMonth = settlementTerm.termValue as long ?: 1
+                            int maxDays = dueDateDt.range(java.time.temporal.ChronoField.DAY_OF_MONTH).getMaximum()
+                            if (dayOfMonth > maxDays) dayOfMonth = maxDays
+                            dueDateDt = dueDateDt.withDayOfMonth(dayOfMonth)
+                            break
+                        default:
+                            dueDateDt = dueDateDt.plusDays((settlementTerm.termValue as long) ?: 0)
+                    }
+                    dueDate = java.sql.Timestamp.from(dueDateDt.toInstant())
+                    // could happen for TtFinPaymentDayCurMonth with a day less than today
+                    if (dueDate < invoiceDate) {
+                        dueDateDt = dueDateDt.plusMonths(1)
+                        dueDate = java.sql.Timestamp.from(dueDateDt.toInstant())
+                    }
+
+                    if (origDueDate == null || origDueDate != dueDate) {
+                        invoice.dueDate = dueDate
+                        invoice.update()
+                    }
+                ]]></script>
+            </if>
         </actions>
     </service>
 
