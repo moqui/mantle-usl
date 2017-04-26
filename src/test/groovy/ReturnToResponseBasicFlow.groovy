@@ -474,11 +474,11 @@ class ReturnToResponseBasicFlow extends Specification {
                         amountUomId="USD" paymentTypeEnumId="PtInvoicePayment" finAccountTransId="55701" amount="${kieEnabled ? '13.77' : '7.77'}"
                         reconcileStatusId="PmtrNot" acctgTransResultEnumId="AtrSuccess" finAccountAuthId="55700" statusId="PmntDelivered"
                         paymentInstrumentEnumId="PiFinancialAccount" toPartyId="ORG_ZIZI_RETAIL" orderId="55701" orderPartSeqId="01">
-                    <mantle.ledger.transaction.AcctgTrans acctgTransId="55705" otherPartyId="CustJqp" postedDate="${effectiveTime}"
+                    <mantle.ledger.transaction.AcctgTrans acctgTransId="55704" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                             amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttIncomingPayment" glFiscalTypeEnumId="GLFT_ACTUAL"
                             transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
-                        <entries acctgTransEntrySeqId="01" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="121000000" reconcileStatusId="AterNot"
-                            isSummary="N" glAccountTypeEnumId="GatAccountsReceivable" debitCreditFlag="C"/>
+                        <entries acctgTransEntrySeqId="01" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="126000000" reconcileStatusId="AterNot"
+                            isSummary="N" glAccountTypeEnumId="GatAccReceivableUnapplied" debitCreditFlag="C"/>
                         <entries acctgTransEntrySeqId="02" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="251100000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="GatCustomerCredits" debitCreditFlag="D"/>
                     </mantle.ledger.transaction.AcctgTrans>

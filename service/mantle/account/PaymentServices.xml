@@ -443,17 +443,18 @@ along with this software (see the LICENSE.md file). If not, see
                     in-map="context + [fromPartyId:invoice.toPartyId, toPartyId:invoice.fromPartyId,
                         statusId:initialStatusId, overrideGlAccountId:paymentOverrideGlAccountId]"/>
 
-            <service-call name="mantle.account.PaymentServices.apply#InvoicePayment" out-map="context"
-                    in-map="[paymentId:paymentId, invoiceId:invoiceId, amount:amount,
-                        overrideGlAccountId:applicationOverrideGlAccountId]"/>
-
-            <!-- now that Payment is applied, move to target status (mainly so that we go through PmntDelivered for GL posting, etc) -->
-
             <!-- if target status is PmntConfirmed go to PmntDelivered first -->
             <if condition="statusId == 'PmntConfirmed'">
                 <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntDelivered']"/></if>
 
             <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:statusId]"/>
+
+            <!-- Apply Payment now if it is Delivered or Confirmed -->
+            <if condition="statusId in ['PmntDelivered', 'PmntConfirmed']">
+                <service-call name="mantle.account.PaymentServices.apply#InvoicePayment" out-map="context"
+                        in-map="[paymentId:paymentId, invoiceId:invoiceId, amount:amount,
+                            overrideGlAccountId:applicationOverrideGlAccountId]"/>
+            </if>
         </actions>
     </service>
     <service verb="send" noun="PromisedPayment" transaction="cache">
@@ -519,20 +520,25 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="amountApplied" type="BigDecimal"/>
         </out-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+            <if condition="payment.amountUomId != invoice.currencyUomId">
+                <return error="true" message="Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment has a different currency ${payment.amountUomId} than invoice ${invoice.currencyUomId}"/></if>
+            <if condition="payment.fromPartyId != invoice.toPartyId">
+                <return error="true" message="Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is from a different party ${payment.fromPartyId} than invoice is to ${invoice.toPartyId}"/></if>
+            <if condition="payment.toPartyId != invoice.fromPartyId">
+                <return error="true" message="Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is to a different party ${payment.toPartyId} than invoice is from ${invoice.fromPartyId}"/></if>
+
+            <if condition="!(payment.statusId in ['PmntDelivered', 'PmntConfirmed'])">
+                <log level="warn" message="Not apply payment ${paymentId} in status ${payment.statusId} to invoice ${invoiceId}, must be in Delivered or Confirmed status"/>
+                <return message="Not applying payment ${paymentId} to invoice ${invoiceId}, payment must be Delivered or Confirmed to be applied"/>
+            </if>
+
             <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="context"/>
             <set field="amountApplied" from="amount > unpaidTotal ? unpaidTotal : amount"/>
 
             <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:paymentId]" out-map="context"/>
             <if condition="amountApplied > unappliedTotal"><set field="amountApplied" from="unappliedTotal"/></if>
-
-            <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
-            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
-            <if condition="payment.amountUomId != invoice.currencyUomId">
-                <return error="true" message="Cannot apply payment [${paymentId}] to invoice [${invoiceId}], payment has a different currency [${payment.amountUomId}] than invoice [${invoice.currencyUomId}]"/></if>
-            <if condition="payment.fromPartyId != invoice.toPartyId">
-                <return error="true" message="Cannot apply payment [${paymentId}] to invoice [${invoiceId}], payment is from a different party [${payment.fromPartyId}] than invoice is to [${invoice.toPartyId}]"/></if>
-            <if condition="payment.toPartyId != invoice.fromPartyId">
-                <return error="true" message="Cannot apply payment [${paymentId}] to invoice [${invoiceId}], payment is to a different party [${payment.toPartyId}] than invoice is from [${invoice.fromPartyId}]"/></if>
 
             <service-call name="mantle.account.PaymentServices.check#InvoiceStatusForPayment" in-map="[invoiceId:invoiceId]"/>
 
@@ -577,10 +583,21 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="remainingAmount" from="invTotal.unpaidTotal"/>
             <iterate list="paymentList" entry="payment">
+                <if condition="remainingAmount == 0.0"><break/></if>
                 <service-call name="mantle.account.PaymentServices.get#PaymentTotals" out-map="context"
                         in-map="[paymentId:payment.paymentId]"/>
                 <if condition="unappliedTotal &gt; 0">
                     <set field="amountToApply" from="unappliedTotal > remainingAmount ? remainingAmount : unappliedTotal"/>
+
+                    <!-- capture Payment if promised or authorized -->
+                    <if condition="payment.statusId in ['PmntPromised', 'PmntAuthorized']">
+                        <!-- TODO: currently captures full payment amount, could capture only amountToApply but leaves Payment
+                            considered fully captured when it is not yet; may consider splitting the Payment to create another
+                            promised payment for order with remaining balance if this becomes an issue -->
+                        <service-call name="mantle.account.PaymentServices.capture#SinglePayment" out-map="captOut"
+                                in-map="[paymentId:payment.paymentId, amount:payment.amount]"/>
+                    </if>
+
                     <service-call name="mantle.account.PaymentServices.apply#InvoicePayment" out-map="applyOut"
                             in-map="[paymentId:payment.paymentId, invoiceId:invoiceId, amount:amountToApply]"/>
                     <script>paymentApplicationIdByPaymentId.put(payment.paymentId, applyOut.paymentApplicationId)</script>
@@ -875,7 +892,7 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
     
     <service verb="capture" noun="InvoicePayments">
-        <description>DEPRECATED by capture#AppliedPayment. Was called by SECA rule.</description>
+        <description>DEPRECATED by direct call to capture#SinglePayment in apply#OrderPaymentsToInvoice. Was called by SECA rule.</description>
         <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
         <out-parameters><parameter name="captureFailed" type="Boolean"/></out-parameters>
         <actions>
@@ -890,7 +907,7 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="capture" noun="AppliedPayment">
-        <description>Called by SECA rule on create#mantle.account.payment.PaymentApplication</description>
+        <description>DEPRECATED by direct call to capture#SinglePayment in apply#OrderPaymentsToInvoice. Was called by SECA rule.</description>
         <in-parameters><parameter name="paymentApplicationId" required="true"/></in-parameters>
         <out-parameters><parameter name="paymentGatewayResponseId"/></out-parameters>
         <actions>
