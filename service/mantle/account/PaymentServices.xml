@@ -418,9 +418,7 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="create" noun="InvoicePayment">
         <!-- note: no transaction=cache here, used along with FinancialAccount deposit/withdraw which does a sum view query that doesn't work with it -->
         <description>
-            Create a Payment for an Invoice and apply it to the Invoice.
-
-            The from/to Parties from the Invoice are reversed on the Payment.
+            Create a Payment for an Invoice and apply it to the Invoice. The from/to Parties from the Invoice are reversed on the Payment.
 
             If the amount is greater than the unpaid Invoice total the full amount will be set on the Payment, but only
             the unpaid Invoice total will be applied to the Invoice.
@@ -445,7 +443,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="comments"/>
             <parameter name="visitId" default="ec.user.visitId"/>
             <parameter name="paymentOverrideGlAccountId"/>
-            <parameter name="applicationOverrideGlAccountId"/>
+            <!-- no longer supported, payment applied automatically based on status change for Payments that are for an Invoice: <parameter name="applicationOverrideGlAccountId"/> -->
         </in-parameters>
         <out-parameters>
             <parameter name="paymentId"/>
@@ -461,27 +459,22 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="amount" from="totalOut.unpaidTotal"/>
             </if>
             <if condition="!amountUomId"><set field="amountUomId" from="invoice.currencyUomId"/></if>
-
-            <if condition="amount == 0"><return message="Not creating payment for invoice ${invoiceId}, unpaid total is zero"/></if>
+            <if condition="amount == 0.0"><return message="Not creating payment for invoice ${invoiceId}, unpaid total is zero"/></if>
 
             <set field="initialStatusId" from="statusId == 'PmntProposed' ? statusId : 'PmntPromised'"/>
-
             <service-call name="create#mantle.account.payment.Payment" out-map="context"
-                    in-map="context + [fromPartyId:invoice.toPartyId, toPartyId:invoice.fromPartyId,
+                    in-map="context + [fromPartyId:invoice.toPartyId, toPartyId:invoice.fromPartyId, forInvoiceId:invoiceId,
                         statusId:initialStatusId, overrideGlAccountId:paymentOverrideGlAccountId]"/>
 
-            <!-- if target status is PmntConfirmed go to PmntDelivered first -->
+            <!-- if target status is PmntConfirmed go to PmntDelivered first for GL posting, etc -->
             <if condition="statusId == 'PmntConfirmed'">
                 <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntDelivered']"/></if>
-
             <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:statusId]"/>
 
-            <!-- Apply Payment now if it is Delivered or Confirmed -->
-            <if condition="statusId in ['PmntDelivered', 'PmntConfirmed']">
-                <service-call name="mantle.account.PaymentServices.apply#InvoicePayment" out-map="context"
-                        in-map="[paymentId:paymentId, invoiceId:invoiceId, amount:amount,
-                            overrideGlAccountId:applicationOverrideGlAccountId]"/>
-            </if>
+            <!-- NOTE: Because we set Payment.forInvoiceId the Payment will be automatically applied when status set to Delivered or Confirmed if not already applied -->
+            <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentAppList">
+                <econdition field-name="paymentId"/></entity-find>
+            <set field="paymentApplicationId" from="paymentAppList ? paymentAppList[0].paymentApplicationId : null"/>
         </actions>
     </service>
     <service verb="send" noun="PromisedPayment" transaction="cache">
@@ -540,7 +533,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="invoiceId" required="true"/>
             <parameter name="billingAccountId"/>
             <parameter name="overrideGlAccountId"/>
-            <parameter name="amount" type="BigDecimal"/>
+            <parameter name="amount" type="BigDecimal"><description>Default to Invoice unpaidTotal.
+                Actual amountApplied will never be greater than Invoice unpaidTotal or Payment unappliedTotal.</description></parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="paymentApplicationId"/>
@@ -549,6 +543,16 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+
+            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="context"/>
+            <if condition="!amount"><set field="amount" from="unpaidTotal"/></if>
+            <set field="amountApplied" from="amount > unpaidTotal ? unpaidTotal : amount"/>
+
+            <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:paymentId]" out-map="context"/>
+            <if condition="amountApplied > unappliedTotal"><set field="amountApplied" from="unappliedTotal"/></if>
+
+            <if condition="amountApplied == 0.0"><return/></if>
+
             <if condition="payment.amountUomId != invoice.currencyUomId">
                 <return error="true" message="Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment has a different currency ${payment.amountUomId} than invoice ${invoice.currencyUomId}"/></if>
             <if condition="payment.fromPartyId != invoice.toPartyId">
@@ -560,12 +564,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <log level="warn" message="Not apply payment ${paymentId} in status ${payment.statusId} to invoice ${invoiceId}, must be in Delivered or Confirmed status"/>
                 <return message="Not applying payment ${paymentId} to invoice ${invoiceId}, payment must be Delivered or Confirmed to be applied"/>
             </if>
-
-            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="context"/>
-            <set field="amountApplied" from="amount > unpaidTotal ? unpaidTotal : amount"/>
-
-            <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:paymentId]" out-map="context"/>
-            <if condition="amountApplied > unappliedTotal"><set field="amountApplied" from="unappliedTotal"/></if>
 
             <service-call name="mantle.account.PaymentServices.check#InvoiceStatusForPayment" in-map="[invoiceId:invoiceId]"/>
 
@@ -586,6 +584,17 @@ along with this software (see the LICENSE.md file). If not, see
             </then><else>
                 <log message="After apply payment ${paymentId} to invoice ${invoiceId} not setting to Payment Sent/Received because unpaidTotal is ${unpaidTotal}"/>
             </else></if>
+        </actions>
+    </service>
+    <service verb="apply" noun="PaymentForInvoice">
+        <in-parameters><parameter name="paymentId" required="true"/></in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
+            <if condition="payment.forInvoiceId &amp;&amp; payment.statusId in ['PmntDelivered', 'PmntConfirmed'] &amp;&amp;
+                    (payment.unappliedTotal == null || payment.unappliedTotal > 0.0)">
+                <service-call name="mantle.account.PaymentServices.apply#InvoicePayment" out-map="context"
+                        in-map="[paymentId:paymentId, invoiceId:payment.forInvoiceId]"/>
+            </if>
         </actions>
     </service>
 

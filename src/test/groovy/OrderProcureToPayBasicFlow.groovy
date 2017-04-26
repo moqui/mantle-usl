@@ -949,7 +949,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 <mantle.product.asset.AssetDetail assetDetailId="55417" assetId="${equip2AssetId}" productId="EQUIP_1"
                         availableToPromiseDiff="-1" shipmentId="55402" effectiveDate="${effectiveTime}" quantityOnHandDiff="-1"/>
             </mantle.product.issuance.AssetIssuance>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55415" assetIssuanceId="55401" postedDate="${effectiveTime}"
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55414" assetIssuanceId="55401" postedDate="${effectiveTime}"
                     amountUomId="USD" isPosted="Y" assetId="${equip2AssetId}" acctgTransTypeEnumId="AttInventoryIssuance"
                     glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry amount="10000" productId="EQUIP_1" glAccountId="131100000"
@@ -970,7 +970,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     <mantle.order.OrderItemBilling orderItemBillingId="55406" orderItemSeqId="01" amount="11000"
                             quantity="1" orderId="55402" shipmentId="55402" assetIssuanceId="55401"/>
                 </mantle.account.invoice.InvoiceItem>
-                <mantle.ledger.transaction.AcctgTrans acctgTransId="55416" otherPartyId="CustJqp" postedDate="${effectiveTime}"
+                <mantle.ledger.transaction.AcctgTrans acctgTransId="55415" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                         amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttSalesInvoice" glFiscalTypeEnumId="GLFT_ACTUAL"
                         transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                     <mantle.ledger.transaction.AcctgTransEntry amount="10000" productId="EQUIP_1" glAccountId="253100000"
@@ -1027,7 +1027,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     comments="Test lost 10 DEMO_1_1" partyId="EX_JOHN_DOE">
                 <mantle.product.asset.AssetDetail assetDetailId="55418" assetId="DEMO_1_1A" productId="DEMO_1_1"
                         varianceReasonEnumId="InVrLost" availableToPromiseDiff="-10" quantityOnHandDiff="-10" effectiveDate="${effectiveTime}"/>
-                <mantle.ledger.transaction.AcctgTrans acctgTransId="55419" postedDate="${effectiveTime}" amountUomId="USD"
+                <mantle.ledger.transaction.AcctgTrans acctgTransId="55417" postedDate="${effectiveTime}" amountUomId="USD"
                         isPosted="Y" assetId="DEMO_1_1A" acctgTransTypeEnumId="AttInventoryVariance"
                         glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                     <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="75" productId="DEMO_1_1"
@@ -1063,7 +1063,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 <mantle.product.asset.AssetDetail assetDetailId="55419" assetId="55406" productId="DEMO_1_1"
                         varianceReasonEnumId="InVrFound" availableToPromiseDiff="10" quantityOnHandDiff="10" effectiveDate="${effectiveTime}"/>
             </mantle.product.asset.PhysicalInventory>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55420" postedDate="${effectiveTime}" amountUomId="USD"
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55418" postedDate="${effectiveTime}" amountUomId="USD"
                     isPosted="Y" assetId="55406" acctgTransTypeEnumId="AttInventoryVariance" physicalInventoryId="55401"
                     glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="75" productId="DEMO_1_1"
