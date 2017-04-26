@@ -36,6 +36,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="appliedPaymentsTotal" type="BigDecimal"/>
             <parameter name="unpaidTotal" type="BigDecimal"/>
             <parameter name="paymentApplicationList" type="List"><parameter name="paymentApplication" type="Map"/></parameter>
+            <parameter name="unappliedPaymentInfoList" type="List"><parameter name="unappliedPaymentInfo" type="Map"/></parameter>
             <parameter name="statusHistoryList" type="List"><parameter name="auditLog" type="Map"/></parameter>
 
             <parameter name="orderItemBillingList" type="List"><parameter name="orderItemBilling" type="Map"/></parameter>
@@ -51,10 +52,13 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
             <if condition="invoice == null"><return error="true" message="Invoice not found with ID ${invoiceId}"/></if>
 
+            <!-- calc invoice totals -->
+            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="context"/>
+
             <set field="editableStatusIds" from="new HashSet(['InvoiceInProcess', 'InvoiceIncoming', 'InvoiceReceived'])"/>
             <set field="invoiceEditable" from="editableStatusIds.contains(invoice.statusId)"/>
             <set field="recordPaymentStatusIds" from="new HashSet(['InvoiceInProcess', 'InvoiceFinalized', 'InvoiceSent', 'InvoiceWriteOff', 'InvoiceReceived', 'InvoiceApproved'])"/>
-            <set field="canRecordPayments" from="recordPaymentStatusIds.contains(invoice.statusId)"/>
+            <set field="canRecordPayments" from="recordPaymentStatusIds.contains(invoice.statusId) &amp;&amp; unpaidTotal > 0.0"/>
 
             <!-- see if from/to parties are internal orgs -->
             <entity-find-count entity-name="mantle.party.PartyRole" count-field="fromOrgInternalCount">
@@ -82,13 +86,24 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
             </if>
 
-            <!-- calc invoice totals -->
-            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="context"/>
-
             <!-- get payment applications -->
             <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
                 <econdition field-name="invoiceId"/><order-by field-name="appliedDate"/></entity-find>
+            <!-- get payments with reverse from/to parties that might be applied to this invoice -->
+            <entity-find entity-name="mantle.account.payment.Payment" list="unappliedPaymentList">
+                <econdition field-name="fromPartyId" from="invoice.toPartyId"/>
+                <econdition field-name="toPartyId" from="invoice.fromPartyId"/>
+                <econdition field-name="unappliedTotal" operator="greater" from="0.0"/>
+            </entity-find>
+            <set field="unappliedPaymentInfoList" from="[]"/>
+            <iterate list="unappliedPaymentList" entry="unappliedPayment">
+                <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:unappliedPayment.paymentId]" out-map="pmtTotal"/>
+                <set field="maxApplicableAmount" from="unpaidTotal"/>
+                <if condition="maxApplicableAmount > pmtTotal.unappliedTotal"><set field="maxApplicableAmount" from="pmtTotal.unappliedTotal"/></if>
+                <script>unappliedPaymentInfoList.add(pmtTotal + [payment:unappliedPayment, maxApplicableAmount:maxApplicableAmount])</script>
+            </iterate>
 
+            <!-- get status history -->
             <entity-find entity-name="moqui.entity.EntityAuditLog" list="statusHistoryList">
                 <econdition field-name="changedEntityName" value="mantle.account.invoice.Invoice"/>
                 <econdition field-name="changedFieldName" value="statusId"/>
