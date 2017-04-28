@@ -994,7 +994,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="fromTimestamp" from="ec.l10n.parseTimestamp(timePeriod.fromDate.toString() + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')"/>
             <set field="thruTimestamp" from="ec.l10n.parseTimestamp(timePeriod.thruDate.toString() + ' 23:59:59.999', 'yyyy-MM-dd HH:mm:ss.SSS')"/>
 
-            <log level="warn" message="Close period ${timePeriodId} ${timePeriod.periodName}"/>
+            <log level="info" message="Closing period ${timePeriodId} ${timePeriod.periodName}"/>
 
             <if condition="timePeriod.isClosed == 'Y'">
                 <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, already closed.</message></if>
@@ -1033,7 +1033,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="transactionDate" operator="less-equals" from="thruTimestamp"/>
             </entity-find-count>
             <if condition="unpostedTransCount &gt; 0">
-                <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, found ${unpostedTransCount} in period.</message></if>
+                <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, found ${unpostedTransCount} unposted transactions in period.</message></if>
 
             <!-- check errors before continuing -->
             <check-errors/>
@@ -1044,7 +1044,9 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- recalculate postedDebits, postedCredits, endingBalance on GlAccountOrgTimePeriod records for this time period -->
             <service-call name="mantle.ledger.LedgerServices.recalculate#GlAccountOrgTimePeriodAmounts"
-                    in-map="[timePeriodId:timePeriodId]" async="true"/>
+                    in-map="[timePeriodId:timePeriodId]"/>
+
+            <message>Closed period ${timePeriod.periodName} and verified summary totals</message>
         </actions>
     </service>
     <service verb="recalculate" noun="GlAccountOrgTimePeriodAmounts">
@@ -1072,6 +1074,14 @@ along with this software (see the LICENSE.md file). If not, see
             }
             </script>
 
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTransAndEntrySummary" list="allTransSummaryList">
+                <econdition field-name="organizationPartyId" from="timePeriod.partyId"/>
+                <econdition field-name="transactionDate" operator="greater-equals" from="fromTimestamp"/>
+                <econdition field-name="transactionDate" operator="less-equals" from="thruTimestamp"/>
+                <econdition field-name="isPosted" value="Y"/>
+                <select-field field-name="glAccountId,debitCreditFlag,amount"/>
+                <order-by field-name="glAccountId,debitCreditFlag"/>
+            </entity-find>
             <entity-find entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" list="glAccountOrgTimePeriodList" for-update="true">
                 <econdition field-name="organizationPartyId" from="timePeriod.partyId"/>
                 <econdition field-name="timePeriodId"/>
@@ -1079,14 +1089,7 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="glAccountOrgTimePeriodList" entry="glAccountOrgTimePeriod">
                 <set field="origGlAccountOrgTimePeriod" from="glAccountOrgTimePeriod.cloneValue()"/>
 
-                <entity-find entity-name="mantle.ledger.transaction.AcctgTransAndEntrySummary" list="transSummaryList">
-                    <!-- check above makes sure all transactions are posted, so don't filter by here -->
-                    <econdition field-name="organizationPartyId" from="timePeriod.partyId"/>
-                    <econdition field-name="transactionDate" operator="greater-equals" from="fromTimestamp"/>
-                    <econdition field-name="transactionDate" operator="less-equals" from="thruTimestamp"/>
-                    <econdition field-name="glAccountId" from="glAccountOrgTimePeriod.glAccountId"/>
-                    <select-field field-name="debitCreditFlag"/><select-field field-name="amount"/>
-                </entity-find>
+                <set field="transSummaryList" from="allTransSummaryList.cloneList().filterByAnd([glAccountId:glAccountOrgTimePeriod.glAccountId])"/>
                 <!-- should have at most 2 results, debitCreditFlag=D, debitCreditFlag=C -->
                 <set field="postedDebits" from="0"/><set field="postedCredits" from="0"/>
                 <iterate list="transSummaryList" entry="transSummary"><if condition="transSummary.debitCreditFlag == 'D'"><then>
@@ -1113,6 +1116,7 @@ along with this software (see the LICENSE.md file). If not, see
                                 (glAccountOrgTimePeriod.postedDebits?:0) + (glAccountOrgTimePeriod.postedCredits?:0)"/>
                     </else></if>
 
+                    <message>Found GlAccount Org TimePeriod (org ${glAccountOrgTimePeriod.organizationPartyId}, period ${glAccountOrgTimePeriod.timePeriodId}, account ${glAccountOrgTimePeriod.glAccountId}, root class ${rootGlAccountClassEnumId}) with wrong posted amounts; beginningBalance=${glAccountOrgTimePeriod.beginningBalance}, postedDebits was ${origGlAccountOrgTimePeriod.postedDebits} is ${glAccountOrgTimePeriod.postedDebits}, postedCredits was ${origGlAccountOrgTimePeriod.postedCredits} is ${glAccountOrgTimePeriod.postedCredits}, endingBalance was ${origGlAccountOrgTimePeriod.endingBalance} is ${glAccountOrgTimePeriod.endingBalance}</message>
                     <log level="info" message="In close#FinancialTimePeriod found GlAccountOrgTimePeriod (organizationPartyId=${glAccountOrgTimePeriod.organizationPartyId}, timePeriodId=${glAccountOrgTimePeriod.timePeriodId}, glAccountId=${glAccountOrgTimePeriod.glAccountId}, root class ${rootGlAccountClassEnumId}) with wrong posted amounts; beginningBalance=${glAccountOrgTimePeriod.beginningBalance}, postedDebits was ${origGlAccountOrgTimePeriod.postedDebits} is ${glAccountOrgTimePeriod.postedDebits}, postedCredits was ${origGlAccountOrgTimePeriod.postedCredits} is ${glAccountOrgTimePeriod.postedCredits}, endingBalance was ${origGlAccountOrgTimePeriod.endingBalance} is ${glAccountOrgTimePeriod.endingBalance}"/>
                     <!-- update the record -->
                     <set field="glAccountOrgTimePeriod.balanceLastUpdated" from="ec.user.nowTimestamp"/>
