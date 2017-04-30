@@ -76,12 +76,13 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="classInfoById" type="Map"/>
 
             <parameter name="netAssetTotalMap" type="Map"/>
+            <parameter name="equityTotalMap" type="Map"/>
             <parameter name="liabilityEquityTotalMap" type="Map"/>
         </out-parameters>
         <actions>
             <service-call name="mantle.ledger.LedgerReportServices.get#ReportBasicInfo" in-map="context" out-map="context"/>
 
-            <set field="classIdList" from="['ASSET', 'CONTRA_ASSET', 'LIABILITY', 'EQUITY']"/>
+            <!-- includes: 'ASSET', 'CONTRA_ASSET', 'LIABILITY', 'EQUITY', 'CONTRA_EQUITY' -->
             <!-- NOTE: should DISTRIBUTION go here, or somewhere else? -->
 
             <set field="classInfoById" from="[:]"/>
@@ -90,15 +91,23 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
                             classInfoById:classInfoById, glAccountClassEnumId:classId]"/>
             </iterate>
-            <!-- do this separately, only one that needs to be negated for this report -->
+            <!-- Contra Asset needs negateCredit -->
+            <iterate list="['CONTRA_ASSET']" entry="classId">
+                <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo"
+                        in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
+                            classInfoById:classInfoById, glAccountClassEnumId:classId, negateCredit:true]"/>
+            </iterate>
+            <!-- Contra Equity needs negateDebit -->
             <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassReportInfo"
                     in-map="[organizationPartyId:organizationPartyId, timePeriodIdList:timePeriodIdList,
-                        classInfoById:classInfoById, glAccountClassEnumId:'CONTRA_ASSET', negateCredit:true]"/>
+                            classInfoById:classInfoById, glAccountClassEnumId:'CONTRA_EQUITY', negateDebit:true]"/>
 
             <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netAssetTotalMap"
                     in-map="[classInfoById:classInfoById, classIdList:['ASSET', 'CONTRA_ASSET']]"/>
+            <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="equityTotalMap"
+                    in-map="[classInfoById:classInfoById, classIdList:['EQUITY', 'CONTRA_EQUITY']]"/>
             <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="liabilityEquityTotalMap"
-                    in-map="[classInfoById:classInfoById, classIdList:['LIABILITY', 'EQUITY']]"/>
+                    in-map="[classInfoById:classInfoById, classIdList:['LIABILITY', 'EQUITY', 'CONTRA_EQUITY']]"/>
         </actions>
     </service>
     <service verb="run" noun="IncomeStatement">
@@ -215,7 +224,6 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="netFinancingActivityMap" from="netFinancingActivityOut.totalPosted"/>
         </actions>
     </service>
-    <!-- TODO: need separate Owner Equity report? would have 'EQUITY', 'CONTRA_EQUITY' -->
     <service verb="run" noun="RetainedEarningsStatement">
         <implements service="mantle.ledger.LedgerReportServices.run#IncomeStatement"/>
         <out-parameters>
@@ -673,6 +681,102 @@ along with this software (see the LICENSE.md file). If not, see
                     <else><set field="accountResult.creditAmount" from="postedAmountSummary.amount"/></else>
                 </if>
             </iterate>
+        </actions>
+    </service>
+
+    <service verb="get" noun="AccountLedgerInfo">
+        <in-parameters>
+            <parameter name="glAccountId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="organizationPartyId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="timePeriod" type="Map"/>
+            <parameter name="fromTimestamp" type="Timestamp"/>
+            <parameter name="thruTimestamp" type="Timestamp"/>
+            <parameter name="organizationPartyId"/>
+            <parameter name="orgDetail" type="Map"/>
+            <parameter name="currencyUomId"/>
+            <parameter name="glAccountOrgTimePeriod" type="Map"/>
+            <parameter name="accountCode"/>
+            <parameter name="glAccount" type="Map"/>
+            <parameter name="isDebitAccount" type="Boolean"/>
+            <parameter name="entryInfoList" type="List"><parameter name="entryInfo" type="Map"/></parameter>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+            <set field="fromTimestamp" from="ec.l10n.parseTimestamp(timePeriod.fromDate.toString() + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')"/>
+            <set field="thruTimestamp" from="ec.l10n.parseTimestamp(timePeriod.thruDate.toString() + ' 23:59:59.999', 'yyyy-MM-dd HH:mm:ss.SSS')"/>
+            <set field="organizationPartyId" from="organizationPartyId ?: timePeriod.partyId"/>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="orgDetail">
+                <field-map field-name="partyId" from="organizationPartyId"/></entity-find-one>
+            <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
+                    in-map="[organizationPartyId:organizationPartyId]"/>
+            <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId ?: 'USD'"/>
+
+            <entity-find-one entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="glAccountOrgTimePeriod">
+                <field-map field-name="glAccountId"/><field-map field-name="timePeriodId"/>
+                <field-map field-name="organizationPartyId" from="organizationPartyId"/>
+            </entity-find-one>
+
+            <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount"><field-map field-name="glAccountId"/></entity-find-one>
+            <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
+                    in-map="[glAccountClassEnumId:glAccount.glAccountClassEnumId]"/>
+            <set field="isDebitAccount" from="rootGlAccountClassEnumId == 'DEBIT'"/>
+
+            <set field="glAccountCodeMask" from="partyAcctgPreference?.glAccountCodeMask ?: ec.user.getPreference('GlAccountCodeMask')"/>
+            <set field="accountCodeFormatter" from="masker(glAccountCodeMask, '0')"/><!-- will be null if no mask -->
+            <set field="accountCode" from="accountCodeFormatter != null ? accountCodeFormatter.valueToString(glAccount.accountCode) : glAccount.accountCode"/>
+
+            <!-- do the main query -->
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTransAndEntrySummary" list="acctgTransEntryList">
+                <econdition field-name="glAccountId"/>
+                <econdition field-name="transactionDate" operator="greater-equals" from="fromTimestamp"/>
+                <econdition field-name="transactionDate" operator="less-equals" from="thruTimestamp"/>
+                <econdition field-name="isPosted" value="Y"/>
+                <select-field field-name="acctgTransId,glJournalId,transactionDate,acctgTransTypeEnumId,description"/>
+                <select-field field-name="otherPartyId,invoiceId,paymentId,assetId,productId,acctgTransEntrySeqId"/>
+                <select-field field-name="amount,debitCreditFlag"/>
+                <order-by field-name="transactionDate,acctgTransId,acctgTransEntrySeqId"/>
+            </entity-find>
+
+            <!-- prep the list -->
+            <set field="balance" from="glAccountOrgTimePeriod.beginningBalance ?: 0.0"/>
+            <set field="entryInfoList" from="[[transactionDate:fromTimestamp, description:('BEGINNING ' + accountCode + ' ' + glAccount.accountName), balance:balance]]"/>
+            <set field="totalsRow" from="[description:'Totals']"/>
+            <iterate list="acctgTransEntryList" entry="acctgTransEntry">
+                <set field="rowMap" from="acctgTransEntry.getMap()"/>
+                <set field="rowMap.debit" from="rowMap.debitCreditFlag == 'D' ? rowMap.amount : 0.0"/>
+                <set field="rowMap.credit" from="rowMap.debitCreditFlag == 'C' ? rowMap.amount : 0.0"/>
+
+                <if condition="isDebitAccount">
+                    <then><set field="balance" from="balance + (rowMap.debitCreditFlag == 'D' ? rowMap.amount : -rowMap.amount)"/></then>
+                    <else><set field="balance" from="balance + (rowMap.debitCreditFlag == 'C' ? rowMap.amount : -rowMap.amount)"/></else>
+                </if>
+                <set field="rowMap.balance" from="balance"/>
+
+                <if condition="rowMap.invoiceId">
+                    <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice">
+                        <field-map field-name="invoiceId" from="rowMap.invoiceId"/></entity-find-one>
+                    <set field="rowMap.referenceNumber" from="invoice?.referenceNumber"/>
+                </if>
+                <if condition="rowMap.paymentId">
+                    <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment">
+                        <field-map field-name="paymentId" from="rowMap.paymentId"/></entity-find-one>
+                    <set field="rowMap.paymentRefNum" from="payment?.paymentRefNum"/>
+                </if>
+
+                <script>
+                    entryInfoList.add(rowMap)
+                    addToBigDecimalInMap('debit', rowMap.debit, totalsRow)
+                    addToBigDecimalInMap('credit', rowMap.credit, totalsRow)
+                </script>
+            </iterate>
+            <script>
+                entryInfoList.add([transactionDate:thruTimestamp, description:('ENDING ' + accountCode + ' ' + glAccount.accountName), balance:balance])
+                entryInfoList.add(totalsRow)
+            </script>
         </actions>
     </service>
 </services>
