@@ -195,6 +195,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="invoice.unpaidTotal" from="totalOut.unpaidTotal"/>
                 <entity-update value-field="invoice"/>
             </iterate>
+            <log level="warn" message="Calculated totals for ${invoiceList.size()} Invoices"/>
         </actions>
     </service>
 
@@ -296,14 +297,20 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="periodDays" type="Integer"/>
             <parameter name="asOfTimestamp" type="Timestamp"/>
             <parameter name="currencyUomId"/>
-
             <parameter name="receivableInfoList" type="List"><parameter name="receivableInfo" type="Map">
                 <parameter name="fromPartyId"/>
                 <parameter name="fromParty" type="Map"/>
                 <parameter name="fromContactInfo" type="Map"><description>From the mantle.party.ContactServices.get#PartyContactInfo service.</description></parameter>
                 <parameter name="logoImageLocation"/>
                 <parameter name="invoiceList"><parameter name="invoice" type="Map"/></parameter>
+                <parameter name="invoiceTotal" type="BigDecimal"/>
                 <parameter name="unpaidTotal" type="BigDecimal"/>
+
+                <parameter name="unappliedPaymentList" type="List"><parameter name="payment" type="Map"/></parameter>
+                <parameter name="paymentTotal" type="BigDecimal"/>
+                <parameter name="unappliedTotal" type="BigDecimal"/>
+                <parameter name="balanceDue" type="BigDecimal"/>
+
                 <parameter name="agingSummaryList"><parameter name="agingSummary" type="Map"/></parameter>
                 <parameter name="receivableAgingList"><parameter name="unpaidAmount" type="BigDecimal"/></parameter>
                 <parameter name="receivableDueAgingList"><parameter name="unpaidAmount" type="BigDecimal"/></parameter>
@@ -327,6 +334,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toBillingRep">
                 <field-map field-name="partyId" from="toBillingRelList?.first?.fromPartyId"/></entity-find-one>
 
+            <!-- all Invoices -->
             <entity-find entity-name="mantle.account.invoice.Invoice" list="allInvoiceList">
                 <econdition field-name="statusId" operator="in" value="InvoiceFinalized,InvoiceSent"/>
                 <econdition field-name="unpaidTotal" operator="not-equals" from="0.0"/>
@@ -334,11 +342,19 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="fromPartyId" ignore-if-empty="true"/>
                 <order-by field-name="invoiceDate"/>
             </entity-find>
-            <set field="fromPartyIds" from="new TreeSet(allInvoiceList*.fromPartyId)"/>
+            <!-- all Payments -->
+            <entity-find entity-name="mantle.account.payment.Payment" list="allUnappliedPaymentList">
+                <econdition field-name="fromPartyId" from="toPartyId"/>
+                <econdition field-name="toPartyId" from="fromPartyId" ignore-if-empty="true"/>
+                <econdition field-name="unappliedTotal" operator="not-equals" from="0.0"/>
+                <econdition field-name="statusId" operator="in" value="PmntDelivered,PmntConfirmed"/>
+            </entity-find>
+            <set field="fromPartyIds" from="new TreeSet(allInvoiceList*.fromPartyId + allUnappliedPaymentList*.toPartyId)"/>
 
             <set field="receivableInfoList" from="[]"/>
             <iterate list="fromPartyIds" entry="fromPartyId">
                 <set field="invoiceList" from="[]"/>
+                <set field="invoiceTotal" from="0.0"/>
                 <set field="unpaidTotal" from="0.0"/>
                 <set field="receivableAgingList" from="new ArrayList([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])"/>
                 <set field="receivableDueAgingList" from="new ArrayList([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])"/>
@@ -346,6 +362,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="invoice.fromPartyId != fromPartyId"><continue/></if>
                     <script><![CDATA[
                         invoiceList.add(invoice)
+                        invoiceTotal += invoice.invoiceTotal
                         unpaidTotal += invoice.unpaidTotal
                         if (invoice.currencyUomId) currencyUomId = invoice.currencyUomId
 
@@ -372,6 +389,16 @@ along with this software (see the LICENSE.md file). If not, see
                             periodRemaining:receivableAgingList[5], total:receivableAgingList.sum()])
                 </script>
 
+                <set field="unappliedPaymentList" from="[]"/>
+                <set field="paymentTotal" from="0.0"/>
+                <set field="unappliedTotal" from="0.0"/>
+                <iterate list="allUnappliedPaymentList" entry="payment">
+                    <if condition="payment.toPartyId != fromPartyId"><continue/></if>
+                    <script>unappliedPaymentList.add(payment)</script>
+                    <set field="paymentTotal" from="paymentTotal + (payment.amount ?: 0.0)"/>
+                    <set field="unappliedTotal" from="unappliedTotal + payment.unappliedTotal"/>
+                </iterate>
+
                 <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromParty">
                     <field-map field-name="partyId" from="fromPartyId"/></entity-find-one>
                 <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="fromContactInfo"
@@ -381,9 +408,11 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[partyId:fromPartyId, partyContentTypeEnumIdList:['PcntLogoImage', 'PcntPrimaryImage']]"/>
                 <set field="logoImageLocation" from="logoImageOut.contentLocation"/>
                 <script>receivableInfoList.add([fromPartyId:fromPartyId, fromParty:fromParty, fromContactInfo:fromContactInfo,
-                            logoImageLocation:logoImageOut.contentLocation, invoiceList:invoiceList, unpaidTotal:unpaidTotal,
-                            agingSummaryList:agingSummaryList, receivableAgingList:receivableAgingList,
-                            receivableDueAgingList:receivableDueAgingList])</script>
+                        logoImageLocation:logoImageOut.contentLocation, invoiceList:invoiceList,
+                        invoiceTotal:invoiceTotal, unpaidTotal:unpaidTotal, paymentTotal:paymentTotal, unappliedTotal:unappliedTotal,
+                        balanceDue:(unpaidTotal - unappliedTotal), unappliedPaymentList:unappliedPaymentList,
+                        agingSummaryList:agingSummaryList, receivableAgingList:receivableAgingList,
+                        receivableDueAgingList:receivableDueAgingList])</script>
             </iterate>
         </actions>
     </service>
@@ -641,7 +670,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="description" value="Invoice for Order ${orderId} part ${orderPartSeqId}"/>
             <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="context"
                     in-map="[invoiceTypeEnumId:'InvoiceSales', fromPartyId:orderPart.vendorPartyId, toPartyId:toPartyId,
-                        invoiceDate:invoiceDate, currencyUomId:orderHeader.currencyUomId,
+                        invoiceDate:invoiceDate, currencyUomId:orderHeader.currencyUomId, referenceNumber:orderPart.otherPartyOrderId,
                         description:description, systemMessageRemoteId:orderHeader.systemMessageRemoteId]"/>
 
             <if condition="partialOrderItemList"><then>
@@ -752,9 +781,8 @@ along with this software (see the LICENSE.md file). If not, see
 
                         <set field="description" value="Invoice for Order ${orderItem.orderId} part ${orderItem.orderPartSeqId} and Shipment ${shipmentId}"/>
                         <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="invOut"
-                                in-map="[invoiceTypeEnumId:'InvoiceSales',
-                                    fromPartyId:orderPart.vendorPartyId, toPartyId:toPartyId,
-                                    invoiceDate:invoiceDate, currencyUomId:orderHeader.currencyUomId,
+                                in-map="[invoiceTypeEnumId:'InvoiceSales', fromPartyId:orderPart.vendorPartyId, toPartyId:toPartyId,
+                                    invoiceDate:invoiceDate, currencyUomId:orderHeader.currencyUomId, referenceNumber:orderPart.otherPartyOrderId,
                                     description:description, systemMessageRemoteId:orderHeader.systemMessageRemoteId]"/>
                         <set field="invoiceId" from="invOut.invoiceId"/>
                         <script>invoiceIdByOrderPartIdMap.put(orderItem.orderId + ':' + orderItem.orderPartSeqId, invoiceId)</script>
@@ -1403,8 +1431,14 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <set field="updatedCount" from="0"/>
             <iterate list="invoiceList" entry="invoice">
-                <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoice.invoiceId]" out-map="totalOut"/>
-                <if condition="totalOut.unpaidTotal == 0.0">
+                <if condition="invoice.unpaidTotal == null">
+                    <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoice.invoiceId]" out-map="totalOut"/>
+                    <set field="invoice.invoiceTotal" from="totalOut.invoiceTotal"/>
+                    <set field="invoice.appliedPaymentsTotal" from="totalOut.appliedPaymentsTotal"/>
+                    <set field="invoice.unpaidTotal" from="totalOut.unpaidTotal"/>
+                    <entity-update value-field="invoice"/>
+                </if>
+                <if condition="invoice.unpaidTotal == 0.0">
                     <set field="invoice.statusId" value="InvoicePmtRecvd"/>
                     <entity-update value-field="invoice"/>
                     <set field="updatedCount" from="updatedCount + 1"/>
