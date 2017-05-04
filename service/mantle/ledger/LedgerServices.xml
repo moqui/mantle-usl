@@ -174,17 +174,63 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
     <service verb="find" noun="RootGlAccountClassEnum">
         <in-parameters><parameter name="glAccountClassEnumId"/></in-parameters>
-        <out-parameters><parameter name="rootGlAccountClassEnumId"/></out-parameters>
+        <out-parameters>
+            <parameter name="rootGlAccountClassEnumId"/>
+            <parameter name="ancestorClassEnumIdSet" type="Set"/>
+        </out-parameters>
         <actions>
             <entity-find-one entity-name="moqui.basic.Enumeration" value-field="enumValue" cache="true">
-                <field-map field-name="enumId" from="glAccountClassEnumId"/>
-            </entity-find-one>
+                <field-map field-name="enumId" from="glAccountClassEnumId"/></entity-find-one>
+
+            <set field="ancestorClassEnumIdSet" from="new HashSet([glAccountClassEnumId])"/>
             <if condition="enumValue.parentEnumId"><then>
-                <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
+                <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="nestOut"
                         in-map="[glAccountClassEnumId:enumValue.parentEnumId]"/>
+                <set field="rootGlAccountClassEnumId" from="nestOut.rootGlAccountClassEnumId"/>
+                <script>ancestorClassEnumIdSet.addAll(nestOut.ancestorClassEnumIdSet)</script>
             </then><else>
                 <set field="rootGlAccountClassEnumId" from="glAccountClassEnumId"/>
             </else></if>
+        </actions>
+    </service>
+    <service verb="set" noun="GlAccountFlags">
+        <description>Called by EECA rule on create and update of GlAccount.
+            If isDebit or isTemporary are not set determine based on class and save them on the entityValue to be persisted.</description>
+        <in-parameters>
+            <parameter name="entityValue" type="Map"/>
+        </in-parameters>
+        <actions>
+            <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
+                    in-map="[glAccountClassEnumId:entityValue.glAccountClassEnumId]"/>
+
+            <set field="entityValue.isDebit" from="'DEBIT'.equals(rootGlAccountClassEnumId) ? 'Y' : 'N'"/>
+            <set field="entityValue.isTemporary" value="N"/>
+            <set field="tempAccountClasses" from="['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE', 'NON_OP_EXPENSE']"/>
+            <iterate list="tempAccountClasses" entry="tempAccountClass">
+                <if condition="ancestorClassEnumIdSet.contains(tempAccountClass)">
+                    <set field="entityValue.isTemporary" value="Y"/><break/></if>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="set" noun="MissingGlAccountFlags">
+        <actions>
+            <entity-find entity-name="mantle.ledger.account.GlAccount" list="glAccountList">
+                <econditions combine="or"><econdition field-name="isDebit" operator="is-not-null"/>
+                    <econdition field-name="isTemporary" operator="is-not-null"/></econditions>
+            </entity-find>
+            <iterate list="glAccountList" entry="glAccount">
+                <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
+                        in-map="[glAccountClassEnumId:glAccount.glAccountClassEnumId]"/>
+
+                <set field="glAccount.isDebit" from="'DEBIT'.equals(rootGlAccountClassEnumId) ? 'Y' : 'N'"/>
+                <set field="glAccount.isTemporary" value="N"/>
+                <set field="tempAccountClasses" from="['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE', 'NON_OP_EXPENSE']"/>
+                <iterate list="tempAccountClasses" entry="tempAccountClass">
+                    <if condition="ancestorClassEnumIdSet.contains(tempAccountClass)">
+                        <set field="glAccount.isTemporary" value="Y"/><break/></if>
+                </iterate>
+                <entity-update value-field="glAccount"/>
+            </iterate>
         </actions>
     </service>
     <service verb="expand" noun="ParentOrganizationList">
@@ -435,7 +481,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="glAccountById" from="new TreeMap()"/>
             <iterate list="acctgTransEntryList" entry="acctgTransEntry">
                 <set field="glAccount" from="glAccountById.get(acctgTransEntry.glAccountId)"/>
-                <if condition="!glAccount">
+                <if condition="glAccount == null">
                     <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" cache="true">
                         <field-map field-name="glAccountId" from="acctgTransEntry.glAccountId"/></entity-find-one>
                     <script>glAccountById.put(acctgTransEntry.glAccountId, glAccount)</script>
@@ -554,10 +600,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="postingAmount" from="0.0"/>
                     <!-- have already iterated through the entry list once, all GlAccount records should be there -->
                     <set field="glAccount" from="glAccountById.get(acctgTransEntry.glAccountId)"/>
-                    <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
-                                  in-map="[glAccountClassEnumId:glAccount.glAccountClassEnumId]"/>
 
-                    <if condition="rootGlAccountClassEnumId == 'DEBIT'"><then>
+                    <if condition="glAccount.isDebit.equals('Y')"><then>
                         <set field="postingAmount" from="acctgTransEntry.debitCreditFlag == 'D' ? acctgTransEntry.amount : -acctgTransEntry.amount"/>
                     </then><else>
                         <set field="postingAmount" from="acctgTransEntry.debitCreditFlag == 'D' ? -acctgTransEntry.amount : acctgTransEntry.amount"/>
@@ -1120,11 +1164,9 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <if condition="glAccountOrgTimePeriod.isModified()">
                     <!-- set the endingBalance based on beginningBalance, postedDebits, postedCredits -->
-                    <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount">
+                    <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" cache="true">
                         <field-map field-name="glAccountId" from="glAccountOrgTimePeriod.glAccountId"/></entity-find-one>
-                    <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
-                            in-map="[glAccountClassEnumId:glAccount.glAccountClassEnumId]"/>
-                    <if condition="rootGlAccountClassEnumId == 'DEBIT'"><then>
+                    <if condition="glAccount.isDebit.equals('Y')"><then>
                         <set field="glAccountOrgTimePeriod.endingBalance" from="(glAccountOrgTimePeriod.beginningBalance?:0.0) +
                                 (glAccountOrgTimePeriod.postedDebits?:0.0) - (glAccountOrgTimePeriod.postedCredits?:0.0)"/>
                     </then><else>
@@ -1132,8 +1174,8 @@ along with this software (see the LICENSE.md file). If not, see
                                 (glAccountOrgTimePeriod.postedDebits?:0.0) + (glAccountOrgTimePeriod.postedCredits?:0.0)"/>
                     </else></if>
 
-                    <message>Found GlAccount Org TimePeriod (org ${glAccountOrgTimePeriod.organizationPartyId}, period ${glAccountOrgTimePeriod.timePeriodId}, account ${glAccountOrgTimePeriod.glAccountId}, root class ${rootGlAccountClassEnumId}) with wrong posted amounts; beginningBalance=${glAccountOrgTimePeriod.beginningBalance}, postedDebits was ${origGlAccountOrgTimePeriod.postedDebits} is ${glAccountOrgTimePeriod.postedDebits}, postedCredits was ${origGlAccountOrgTimePeriod.postedCredits} is ${glAccountOrgTimePeriod.postedCredits}, endingBalance was ${origGlAccountOrgTimePeriod.endingBalance} is ${glAccountOrgTimePeriod.endingBalance}</message>
-                    <log level="info" message="In close#FinancialTimePeriod found GlAccountOrgTimePeriod (organizationPartyId=${glAccountOrgTimePeriod.organizationPartyId}, timePeriodId=${glAccountOrgTimePeriod.timePeriodId}, glAccountId=${glAccountOrgTimePeriod.glAccountId}, root class ${rootGlAccountClassEnumId}) with wrong posted amounts; beginningBalance=${glAccountOrgTimePeriod.beginningBalance}, postedDebits was ${origGlAccountOrgTimePeriod.postedDebits} is ${glAccountOrgTimePeriod.postedDebits}, postedCredits was ${origGlAccountOrgTimePeriod.postedCredits} is ${glAccountOrgTimePeriod.postedCredits}, endingBalance was ${origGlAccountOrgTimePeriod.endingBalance} is ${glAccountOrgTimePeriod.endingBalance}"/>
+                    <message>Found GlAccount Org TimePeriod (org ${glAccountOrgTimePeriod.organizationPartyId}, period ${glAccountOrgTimePeriod.timePeriodId}, account ${glAccountOrgTimePeriod.glAccountId}, is debit ${glAccount.isDebit}) with wrong posted amounts; beginningBalance=${glAccountOrgTimePeriod.beginningBalance}, postedDebits was ${origGlAccountOrgTimePeriod.postedDebits} is ${glAccountOrgTimePeriod.postedDebits}, postedCredits was ${origGlAccountOrgTimePeriod.postedCredits} is ${glAccountOrgTimePeriod.postedCredits}, endingBalance was ${origGlAccountOrgTimePeriod.endingBalance} is ${glAccountOrgTimePeriod.endingBalance}</message>
+                    <log level="info" message="In close#FinancialTimePeriod found GlAccountOrgTimePeriod (organizationPartyId=${glAccountOrgTimePeriod.organizationPartyId}, timePeriodId=${glAccountOrgTimePeriod.timePeriodId}, glAccountId=${glAccountOrgTimePeriod.glAccountId}, is debit ${glAccount.isDebit}) with wrong posted amounts; beginningBalance=${glAccountOrgTimePeriod.beginningBalance}, postedDebits was ${origGlAccountOrgTimePeriod.postedDebits} is ${glAccountOrgTimePeriod.postedDebits}, postedCredits was ${origGlAccountOrgTimePeriod.postedCredits} is ${glAccountOrgTimePeriod.postedCredits}, endingBalance was ${origGlAccountOrgTimePeriod.endingBalance} is ${glAccountOrgTimePeriod.endingBalance}"/>
                     <!-- update the record -->
                     <set field="glAccountOrgTimePeriod.balanceLastUpdated" from="ec.user.nowTimestamp"/>
                     <entity-update value-field="glAccountOrgTimePeriod"/>
@@ -1227,7 +1269,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if no organizationPartyId specified find all orgs from open fiscal TimePeriods list (will only have single if specified) -->
             <set field="organizationPartyIds" from="new TreeSet(timePeriodList*.partyId)"/>
             <set field="noTxOrgPartyIds" from="new TreeSet()"/>
-            <set field="glAccountRootClassMap" from="[:]"/>
+            <set field="glAccountIsDebitMap" from="[:]"/>
 
             <log level="info" message="[Recalculate GlAccountOrgSummaries] lastRunTime ${lastRunTime}, ${timePeriodList.size()} time periods, organizations: ${organizationPartyIds}"/>
 
@@ -1265,13 +1307,12 @@ along with this software (see the LICENSE.md file). If not, see
                         Map transSummary = transSummaryList.get(i)
                         String glAccountId = transSummary.glAccountId
 
-                        String rootGlAccountClassEnumId = (String) glAccountRootClassMap.get(glAccountId)
-                        if (!rootGlAccountClassEnumId) {
+                        String isDebit = (String) glAccountIsDebitMap.get(glAccountId)
+                        if (!isDebit) {
                             Map glAccount = ec.entity.find("mantle.ledger.account.GlAccount").condition("glAccountId", glAccountId).useCache(true).one()
-                            rootGlAccountClassEnumId = ec.service.sync().name("mantle.ledger.LedgerServices.find#RootGlAccountClassEnum")
-                                    .parameter("glAccountClassEnumId", glAccount.glAccountClassEnumId).call().rootGlAccountClassEnumId
+                            isDebit = glAccount.isDebit
                         }
-                        boolean isDebitAccount = 'DEBIT'.equals(rootGlAccountClassEnumId)
+                        boolean isDebitAccount = isDebit.equals('Y')
 
                         Map debitTransSummary = null
                         boolean isCredit = transSummary.debitCreditFlag == 'C'
@@ -1363,13 +1404,12 @@ along with this software (see the LICENSE.md file). If not, see
                         ArrayList<Map> transSummaryList = (ArrayList<Map>) byIdEntry.value
                         String glAccountId = (String) byIdEntry.key
 
-                        String rootGlAccountClassEnumId = (String) glAccountRootClassMap.get(glAccountId)
-                        if (!rootGlAccountClassEnumId) {
+                        String isDebit = (String) glAccountIsDebitMap.get(glAccountId)
+                        if (!isDebit) {
                             Map glAccount = ec.entity.find("mantle.ledger.account.GlAccount").condition("glAccountId", glAccountId).useCache(true).one()
-                            rootGlAccountClassEnumId = ec.service.sync().name("mantle.ledger.LedgerServices.find#RootGlAccountClassEnum")
-                                    .parameter("glAccountClassEnumId", glAccount.glAccountClassEnumId).call().rootGlAccountClassEnumId
+                            isDebit = glAccount.isDebit
                         }
-                        boolean isDebitAccount = 'DEBIT'.equals(rootGlAccountClassEnumId)
+                        boolean isDebitAccount = isDebit.equals('Y')
 
                         Map glAccountOrgTimePeriod = ec.entity.find("mantle.ledger.account.GlAccountOrgTimePeriod")
                                 .condition("glAccountId", glAccountId).condition("organizationPartyId", organizationPartyId)

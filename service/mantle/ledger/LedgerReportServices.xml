@@ -96,13 +96,13 @@ along with this software (see the LICENSE.md file). If not, see
 
             <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="grossProfitOnSalesOut"
                           in-map="[classInfoById:classInfoById, classIdList:grossProfitClassIdList]"/>
-            <set field="grossProfitOnSalesMap" from="grossProfitOnSalesOut.totalPosted"/>
+            <set field="grossProfitOnSalesMap" from="grossProfitOnSalesOut.totalPostedNoClosing"/>
             <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netOperatingIncomeOut"
                           in-map="[classInfoById:classInfoById, classIdList:netOpIncomeClassIdList]"/>
-            <set field="netOperatingIncomeMap" from="netOperatingIncomeOut.totalPosted"/>
+            <set field="netOperatingIncomeMap" from="netOperatingIncomeOut.totalPostedNoClosing"/>
             <service-call name="mantle.ledger.LedgerReportServices.get#GlAccountClassInfoSums" out-map="netIncomeOut"
                           in-map="[classInfoById:classInfoById, classIdList:classIdList]"/>
-            <set field="netIncomeMap" from="netIncomeOut.totalPosted"/>
+            <set field="netIncomeMap" from="netIncomeOut.totalPostedNoClosing"/>
         </actions>
     </service>
     <service verb="run" noun="BalanceSheet">
@@ -499,16 +499,20 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="totalPosted" type="Map"/>
+            <parameter name="totalPostedNoClosing" type="Map"/>
             <parameter name="totalBalance" type="Map"/>
         </out-parameters>
         <actions>
             <set field="totalPosted" from="[:]"/>
+            <set field="totalPostedNoClosing" from="[:]"/>
             <set field="totalBalance" from="[:]"/>
             <iterate list="classIdList" entry="classId">
                 <set field="classInfo" from="classInfoById.get(classId)"/>
                 <if condition="!classInfo"><continue/></if>
                 <iterate list="classInfo.totalPostedByTimePeriod" entry="totalPostedVal" key="timePeriodId">
                     <script>addToBigDecimalInMap(timePeriodId, totalPostedVal, totalPosted)</script></iterate>
+                <iterate list="classInfo.totalPostedNoClosingByTimePeriod" entry="totalPostedVal" key="timePeriodId">
+                    <script>addToBigDecimalInMap(timePeriodId, totalPostedVal, totalPostedNoClosing)</script></iterate>
                 <iterate list="classInfo.totalBalanceByTimePeriod" entry="totalBalanceVal" key="timePeriodId">
                     <script>addToBigDecimalInMap(timePeriodId, totalBalanceVal, totalBalance)</script></iterate>
             </iterate>
@@ -529,8 +533,7 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="moqui.basic.Enumeration" value-field="classEnum">
                 <field-map field-name="enumId" from="glAccountClassEnumId"/></entity-find-one>
-            <if condition="!classEnum">
-                <return error="true" message="Enumeration not found for ${glAccountClassEnumId}"/></if>
+            <if condition="!classEnum"><return error="true" message="Enumeration not found for ${glAccountClassEnumId}"/></if>
 
             <set field="negate" from="false"/>
             <if condition="negateDebit || negateCredit">
@@ -545,31 +548,42 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- now one TimePeriod per org, so leave this out to get children too: <econdition field-name="organizationPartyId"/> -->
                 <econdition field-name="timePeriodId" operator="in" from="timePeriodIdList"/>
                 <econdition field-name="glAccountClassEnumId"/>
+                <select-field field-name="timePeriodId,glAccountId,accountCode,accountName,isDebit"/>
+                <select-field field-name="beginningBalance,endingBalance,postedDebitsNoClosing,postedCreditsNoClosing"/>
             </entity-find>
             <set field="balanceByTimePeriod" from="[:]"/>
             <set field="postedByTimePeriod" from="[:]"/>
+            <set field="postedNoClosingByTimePeriod" from="[:]"/>
             <set field="glAccountInfoMap" from="[:]"/>
             <iterate list="glAccountDetailList" entry="glAccountDetail">
                 <script>
+                    boolean isDebit = glAccountDetail.isDebit.equals('Y')
                     BigDecimal balance = glAccountDetail.endingBalance ?: 0.0
                     BigDecimal posted = balance - (glAccountDetail.beginningBalance ?: 0.0)
-                    if (negate) { balance = -balance; posted = -posted }
+                    BigDecimal postedNoClosing = isDebit ? ((glAccountDetail.postedDebitsNoClosing ?: 0.0) - (glAccountDetail.postedCreditsNoClosing ?: 0.0)) :
+                            ((glAccountDetail.postedCreditsNoClosing ?: 0.0) - (glAccountDetail.postedDebitsNoClosing ?: 0.0))
+                    if (negate) { balance = -balance; posted = -posted; postedNoClosing = -postedNoClosing }
 
                     addToBigDecimalInMap(glAccountDetail.timePeriodId, balance, balanceByTimePeriod)
                     addToBigDecimalInMap(glAccountDetail.timePeriodId, posted, postedByTimePeriod)
+                    addToBigDecimalInMap(glAccountDetail.timePeriodId, postedNoClosing, postedNoClosingByTimePeriod)
                     addToBigDecimalInMap('ALL', balance, balanceByTimePeriod)
                     addToBigDecimalInMap('ALL', posted, postedByTimePeriod)
+                    addToBigDecimalInMap('ALL', postedNoClosing, postedNoClosingByTimePeriod)
 
                     Map glAccountInfo = glAccountInfoMap.get(glAccountDetail.accountCode)
-                    if (!glAccountInfo) {
+                    if (glAccountInfo == null) {
                         glAccountInfo = [accountCode:glAccountDetail.accountCode, accountName:glAccountDetail.accountName,
-                                         glAccountId:glAccountDetail.glAccountId, balanceByTimePeriod:[:], postedByTimePeriod:[:]]
+                                glAccountId:glAccountDetail.glAccountId, balanceByTimePeriod:[:], postedByTimePeriod:[:],
+                                postedNoClosingByTimePeriod:[:]]
                         glAccountInfoMap.put(glAccountDetail.accountCode, glAccountInfo)
                     }
                     glAccountInfo.balanceByTimePeriod.put(glAccountDetail.timePeriodId, balance)
                     glAccountInfo.postedByTimePeriod.put(glAccountDetail.timePeriodId, posted)
+                    glAccountInfo.postedNoClosingByTimePeriod.put(glAccountDetail.timePeriodId, postedNoClosing)
                     addToBigDecimalInMap('ALL', balance, glAccountInfo.balanceByTimePeriod)
                     addToBigDecimalInMap('ALL', posted, glAccountInfo.postedByTimePeriod)
+                    addToBigDecimalInMap('ALL', postedNoClosing, glAccountInfo.postedNoClosingByTimePeriod)
                 </script>
             </iterate>
             <set field="glAccountInfoList" from="new ArrayList(glAccountInfoMap.values())"/>
@@ -579,6 +593,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="childClassInfoList" from="[]"/>
             <set field="childBalanceByTimePeriod" from="[:]"/>
             <set field="childPostedByTimePeriod" from="[:]"/>
+            <set field="childPostedNoClosingByTimePeriod" from="[:]"/>
             <entity-find entity-name="moqui.basic.Enumeration" list="childEnumList">
                 <econdition field-name="parentEnumId" from="glAccountClassEnumId"/>
                 <order-by field-name="sequenceNum,description"/>
@@ -596,24 +611,31 @@ along with this software (see the LICENSE.md file). If not, see
                         addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.childBalanceByTimePeriod[timePeriodId], childBalanceByTimePeriod)
                         addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.postedByTimePeriod[timePeriodId], childPostedByTimePeriod)
                         addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.childPostedByTimePeriod[timePeriodId], childPostedByTimePeriod)
+                        addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.postedNoClosingByTimePeriod[timePeriodId], childPostedNoClosingByTimePeriod)
+                        addToBigDecimalInMap(timePeriodId, childOut.classInfoMap.childPostedNoClosingByTimePeriod[timePeriodId], childPostedNoClosingByTimePeriod)
 
                         addToBigDecimalInMap('ALL', childBalanceByTimePeriod[timePeriodId], childBalanceByTimePeriod)
                         addToBigDecimalInMap('ALL', childPostedByTimePeriod[timePeriodId], childPostedByTimePeriod)
+                        addToBigDecimalInMap('ALL', childPostedNoClosingByTimePeriod[timePeriodId], childPostedNoClosingByTimePeriod)
                     </script>
                 </iterate>
             </iterate>
 
             <set field="totalBalanceByTimePeriod" from="[:]"/>
             <set field="totalPostedByTimePeriod" from="[:]"/>
+            <set field="totalPostedNoClosingByTimePeriod" from="[:]"/>
             <iterate list="timePeriodIdList" entry="timePeriodId">
                 <script>
                     addToBigDecimalInMap(timePeriodId, balanceByTimePeriod[timePeriodId], totalBalanceByTimePeriod)
                     addToBigDecimalInMap(timePeriodId, childBalanceByTimePeriod[timePeriodId], totalBalanceByTimePeriod)
                     addToBigDecimalInMap(timePeriodId, postedByTimePeriod[timePeriodId], totalPostedByTimePeriod)
                     addToBigDecimalInMap(timePeriodId, childPostedByTimePeriod[timePeriodId], totalPostedByTimePeriod)
+                    addToBigDecimalInMap(timePeriodId, postedNoClosingByTimePeriod[timePeriodId], totalPostedNoClosingByTimePeriod)
+                    addToBigDecimalInMap(timePeriodId, childPostedNoClosingByTimePeriod[timePeriodId], totalPostedNoClosingByTimePeriod)
 
                     addToBigDecimalInMap('ALL', totalBalanceByTimePeriod[timePeriodId], totalBalanceByTimePeriod)
                     addToBigDecimalInMap('ALL', totalPostedByTimePeriod[timePeriodId], totalPostedByTimePeriod)
+                    addToBigDecimalInMap('ALL', totalPostedNoClosingByTimePeriod[timePeriodId], totalPostedNoClosingByTimePeriod)
                 </script>
             </iterate>
 
@@ -621,8 +643,9 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="classInfoMap" from="[glAccountClassEnumId:glAccountClassEnumId, className:classEnum.description,
                     balanceByTimePeriod:balanceByTimePeriod, childBalanceByTimePeriod:childBalanceByTimePeriod,
                     postedByTimePeriod:postedByTimePeriod, childPostedByTimePeriod:childPostedByTimePeriod,
+                    postedNoClosingByTimePeriod:postedNoClosingByTimePeriod, childPostedNoClosingByTimePeriod:childPostedNoClosingByTimePeriod,
                     totalBalanceByTimePeriod:totalBalanceByTimePeriod, totalPostedByTimePeriod:totalPostedByTimePeriod,
-                    childClassInfoList:childClassInfoList,
+                    totalPostedNoClosingByTimePeriod:totalPostedNoClosingByTimePeriod, childClassInfoList:childClassInfoList,
                     glAccountDetailList:glAccountDetailList, glAccountInfoList:glAccountInfoList]"/>
 
             <if condition="classInfoById != null"><script>classInfoById.put(glAccountClassEnumId, classInfoMap)</script></if>
@@ -728,10 +751,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="organizationPartyId" from="organizationPartyId"/>
             </entity-find-one>
 
-            <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount"><field-map field-name="glAccountId"/></entity-find-one>
-            <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
-                    in-map="[glAccountClassEnumId:glAccount.glAccountClassEnumId]"/>
-            <set field="isDebitAccount" from="rootGlAccountClassEnumId == 'DEBIT'"/>
+            <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" cache="true">
+                <field-map field-name="glAccountId"/></entity-find-one>
+            <set field="isDebitAccount" from="glAccount.isDebit.equals('Y')"/>
 
             <set field="glAccountCodeMask" from="partyAcctgPreference?.glAccountCodeMask ?: ec.user.getPreference('GlAccountCodeMask')"/>
             <set field="accountCodeFormatter" from="masker(glAccountCodeMask, '0')"/><!-- will be null if no mask -->
