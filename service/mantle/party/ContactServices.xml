@@ -538,6 +538,14 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="contactMechId" required="true"/>
         </out-parameters>
         <actions>
+            <entity-find entity-name="mantle.party.contact.PartyContactMech" list="origPcmList">
+                <!-- NOTE: do without <date-filter/>, allow if address has ever been associated with Party -->
+                <econdition field-name="partyId"/><econdition field-name="contactMechId"/>
+            </entity-find>
+            <if condition="!origPcmList"><return error="true" message="Postal Address ${contactMechId} is not associated with party ${partyId} and purpose ${contactMechPurposeId?:'N/A'}, not updating."/></if>
+            <filter-map-list list="origPcmList"><date-filter/></filter-map-list>
+            <if condition="contactMechPurposeId"><filter-map-list list="origPcmList"><field-map field-name="contactMechPurposeId"/></filter-map-list></if>
+
             <set field="origContactMechId" from="contactMechId"/>
             <entity-find-one entity-name="mantle.party.contact.PostalAddress" value-field="origPostalAddress"/>
 
@@ -562,15 +570,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="newPostalAddress" from="origPostalAddress.cloneValue()"/>
             <entity-set value-field="newPostalAddress" include="nonpk" set-if-empty="true"/>
             <if condition="newPostalAddress == origPostalAddress">
-                <log level="info" message="No fields were different for Postal Address with ID [${contactMechId}], not updating."/>
-                <return/>
-            </if>
-
-            <entity-find entity-name="mantle.party.contact.PartyContactMech" list="origPcmList">
-                <!-- NOTE: do without <date-filter/>, allow if address has ever been associated with Party -->
-                <econdition field-name="partyId"/><econdition field-name="contactMechId"/>
-            </entity-find>
-            <if condition="!origPcmList"><return error="true" message="Postal Address ${contactMechId} is not associated with party ${partyId} and purpose ${contactMechPurposeId?:'N/A'}, not updating."/></if>
+                <return message="No fields were different for Postal Address ${contactMechId}, not updating."/></if>
 
             <!-- at this point we have at least one PCM, so create the updated PostalAddress and then expire/update the PCMs -->
             <entity-find-one entity-name="mantle.party.contact.ContactMech" value-field="newContactMech"/>
@@ -588,8 +588,6 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="newPostalAddress.shipGatewayAddressId" from="null"/>
             <entity-create value-field="newPostalAddress"/>
 
-            <filter-map-list list="origPcmList"><date-filter/></filter-map-list>
-            <if condition="contactMechPurposeId"><filter-map-list list="origPcmList"><field-map field-name="contactMechPurposeId"/></filter-map-list></if>
             <iterate list="origPcmList" entry="origPcm">
                 <!-- expire origPcm, create new for new contactMechId -->
                 <if condition="expireCurrent">
@@ -705,6 +703,9 @@ along with this software (see the LICENSE.md file). If not, see
                 // if contains dot and dash replace all dot with dash
                 if (contactNumber.contains('.') && contactNumber.contains('-')) contactNumber.replaceAll(/\./, "-")
                 contactNumber = contactNumber.trim().replaceAll("--", "-")
+                // if no dots or dashes and length is 7 add a dash after 3 digits
+                if (!contactNumber.contains('-') && !contactNumber.contains('.') && contactNumber.length() == 7)
+                    contactNumber = contactNumber.substring(0, 3) + '-' + contactNumber.substring(3)
             }
         ]]></script></actions>
     </service>
@@ -770,22 +771,30 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <service-call name="mantle.party.ContactServices.clean#TelecomNumber" in-map="context" out-map="context"/>
 
+            <entity-find entity-name="mantle.party.contact.PartyContactMech" list="origPcmList">
+                <!-- NOTE: do without <date-filter/>, allow if number has ever been associated with Party -->
+                <econdition field-name="partyId"/><econdition field-name="contactMechId"/>
+            </entity-find>
+            <if condition="!origPcmList"><return error="true" message="Telecom Number with ID ${contactMechId} is not associated with party ID ${partyId} and purpose ${contactMechPurposeId?:'N/A'}, not updating."/></if>
+            <filter-map-list list="origPcmList"><date-filter/></filter-map-list>
+            <if condition="contactMechPurposeId"><filter-map-list list="origPcmList"><field-map field-name="contactMechPurposeId"/></filter-map-list></if>
+
             <entity-find-one entity-name="mantle.party.contact.TelecomNumber" value-field="origTelecomNumber"/>
             <script>newTelecomNumber = origTelecomNumber.cloneValue()</script>
             <entity-set value-field="newTelecomNumber" include="nonpk"/>
             <if condition="newTelecomNumber == origTelecomNumber">
-                <log level="info" message="No fields were different for Telecom Number with ID [${contactMechId}], not updating."/>
-                <return error="false"/>
-            </if>
-
-            <entity-find entity-name="mantle.party.contact.PartyContactMech" list="origPcmList">
-                <!-- NOTE: do without <date-filter/>, allow if number has ever been associated with Party -->
-                <econdition field-name="partyId" from="partyId"/>
-                <econdition field-name="contactMechId" from="contactMechId"/>
-                <econdition field-name="contactMechPurposeId" from="contactMechPurposeId" ignore-if-empty="true"/>
-            </entity-find>
-            <if condition="!origPcmList">
-                <return error="true" message="Telecom Number with ID [${contactMechId}] is not associated with party ID [${partyId}] and purpose [${contactMechPurposeId?:'N/A'}], not updating."/>
+                <!-- see if extension, comments or allowSolicitation changed on origPcm -->
+                <set field="updatedPcm" from="false"/>
+                <iterate list="origPcmList" entry="origPcm">
+                    <set field="newPcm" from="origPcm.cloneValue()"/>
+                    <entity-set value-field="newPcm" include="nonpk"/>
+                    <if condition="newPcm != origPcm">
+                        <entity-update value-field="newPcm"/>
+                        <set field="updatedPcm" from="true"/>
+                    </if>
+                </iterate>
+                <if condition="!updatedPcm"><message>No fields were different for Phone Number ${contactMechId}, not updating.</message></if>
+                <return/>
             </if>
 
             <!-- at this point we have at least one PCM, so create the updated TelecomNumber and then expire/update the PCMs -->
@@ -802,7 +811,6 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="newTelecomNumber.contactMechId" from="newContactMech.contactMechId"/>
             <entity-create value-field="newTelecomNumber"/>
 
-            <filter-map-list list="origPcmList"><date-filter/></filter-map-list>
             <iterate list="origPcmList" entry="origPcm">
                 <!-- expire origPcm, create new for new contactMechId -->
                 <set field="origPcm.thruDate" from="ec.user.nowTimestamp"/>
@@ -900,9 +908,6 @@ along with this software (see the LICENSE.md file). If not, see
             this creates a new one and associates it with the Party, expiring the old associations (PartyContactMech
             records).
 
-            One or both of contactMechId and contactMechPurposeId must be specified. If a contactMechPurposeId is passed
-            in it will only update for that purpose, otherwise it will update for all purposes.
-
             NOTE: if you want to update the ContactMech.paymentFraudEvidenceId or .trustLevelEnumId fields, do so
             with the update#ContactMechMutable service (do not use this service).
         </description>
@@ -911,35 +916,26 @@ along with this software (see the LICENSE.md file). If not, see
             <auto-parameters entity-name="mantle.party.contact.PartyContactMech" include="nonpk"/>
 
             <parameter name="partyId" required="true"/>
-            <parameter name="contactMechId"/>
+            <parameter name="contactMechId" required="true"/>
             <parameter name="contactMechPurposeId"/>
         </in-parameters>
         <out-parameters>
             <parameter name="contactMechId" required="true"/>
         </out-parameters>
         <actions>
-            <if condition="!contactMechId &amp;&amp; !contactMechPurposeId">
-                <return error="false" message="Must specify either a contactMechId or contactMechPurposeId (or both)."/>
-            </if>
-
             <entity-find entity-name="mantle.party.contact.PartyContactMech" list="origPcmList">
                 <!-- NOTE: do without <date-filter/>, allow if contact mech has ever been associated with Party -->
-                <econdition field-name="partyId" from="partyId"/>
-                <econdition field-name="contactMechId" from="contactMechId" ignore-if-empty="true"/>
-                <econdition field-name="contactMechPurposeId" from="contactMechPurposeId" ignore-if-empty="true"/>
+                <econdition field-name="partyId"/><econdition field-name="contactMechId"/>
             </entity-find>
-            <if condition="!origPcmList">
-                <log level="info" message="Contact Info with ID [${contactMechId}] is not associated with party ID [${partyId}] and purpose [${contactMechPurposeId?:'N/A'}], not updating."/>
-                <return/>
-            </if>
-            <set field="contactMechId" from="contactMechId ?: origPcmList[0].contactMechId"/>
+            <if condition="!origPcmList"><return error="true" message="Contact Info with ID ${contactMechId} is not associated with party ID ${partyId} and purpose ${contactMechPurposeId?:'N/A'}, not updating."/></if>
+            <filter-map-list list="origPcmList"><date-filter/></filter-map-list>
+            <if condition="contactMechPurposeId"><filter-map-list list="origPcmList"><field-map field-name="contactMechPurposeId"/></filter-map-list></if>
 
             <entity-find-one entity-name="mantle.party.contact.ContactMech" value-field="origContactMech"/>
             <script>newContactMech = origContactMech.cloneValue()</script>
             <set field="newContactMech.infoString" from="infoString"/>
             <if condition="newContactMech == origContactMech">
-                <return error="false" message="No fields were different for Contact Info with ID [${contactMechId}], not updating."/>
-            </if>
+                <return message="No fields were different for ${contactMechId}, not updating."/></if>
 
             <!-- at this point we have at least one PCM, so create the updated ContactMech and then expire/update the PCMs -->
             <set field="newContactMech.replacesContactMechId" from="newContactMech.contactMechId"/>
@@ -951,7 +947,6 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-sequenced-id-primary value-field="newContactMech"/>
             <entity-create value-field="newContactMech"/>
 
-            <filter-map-list list="origPcmList"><date-filter/></filter-map-list>
             <iterate list="origPcmList" entry="origPcm">
                 <!-- expire origPcm, create new for new contactMechId -->
                 <set field="origPcm.thruDate" from="ec.user.nowTimestamp"/>
@@ -970,7 +965,7 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <!-- ========== Mutable Fields Update Service ========== -->
+    <!-- ========== Mutable ContactMech Fields ========== -->
 
     <service verb="update" noun="ContactMechMutable">
         <description>Update mutable fields on ContactMech</description>
@@ -986,8 +981,34 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <!-- ========== Delete for Party Service ========== -->
+    <!-- ========== Party ContactMech General Services ========== -->
 
+    <service verb="store" noun="PartyContactMech">
+        <description>Add a purpose for a Party to an existing ContactMech or change a Party's purpose for a ContactMech</description>
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="contactMechId" required="true"/>
+            <parameter name="contactMechPurposeId" required="true"/>
+            <auto-parameters entity-name="mantle.party.contact.PartyContactMech" include="nonpk"/>
+            <parameter name="oldContactMechPurposeId"/>
+            <parameter name="updateButton"><description>For convenience in forms, name the submit button for update 'updateButton'</description></parameter>
+            <parameter name="expireOld" type="Boolean" default="updateButton as boolean"/>
+        </in-parameters>
+        <actions>
+            <if condition="expireOld"><script><![CDATA[
+                def ef = ec.entity.find("mantle.party.contact.PartyContactMech").condition([partyId: partyId, contactMechId: contactMechId])
+                if (oldContactMechPurposeId) ef.condition("contactMechPurposeId", oldContactMechPurposeId)
+                ef.updateAll([thruDate: ec.user.getNowTimestamp()])
+            ]]></script></if>
+            <!-- to avoid duplicate purposes only add if missing -->
+            <entity-find entity-name="mantle.party.contact.PartyContactMech" list="pcmList">
+                <date-filter/><econdition field-name="partyId"/><econdition field-name="contactMechId"/>
+                <econdition field-name="contactMechPurposeId"/>
+            </entity-find>
+            <if condition="!pcmList"><service-call name="create#mantle.party.contact.PartyContactMech" in-map="context"/></if>
+            <!-- TODO: handle other PartyContactMech fields that are not passed to service like extension, comments, allowSolicitation; copy from old or something? -->
+        </actions>
+    </service>
     <service verb="delete" noun="PartyContactMech">
         <description>Delete any type of ContactMech from a Party, actually expires PartyContactMech record (does not
             delete it, and does not delete ContactMech or related records).</description>
@@ -996,12 +1017,10 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="contactMechId" required="true"/>
             <parameter name="contactMechPurposeId"/>
         </in-parameters>
-        <actions>
-            <script><![CDATA[
-                def ef = ec.entity.find("mantle.party.contact.PartyContactMech").condition([partyId: partyId, contactMechId: contactMechId])
-                if (contactMechPurposeId) ef.condition("contactMechPurposeId", contactMechPurposeId)
-                ef.updateAll([thruDate: ec.user.getNowTimestamp()])
-            ]]></script>
-        </actions>
+        <actions><script><![CDATA[
+            def ef = ec.entity.find("mantle.party.contact.PartyContactMech").condition([partyId: partyId, contactMechId: contactMechId])
+            if (contactMechPurposeId) ef.condition("contactMechPurposeId", contactMechPurposeId)
+            ef.updateAll([thruDate: ec.user.getNowTimestamp()])
+        ]]></script></actions>
     </service>
 </services>
