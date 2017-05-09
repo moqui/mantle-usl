@@ -719,7 +719,7 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="get" noun="AccountLedgerInfo">
         <in-parameters>
-            <parameter name="glAccountId" required="true"/>
+            <parameter name="glAccountIdList" type="List" required="true"/>
             <parameter name="timePeriodId" required="true"/>
             <parameter name="organizationPartyId"/>
         </in-parameters>
@@ -730,11 +730,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="organizationPartyId"/>
             <parameter name="orgDetail" type="Map"/>
             <parameter name="currencyUomId"/>
-            <parameter name="glAccountOrgTimePeriod" type="Map"/>
-            <parameter name="glAccountId"/>
-            <parameter name="accountCode"/>
-            <parameter name="glAccount" type="Map"/>
-            <parameter name="isDebitAccount" type="Boolean"/>
+            <parameter name="glAccountOrgTimePeriodList" type="List"><parameter name="glAccountOrgTimePeriod" type="Map"/></parameter>
             <parameter name="entryInfoList" type="List"><parameter name="entryInfo" type="Map"/></parameter>
         </out-parameters>
         <actions>
@@ -749,67 +745,74 @@ along with this software (see the LICENSE.md file). If not, see
                     in-map="[organizationPartyId:organizationPartyId]"/>
             <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId ?: 'USD'"/>
 
-            <entity-find-one entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" value-field="glAccountOrgTimePeriod">
-                <field-map field-name="glAccountId"/><field-map field-name="timePeriodId"/>
-                <field-map field-name="organizationPartyId" from="organizationPartyId"/>
-            </entity-find-one>
 
-            <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" cache="true">
-                <field-map field-name="glAccountId"/></entity-find-one>
-            <set field="isDebitAccount" from="glAccount.isDebit.equals('Y')"/>
-
-            <set field="glAccountCodeMask" from="partyAcctgPreference?.glAccountCodeMask ?: ec.user.getPreference('GlAccountCodeMask')"/>
-            <set field="accountCodeFormatter" from="masker(glAccountCodeMask, '0')"/><!-- will be null if no mask -->
-            <set field="accountCode" from="accountCodeFormatter != null ? accountCodeFormatter.valueToString(glAccount.accountCode) : glAccount.accountCode"/>
-
-            <!-- do the main query -->
-            <entity-find entity-name="mantle.ledger.transaction.AcctgTransAndEntrySummary" list="acctgTransEntryList">
-                <econdition field-name="glAccountId"/>
-                <econdition field-name="transactionDate" operator="greater-equals" from="fromTimestamp"/>
-                <econdition field-name="transactionDate" operator="less-equals" from="thruTimestamp"/>
-                <econdition field-name="isPosted" value="Y"/>
-                <select-field field-name="acctgTransId,glJournalId,transactionDate,acctgTransTypeEnumId,description"/>
-                <select-field field-name="otherPartyId,invoiceId,paymentId,assetId,productId,acctgTransEntrySeqId"/>
-                <select-field field-name="amount,debitCreditFlag"/>
-                <order-by field-name="transactionDate,acctgTransId,acctgTransEntrySeqId"/>
+            <entity-find entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" list="glAccountOrgTimePeriodList">
+                <econdition field-name="glAccountId" operator="in" from="glAccountIdList"/>
+                <econdition field-name="timePeriodId"/><econdition field-name="organizationPartyId"/>
+                <order-by field-name="glAccountId"/>
             </entity-find>
 
-            <!-- prep the list -->
-            <set field="balance" from="glAccountOrgTimePeriod.beginningBalance ?: 0.0"/>
-            <set field="entryInfoList" from="[[transactionDate:fromTimestamp, description:('BEGINNING ' + accountCode + ' ' + glAccount.accountName), balance:balance]]"/>
-            <set field="totalsRow" from="[description:'Totals (' + acctgTransEntryList.size() + ' transactions)']"/>
-            <iterate list="acctgTransEntryList" entry="acctgTransEntry">
-                <set field="rowMap" from="acctgTransEntry.getMap()"/>
-                <set field="rowMap.debit" from="rowMap.debitCreditFlag == 'D' ? rowMap.amount : 0.0"/>
-                <set field="rowMap.credit" from="rowMap.debitCreditFlag == 'C' ? rowMap.amount : 0.0"/>
+            <set field="entryInfoList" from="[]"/>
+            <iterate list="glAccountOrgTimePeriodList" entry="glAccountOrgTimePeriod">
+                <set field="glAccountId" from="glAccountOrgTimePeriod.glAccountId"/>
+                <entity-find-one entity-name="mantle.ledger.account.GlAccount" value-field="glAccount" cache="true">
+                    <field-map field-name="glAccountId"/></entity-find-one>
+                <set field="isDebitAccount" from="glAccount.isDebit.equals('Y')"/>
 
-                <if condition="isDebitAccount">
-                    <then><set field="balance" from="balance + (rowMap.debitCreditFlag == 'D' ? rowMap.amount : -rowMap.amount)"/></then>
-                    <else><set field="balance" from="balance + (rowMap.debitCreditFlag == 'C' ? rowMap.amount : -rowMap.amount)"/></else>
-                </if>
-                <set field="rowMap.balance" from="balance"/>
+                <set field="glAccountCodeMask" from="partyAcctgPreference?.glAccountCodeMask ?: ec.user.getPreference('GlAccountCodeMask')"/>
+                <set field="accountCodeFormatter" from="masker(glAccountCodeMask, '0')"/><!-- will be null if no mask -->
+                <set field="accountCode" from="accountCodeFormatter != null ? accountCodeFormatter.valueToString(glAccount.accountCode) : glAccount.accountCode"/>
 
-                <if condition="rowMap.invoiceId">
-                    <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice">
-                        <field-map field-name="invoiceId" from="rowMap.invoiceId"/></entity-find-one>
-                    <set field="rowMap.referenceNumber" from="invoice?.referenceNumber"/>
-                </if>
-                <if condition="rowMap.paymentId">
-                    <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment">
-                        <field-map field-name="paymentId" from="rowMap.paymentId"/></entity-find-one>
-                    <set field="rowMap.paymentRefNum" from="payment?.paymentRefNum"/>
-                </if>
+                <!-- do the main query -->
+                <entity-find entity-name="mantle.ledger.transaction.AcctgTransAndEntrySummary" list="acctgTransEntryList">
+                    <econdition field-name="glAccountId"/>
+                    <econdition field-name="transactionDate" operator="greater-equals" from="fromTimestamp"/>
+                    <econdition field-name="transactionDate" operator="less-equals" from="thruTimestamp"/>
+                    <econdition field-name="isPosted" value="Y"/>
+                    <select-field field-name="acctgTransId,glJournalId,transactionDate,acctgTransTypeEnumId,description"/>
+                    <select-field field-name="otherPartyId,invoiceId,paymentId,assetId,productId,acctgTransEntrySeqId"/>
+                    <select-field field-name="amount,debitCreditFlag"/>
+                    <order-by field-name="transactionDate,acctgTransId,acctgTransEntrySeqId"/>
+                </entity-find>
 
+                <!-- prep the list -->
+                <set field="balance" from="glAccountOrgTimePeriod.beginningBalance ?: 0.0"/>
+                <script>entryInfoList.add([transactionDate:fromTimestamp, description:(accountCode + ' ' + glAccount.accountName + ' (BEGIN)'), balance:balance])</script>
+                <set field="totalsRow" from="[description:(accountCode + ' Totals (' + acctgTransEntryList.size() + ' transactions)')]"/>
+                <iterate list="acctgTransEntryList" entry="acctgTransEntry">
+                    <set field="rowMap" from="acctgTransEntry.getMap()"/>
+                    <set field="rowMap.debit" from="rowMap.debitCreditFlag == 'D' ? rowMap.amount : 0.0"/>
+                    <set field="rowMap.credit" from="rowMap.debitCreditFlag == 'C' ? rowMap.amount : 0.0"/>
+
+                    <if condition="isDebitAccount">
+                        <then><set field="balance" from="balance + (rowMap.debitCreditFlag == 'D' ? rowMap.amount : -rowMap.amount)"/></then>
+                        <else><set field="balance" from="balance + (rowMap.debitCreditFlag == 'C' ? rowMap.amount : -rowMap.amount)"/></else>
+                    </if>
+                    <set field="rowMap.balance" from="balance"/>
+
+                    <if condition="rowMap.invoiceId">
+                        <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice">
+                            <field-map field-name="invoiceId" from="rowMap.invoiceId"/></entity-find-one>
+                        <set field="rowMap.referenceNumber" from="invoice?.referenceNumber"/>
+                    </if>
+                    <if condition="rowMap.paymentId">
+                        <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment">
+                            <field-map field-name="paymentId" from="rowMap.paymentId"/></entity-find-one>
+                        <set field="rowMap.paymentRefNum" from="payment?.paymentRefNum"/>
+                    </if>
+
+                    <script>
+                        entryInfoList.add(rowMap)
+                        addToBigDecimalInMap('debit', rowMap.debit, totalsRow)
+                        addToBigDecimalInMap('credit', rowMap.credit, totalsRow)
+                    </script>
+                </iterate>
                 <script>
-                    entryInfoList.add(rowMap)
-                    addToBigDecimalInMap('debit', rowMap.debit, totalsRow)
-                    addToBigDecimalInMap('credit', rowMap.credit, totalsRow)
+                    entryInfoList.add(totalsRow)
+                    entryInfoList.add([transactionDate:thruTimestamp, description:(accountCode + ' ' + glAccount.accountName + ' (END)'), balance:balance])
+                    if (glAccountOrgTimePeriod_has_next) entryInfoList.add([:])
                 </script>
             </iterate>
-            <script>
-                entryInfoList.add([transactionDate:thruTimestamp, description:('ENDING ' + accountCode + ' ' + glAccount.accountName), balance:balance])
-                entryInfoList.add(totalsRow)
-            </script>
         </actions>
     </service>
 </services>
