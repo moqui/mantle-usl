@@ -68,7 +68,7 @@ class AssetReservationMultipleThreads extends Specification {
     def "Asset reservation from multiple threads"() {
         def numThreads = 5
         def latch = new CountDownLatch(5)
-        def list = []
+        def list = Collections.synchronizedList(new LinkedList<>())
 
         when:
         EntityList assetList = gec.entity.find("mantle.product.asset.Asset").condition("productId", "DEMO_1_1").list()
