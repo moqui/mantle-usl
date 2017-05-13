@@ -68,7 +68,7 @@ class WorkPlanToCashBasicFlow extends Specification {
     def "create Vendor"() {
         when:
         vendorResult = ec.service.sync().name("mantle.party.PartyServices.create#Organization")
-                .parameters([roleTypeId:'VendorBillFrom', organizationName:'Test Vendor']).call()
+                .parameters([roleTypeId:'Vendor', organizationName:'Test Vendor']).call()
         Map vendorCiResult = ec.service.sync().name("mantle.party.ContactServices.store#PartyContactInfo")
                 .parameters([partyId:vendorResult.partyId, postalContactMechPurposeId:'PostalPayment',
                     telecomContactMechPurposeId:'PhonePayment', emailContactMechPurposeId:'EmailPayment', countryGeoId:'USA',
@@ -85,7 +85,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                     username:'vendor.rep', newPassword:'moqui1!', newPasswordVerify:'moqui1!', loginAfterCreate:'false']).call()
         Map repRelResult = ec.service.sync().name("create#mantle.party.PartyRelationship")
                 .parameters([relationshipTypeEnumId:'PrtRepresentative', fromPartyId:vendorRepResult.partyId,
-                    fromRoleTypeId:'Manager', toPartyId:vendorResult.partyId, toRoleTypeId:'VendorBillFrom',
+                    fromRoleTypeId:'Manager', toPartyId:vendorResult.partyId, toRoleTypeId:'Vendor',
                     fromDate:ec.user.nowTimestamp]).call()
 
         // NOTE: this has sequenced IDs so is sensitive to run order!
@@ -93,7 +93,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.party.Party partyId="${vendorResult.partyId}" partyTypeEnumId="PtyOrganization"/>
             <mantle.party.Organization partyId="${vendorResult.partyId}" organizationName="Test Vendor"/>
             <mantle.party.PartyRole partyId="${vendorResult.partyId}" roleTypeId="OrgInternal"/>
-            <mantle.party.PartyRole partyId="${vendorResult.partyId}" roleTypeId="VendorBillFrom"/>
+            <mantle.party.PartyRole partyId="${vendorResult.partyId}" roleTypeId="Vendor"/>
 
             <mantle.party.contact.ContactMech contactMechId="${vendorCiResult.postalContactMechId}" contactMechTypeEnumId="CmtPostalAddress"/>
             <mantle.party.contact.PostalAddress contactMechId="${vendorCiResult.postalContactMechId}" address1="51 W. Center St." unitNumber="1234"
@@ -147,7 +147,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 contactMechId="${vendorRepResult.emailContactMechId}" contactMechPurposeId="EmailPrimary" fromDate="${effectiveTime}"/>
             <mantle.party.PartyRelationship partyRelationshipId="${repRelResult.partyRelationshipId}"
                 relationshipTypeEnumId="PrtRepresentative" fromPartyId="${vendorRepResult.partyId}" fromRoleTypeId="Manager"
-                toPartyId="${vendorResult.partyId}" toRoleTypeId="VendorBillFrom" fromDate="${effectiveTime}"/>
+                toPartyId="${vendorResult.partyId}" toRoleTypeId="Vendor" fromDate="${effectiveTime}"/>
 
             <moqui.entity.EntityAuditLog auditHistorySeqId="55900" changedEntityName="moqui.security.UserAccount"
                 changedFieldName="username" pkPrimaryValue="${vendorRepResult.userId}" newValueText="vendor.rep" changedDate="${effectiveTime}"
@@ -173,7 +173,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                     username:'worker', newPassword:'moqui1!', newPasswordVerify:'moqui1!', loginAfterCreate:'false']).call()
         Map workerRelResult = ec.service.sync().name("create#mantle.party.PartyRelationship")
                 .parameters([relationshipTypeEnumId:'PrtAgent', fromPartyId:workerResult.partyId,
-                    fromRoleTypeId:'Worker', toPartyId:vendorResult.partyId, toRoleTypeId:'VendorBillFrom',
+                    fromRoleTypeId:'Worker', toPartyId:vendorResult.partyId, toRoleTypeId:'Vendor',
                     fromDate:ec.user.nowTimestamp]).call()
         // Rate Amounts
         clientRateResult = ec.service.sync().name("create#mantle.humanres.rate.RateAmount")
@@ -204,7 +204,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 contactMechId="${workerResult.emailContactMechId}" contactMechPurposeId="EmailPrimary" fromDate="${effectiveTime}"/>
             <mantle.party.PartyRelationship partyRelationshipId="${workerRelResult.partyRelationshipId}"
                 relationshipTypeEnumId="PrtAgent" fromPartyId="${workerResult.partyId}" fromRoleTypeId="Worker"
-                toPartyId="${vendorResult.partyId}" toRoleTypeId="VendorBillFrom" fromDate="${effectiveTime}"/>
+                toPartyId="${vendorResult.partyId}" toRoleTypeId="Vendor" fromDate="${effectiveTime}"/>
 
             <mantle.humanres.rate.RateAmount rateAmountId="${clientRateResult.rateAmountId}" rateTypeEnumId="RatpStandard"
                 ratePurposeEnumId="RaprClient" timePeriodUomId="TF_hr" partyId="${workerResult.partyId}"
@@ -232,7 +232,7 @@ class WorkPlanToCashBasicFlow extends Specification {
     def "create Client"() {
         when:
         clientResult = ec.service.sync().name("mantle.party.PartyServices.create#Organization")
-                .parameters([roleTypeId:'CustomerBillTo', organizationName:'Test Client']).call()
+                .parameters([roleTypeId:'Customer', organizationName:'Test Client']).call()
         Map clientCiResult = ec.service.sync().name("mantle.party.ContactServices.store#PartyContactInfo")
                 .parameters([partyId:clientResult.partyId, postalContactMechPurposeId:'PostalBilling',
                     telecomContactMechPurposeId:'PhoneBilling', emailContactMechPurposeId:'EmailBilling', countryGeoId:'USA',
@@ -245,14 +245,14 @@ class WorkPlanToCashBasicFlow extends Specification {
                     username:'client.rep', newPassword:'moqui1!', newPasswordVerify:'moqui1!', loginAfterCreate:'false']).call()
         Map repRelResult = ec.service.sync().name("create#mantle.party.PartyRelationship")
                 .parameters([relationshipTypeEnumId:'PrtRepresentative', fromPartyId:clientRepResult.partyId,
-                    fromRoleTypeId:'ClientBilling', toPartyId:clientResult.partyId, toRoleTypeId:'CustomerBillTo',
+                    fromRoleTypeId:'ClientBilling', toPartyId:clientResult.partyId, toRoleTypeId:'Customer',
                     fromDate:ec.user.nowTimestamp]).call()
 
         // NOTE: this has sequenced IDs so is sensitive to run order!
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.party.Party partyId="${clientResult.partyId}" partyTypeEnumId="PtyOrganization"/>
             <mantle.party.Organization partyId="${clientResult.partyId}" organizationName="Test Client"/>
-            <mantle.party.PartyRole partyId="${clientResult.partyId}" roleTypeId="CustomerBillTo"/>
+            <mantle.party.PartyRole partyId="${clientResult.partyId}" roleTypeId="Customer"/>
 
             <mantle.party.contact.ContactMech contactMechId="${clientCiResult.postalContactMechId}" contactMechTypeEnumId="CmtPostalAddress"/>
             <mantle.party.contact.PostalAddress contactMechId="${clientCiResult.postalContactMechId}"
@@ -282,7 +282,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 contactMechId="${clientRepResult.emailContactMechId}" contactMechPurposeId="EmailPrimary" fromDate="${effectiveTime}"/>
             <mantle.party.PartyRelationship partyRelationshipId="${repRelResult.partyRelationshipId}"
                 relationshipTypeEnumId="PrtRepresentative" fromPartyId="${clientRepResult.partyId}"
-                fromRoleTypeId="ClientBilling" toPartyId="${clientResult.partyId}" toRoleTypeId="CustomerBillTo" fromDate="${effectiveTime}"/>
+                fromRoleTypeId="ClientBilling" toPartyId="${clientResult.partyId}" toRoleTypeId="Customer" fromDate="${effectiveTime}"/>
 
             <moqui.entity.EntityAuditLog auditHistorySeqId="55906" changedEntityName="moqui.security.UserAccount"
                 changedFieldName="username" pkPrimaryValue="55902" newValueText="client.rep" changedDate="${effectiveTime}"
@@ -318,8 +318,8 @@ class WorkPlanToCashBasicFlow extends Specification {
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.work.effort.WorkEffort workEffortId="TEST" workEffortTypeEnumId="WetProject" statusId="WeInProgress" workEffortName="Test Project"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="EX_JOHN_DOE" roleTypeId="Manager" fromDate="${effectiveTime}" statusId="WeptAssigned"/>
-            <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${clientResult.partyId}" roleTypeId="CustomerBillTo" fromDate="${effectiveTime}"/>
-            <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${vendorResult.partyId}" roleTypeId="VendorBillFrom" fromDate="${effectiveTime}"/>
+            <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${clientResult.partyId}" roleTypeId="Customer" fromDate="${effectiveTime}"/>
+            <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${vendorResult.partyId}" roleTypeId="Vendor" fromDate="${effectiveTime}"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${workerResult.partyId}" roleTypeId="Assignee"
                 fromDate="1383282000000" statusId="WeptAssigned" emplPositionClassId="Programmer"/>
 
@@ -582,7 +582,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.request.RequestParty requestId="${createReqResult.requestId}" partyId="${workerResult.partyId}"
                 roleTypeId="Assignee" fromDate="${effectiveTime}"/>
             <mantle.request.RequestParty requestId="${createReqResult.requestId}" partyId="${clientResult.partyId}"
-                roleTypeId="CustomerBillTo" fromDate="${effectiveTime}"/>
+                roleTypeId="Customer" fromDate="${effectiveTime}"/>
             <mantle.work.effort.WorkEffort workEffortId="${createReqTskResult.workEffortId}" rootWorkEffortId="TEST"
                 workEffortTypeEnumId="WetTask" purposeEnumId="WepTask" resolutionEnumId="WerCompleted" statusId="WeComplete"
                 priority="7" workEffortName="Test Request 1 Task" estimatedCompletionDate="1384495200000"
