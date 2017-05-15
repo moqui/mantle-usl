@@ -69,10 +69,6 @@ if (contactNumber) { ef.condition(ec.entity.conditionFactory.makeCondition("cont
 if (emailAddress) { ef.condition(ec.entity.conditionFactory.makeCondition("emailAddress", EntityCondition.LIKE, (leadingWildcard ? "%" : "") + emailAddress + "%").ignoreCase()) }
 
 if (assetSerialNumber) { ef.condition(ec.entity.conditionFactory.makeCondition("assetSerialNumber", EntityCondition.LIKE, (leadingWildcard ? "%" : "") + assetSerialNumber + "%").ignoreCase()) }
-if (contactOwnerPartyId) {
-    ef.condition("contactOwnerPartyId", contactOwnerPartyId)
-    ef.condition("contactRelationshipTypeEnumId", "PrtContact")
-}
 
 if (orderByField) {
     if (orderByField.contains("combinedName")) {
