@@ -16,11 +16,16 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="clone" noun="WorkEffort">
         <in-parameters>
+            <parameter name="workEffortId"><description>The new workEffortId unless no baseWorkEffortId is specified then this is
+                the base and a sequenced ID will be generated for the new ID</description></parameter>
             <parameter name="baseWorkEffortId" required="true" default="workEffortId"/>
-            <parameter name="workEffortId"/>
             <auto-parameters entity-name="mantle.work.effort.WorkEffort" include="nonpk"/>
             <parameter name="statusId" default-value="WeInPlanning"/>
             <parameter name="deepClone" type="Boolean" default="false"><description>If true recursively clone all children.</description></parameter>
+            <parameter name="deepIdIsPrefix" type="Boolean" default="false">
+                <description>If true starting workEffortId is used as a prefix for all child IDs, for project/etc cloning.</description></parameter>
+            <parameter name="idPrefix"/>
+            <parameter name="baseIdPrefix"/>
             <parameter name="clearDates" type="Boolean" default="false"/>
             <parameter name="copyAssetAssign" type="Boolean" default="false"/>
             <parameter name="copyAssetNeeded" type="Boolean" default="true"/>
@@ -38,7 +43,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort">
                 <field-map field-name="workEffortId" from="baseWorkEffortId"/></entity-find-one>
 
-            <entity-set value-field="workEffort" include="nonpk"/>
+            <entity-set value-field="workEffort" include="nonpk" set-if-empty="false"/>
             <if condition="clearDates">
                 <!-- set the fields even if null, don't do this for other fields -->
                 <set field="workEffort.estimatedStartDate" from="estimatedStartDate"/>
@@ -46,9 +51,24 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="workEffort.actualStartDate" from="actualStartDate"/>
                 <set field="workEffort.actualCompletionDate" from="actualCompletionDate"/>
             </if>
-
-            <set field="workEffort.workEffortId" from="null"/>
-            <entity-sequenced-id-primary value-field="workEffort"/>
+            <if condition="workEffortId &amp;&amp; workEffortId != baseWorkEffortId"><then>
+                <set field="workEffort.workEffortId" from="workEffortId"/>
+            </then><else>
+                <if condition="idPrefix"><then>
+                    <if condition="baseIdPrefix &amp;&amp; baseWorkEffortId.startsWith(baseIdPrefix)"><then>
+                        <set field="idRest" from="baseWorkEffortId.substring(baseIdPrefix.length()+1)"/>
+                        <if condition="idRest &amp;&amp; idRest.charAt(0) == '-'"><set field="idRest" from="idRest.substring(1)"/></if>
+                        <set field="workEffort.workEffortId" value="${idPrefix}-${idRest}"/>
+                    </then><else>
+                        <set field="seqName" value="Project_${idPrefix}"/>
+                        <set field="workEffort.workEffortId" value="${idPrefix}-${ec.entity.sequencedIdPrimary(seqName, null, null)}"/>
+                    </else></if>
+                </then><else>
+                    <set field="workEffort.workEffortId" from="null"/>
+                    <entity-sequenced-id-primary value-field="workEffort"/>
+                </else></if>
+            </else></if>
+            <!-- <log level="warn" message="Cloning ${baseWorkEffortId} to ${workEffort.workEffortId}"/> -->
             <entity-create value-field="workEffort"/>
             <set field="workEffortId" from="workEffort.workEffortId"/>
 
@@ -79,7 +99,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <if condition="copyContent">
                 <entity-find entity-name="mantle.work.effort.WorkEffortContent" list="valueList">
-                    <date-filter/><econdition field-name="workEffortId" from="baseWorkEffortId"/></entity-find>
+                    <econdition field-name="workEffortId" from="baseWorkEffortId"/></entity-find>
                 <iterate list="valueList" entry="value">
                     <set field="value.workEffortContentId" from="null"/>
                     <entity-sequenced-id-primary value-field="value"/>
@@ -109,11 +129,33 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <if condition="deepClone">
+                <set field="passThroughParms" from="['clearDates', 'copyAssetAssign', 'copyAssetNeeded', 'copyAssoc', 'copyCommEvent',
+                    'copyContactMech', 'copyContent', 'copyNote', 'copyParty', 'copyProduct', 'copySkillStandard', 'idPrefix', 'baseIdPrefix']"/>
+                <set field="subMap" from="[deepClone:true, deepIdIsPrefix:false]"/>
+                <iterate list="passThroughParms" entry="parmName"><script>subMap.put(parmName, context.get(parmName))</script></iterate>
+
+                <!-- for cloning from a root set the rootWorkEffortId for all descendants -->
+                <set field="subMap.rootWorkEffortId" from="rootWorkEffortId"/>
+                <if condition="!rootWorkEffortId &amp;&amp; !workEffort.rootWorkEffortId">
+                    <set field="subMap.rootWorkEffortId" from="workEffortId"/></if>
+                <if condition="deepIdIsPrefix">
+                    <set field="subMap.baseIdPrefix" from="baseWorkEffortId"/>
+                    <set field="subMap.idPrefix" from="workEffortId"/>
+                </if>
+
                 <entity-find entity-name="mantle.work.effort.WorkEffort" list="childList">
                     <econdition field-name="parentWorkEffortId" from="baseWorkEffortId"/></entity-find>
                 <iterate list="childList" entry="child">
                     <service-call name="mantle.work.WorkEffortServices.clone#WorkEffort"
-                            in-map="context + [baseWorkEffortId:child.workEffortId, parentWorkEffortId:workEffortId]"/>
+                            in-map="subMap + [baseWorkEffortId:child.workEffortId, parentWorkEffortId:workEffortId]"/>
+                </iterate>
+                <entity-find entity-name="mantle.work.effort.WorkEffort" list="childList">
+                    <econdition field-name="rootWorkEffortId" from="baseWorkEffortId"/>
+                    <econdition field-name="parentWorkEffortId" operator="is-null"/>
+                </entity-find>
+                <iterate list="childList" entry="child">
+                    <service-call name="mantle.work.WorkEffortServices.clone#WorkEffort"
+                            in-map="subMap + [baseWorkEffortId:child.workEffortId, parentWorkEffortId:null]"/>
                 </iterate>
             </if>
         </actions>
