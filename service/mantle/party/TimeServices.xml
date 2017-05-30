@@ -132,12 +132,35 @@ along with this software (see the LICENSE.md file). If not, see
             </then><else>
                 <if condition="!partyId"><message error="true">With no previousPeriodId must specify partyId</message></if>
                 <if condition="!timePeriodTypeId"><message error="true">With no previousPeriodId must specify timePeriodTypeId</message></if>
-                <if condition="!fromDate"><message error="true">With no previousPeriodId must specify fromDate</message></if>
+                <if condition="!fromDate &amp;&amp; !thruDate"><message error="true">With no previousPeriodId must specify fromDate or thruDate</message></if>
                 <check-errors/>
             </else></if>
-            <set field="fromDate" from="new java.sql.Date(fromDate.time)"/>
 
             <entity-find-one entity-name="mantle.party.time.TimePeriodType" value-field="timePeriodType" cache="true"/>
+
+            <!-- if no fromDate calc from thruDate and timePeriodType -->
+            <if condition="fromDate == null"><then><script><![CDATA[
+                java.time.temporal.TemporalUnit field = getTemporalUnitFromUomId(timePeriodType.lengthUomId)
+                // use the database time zone, for Date fields this avoid moving across day boundaries
+                def fromDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(thruDate.time), ec.entity.databaseTimeZone.toZoneId())
+
+                BigDecimal periodLength = timePeriodType.periodLength
+                if (periodLength < 1 && timePeriodType.lengthUomId == 'TF_mon') {
+                    // special case for Semi-Month
+                    int maxDays = fromDateDt.range(java.time.temporal.ChronoField.DAY_OF_MONTH).getMaximum()
+                    int days = (maxDays * periodLength).setScale(0, BigDecimal.ROUND_DOWN).intValue()
+                    if (fromDateDt.dayOfMonth < days) fromDateDt = fromDateDt.minusDays(days)
+                    else fromDateDt = fromDateDt.minusDays(maxDays - days)
+                } else {
+                    fromDateDt = fromDateDt.minus(periodLength.longValue(), field)
+                }
+                // step forward by one day so fromDate is the first day of this period, not the last day of the previous
+                fromDateDt = fromDateDt.plusDays(1)
+                fromDate = java.sql.Date.from(fromDateDt.toInstant())
+            ]]></script>
+            </then><else>
+                <set field="fromDate" from="new java.sql.Date(fromDate.time)"/>
+            </else></if>
 
             <!-- see if there is already a TimePeriod for the partyId, timePeriodTypeId, and fromDate -->
             <entity-find entity-name="mantle.party.time.TimePeriod" list="existingPeriodList">
@@ -230,7 +253,8 @@ along with this software (see the LICENSE.md file). If not, see
             <auto-parameters entity-name="mantle.party.time.TimePeriod" include="nonpk"/>
             <parameter name="partyId" required="true"/>
             <parameter name="timePeriodTypeId" required="true"/>
-            <parameter name="fromDate" type="Date" required="true"/>
+            <parameter name="fromDate" type="Date"/>
+            <parameter name="thruDate" type="Date"/>
             <parameter name="isClosed" default-value="N"/>
         </in-parameters>
         <out-parameters>
@@ -238,9 +262,15 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="timePeriod" type="EntityValue"/>
         </out-parameters>
         <actions>
+            <!-- Make sure either fromDate or thruDate was provided -->
+            <if condition="!fromDate &amp;&amp; !thruDate"><return error="true" message="Must specify fromDate or thruDate"/></if>
+
             <entity-find entity-name="mantle.party.time.TimePeriod" list="existingPeriodList">
                 <econdition field-name="partyId"/><econdition field-name="timePeriodTypeId"/>
-                <econdition field-name="fromDate"/>
+                <econditions combine="or">
+                    <econdition field-name="fromDate" ignore-if-empty="true"/>
+                    <econdition field-name="thruDate" ignore-if-empty="true"/>
+                </econditions>
             </entity-find>
             <if condition="existingPeriodList"><then>
                 <set field="timePeriod" from="existingPeriodList.get(0)"/>
