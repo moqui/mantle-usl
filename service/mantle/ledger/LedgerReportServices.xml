@@ -84,8 +84,8 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.LedgerReportServices.get#ReportBasicInfo" in-map="context" out-map="context"/>
 
             <set field="classIdList" from="['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE', 'NON_OP_EXPENSE']"/>
-            <!-- NOTE: should DISTRIBUTION go here, or somewhere else? -->
-            <set field="grossProfitClassIdList" from="['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES']"/><!-- no NON_OP_EXPENSE -->
+            <set field="grossProfitClassIdList" from="['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES']"/>
+            <!-- NOTE: should exclude INCOME (ie INCOME is non-operating, ie not revenue)? -->
             <set field="netOpIncomeClassIdList" from="['REVENUE', 'CONTRA_REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE']"/><!-- no NON_OP_EXPENSE -->
 
             <set field="classInfoById" from="[:]"/>
@@ -122,8 +122,7 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.LedgerReportServices.run#IncomeStatement" in-map="context" out-map="context"/>
             <!-- called by run#IncomeStatement: <service-call name="mantle.ledger.LedgerReportServices.get#ReportBasicInfo" in-map="context" out-map="context"/> -->
 
-            <!-- includes: 'ASSET', 'CONTRA_ASSET', 'LIABILITY', 'EQUITY', 'CONTRA_EQUITY' -->
-            <!-- NOTE: should DISTRIBUTION go here, or somewhere else? -->
+            <!-- includes: 'ASSET', 'CONTRA_ASSET', 'LIABILITY', 'EQUITY', 'CONTRA_EQUITY', 'DISTRIBUTION' -->
 
             <set field="classInfoById" from="[:]"/>
             <iterate list="['ASSET', 'LIABILITY', 'EQUITY']" entry="classId">
@@ -744,7 +743,6 @@ along with this software (see the LICENSE.md file). If not, see
                     in-map="[organizationPartyId:organizationPartyId]"/>
             <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId ?: 'USD'"/>
 
-
             <entity-find entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" list="glAccountOrgTimePeriodList">
                 <econdition field-name="glAccountId" operator="in" from="glAccountIdList"/>
                 <econdition field-name="timePeriodId"/><econdition field-name="organizationPartyId"/>
@@ -812,6 +810,125 @@ along with this software (see the LICENSE.md file). If not, see
                     entryInfoList.add([transactionDate:thruTimestamp, description:glAccount.accountName, accountCode:accountCode, balance:balance])
                     if (glAccountOrgTimePeriod_has_next) entryInfoList.add([:])
                 </script>
+            </iterate>
+        </actions>
+    </service>
+
+    <service verb="get" noun="PeriodSeriesSummary">
+        <in-parameters>
+            <parameter name="organizationPartyId" required="true"/>
+            <parameter name="timePeriodGroups" type="List" required="true"><parameter name="timePeriodIds" type="List">
+                <description>Summaries are calculated and returns in an array with an entry for each time period group.
+                    If a period group has more than one period in it the total will be across all periods in the group.</description>
+                <parameter name="timePeriodId"/></parameter>
+            </parameter>
+            <parameter name="datasets" type="List" required="true"><parameter name="dataset" type="Map">
+                <description>Describes the set of data to include in the results. All map entries are passed through for
+                    convenience with 'data' entries added as a List of BigDecimal.</description>
+                <parameter name="label"/>
+                <parameter name="classes" type="List"><parameter name="glAccountClassEnumId"/></parameter>
+                <parameter name="classGroupEnumId"/>
+                <parameter name="negateDebit" type="Boolean" default="false"/>
+                <parameter name="negateCredit" type="Boolean" default="false"/>
+                <parameter name="negateClasses" type="List"><parameter name="glAccountClassEnumId"/></parameter>
+                <parameter name="totalBasis" default="PostedNoClosing">
+                    <description>Can be one of: Posted, PostedNoClosing, Ending.
+                        Defaults to PostedNoClosing which is best for income statement accounts.</description></parameter>
+            </parameter></parameter>
+        </in-parameters>
+        <out-parameters>
+            <!-- NOTE: the parameter names used here match those from the Chart.js parameters
+                (see http://www.chartjs.org/docs/latest/getting-started/usage.html) -->
+            <parameter name="datasets" type="List"><parameter name="dataset" type="Map">
+                <description>The original dataset Map plus a 'data' entry with results as a List of BigDecimal.</description>
+                <parameter name="label"/>
+                <parameter name="classSet" type="Set"><parameter name="glAccountClassEnumId"/></parameter>
+                <parameter name="data" type="List"><parameter name="amount" type="BigDecimal"/></parameter>
+            </parameter></parameter>
+        </out-parameters>
+        <actions>
+            <!-- get single set of time period IDs -->
+            <set field="allPeriods" from="new HashSet()"/>
+            <iterate list="timePeriodGroups" entry="timePeriodIds"><script>allPeriods.addAll(timePeriodIds)</script></iterate>
+
+            <!-- expand classes and classGroupEnumId -->
+            <set field="allClasses" from="new HashSet()"/>
+            <iterate list="datasets" entry="dataset">
+                <set field="dataset.classSet" from="new HashSet()"/>
+                <if condition="dataset.negateClasses == null"><set field="dataset.negateClasses" from="[]"/></if>
+                <iterate list="dataset.classes" entry="glAccountClassEnumId">
+                    <service-call name="org.moqui.impl.BasicServices.find#EnumerationByParent" out-map="childOut" out-map-add-to-existing="false"
+                            in-map="[parentEnumId:glAccountClassEnumId, includeNested:true]"/>
+                    <script>dataset.classSet.addAll(childOut.enumIdSet); allClasses.addAll(childOut.enumIdSet)</script>
+                    <if condition="dataset.negateCredit || dataset.negateDebit">
+                        <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="rootOut" out-map-add-to-existing="false"
+                                in-map="[glAccountClassEnumId:glAccountClassEnumId]"/>
+                        <if condition="(dataset.negateDebit &amp;&amp; rootOut.rootGlAccountClassEnumId == 'DEBIT') ||
+                                (dataset.negateCredit &amp;&amp; rootOut.rootGlAccountClassEnumId == 'CREDIT')">
+                            <script>dataset.negateClasses.addAll(childOut.enumIdSet)</script></if>
+                    </if>
+                </iterate>
+                <if condition="classGroupEnumId">
+                    <entity-find entity-name="moqui.basic.EnumGroupMember" list="classMemberList">
+                        <econdition field-name="enumGroupEnumId" from="classGroupEnumId"/></entity-find>
+                    <iterate list="classMemberList" entry="classMember">
+                        <service-call name="org.moqui.impl.BasicServices.find#EnumerationByParent" out-map="childOut" out-map-add-to-existing="false"
+                                in-map="[parentEnumId:classMember.enumId, includeNested:true]"/>
+                        <script>dataset.classSet.addAll(childOut.enumIdSet); allClasses.addAll(childOut.enumIdSet)</script>
+                        <if condition="'negate'.equalsIgnoreCase(classMember.memberInfo)"><then>
+                            <script>dataset.negateClasses.addAll(childOut.enumIdSet)</script>
+                        </then><else-if condition="dataset.negateCredit || dataset.negateDebit">
+                            <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="rootOut" out-map-add-to-existing="false"
+                                    in-map="[glAccountClassEnumId:classMember.enumId]"/>
+                            <if condition="(dataset.negateDebit &amp;&amp; rootOut.rootGlAccountClassEnumId == 'DEBIT') ||
+                                (dataset.negateCredit &amp;&amp; rootOut.rootGlAccountClassEnumId == 'CREDIT')">
+                                <script>dataset.negateClasses.addAll(childOut.enumIdSet)</script></if>
+                        </else-if></if>
+                    </iterate>
+                </if>
+            </iterate>
+
+            <!-- do single big query grouped by timePeriodId and glAccountClassEnumId -->
+            <entity-find entity-name="mantle.ledger.report.GlAccountOrgTimePeriodSummary" list="periodClassSummaryList">
+                <econdition field-name="organizationPartyId"/>
+                <econdition field-name="timePeriodId" operator="in" from="allPeriods"/>
+                <econdition field-name="glAccountClassEnumId" operator="in" from="allClasses"/>
+                <select-field field-name="timePeriodId,glAccountClassEnumId,isDebit"/>
+                <select-field field-name="postedDebitsNoClosing,postedCreditsNoClosing,beginningBalance,endingBalance"/>
+            </entity-find>
+
+            <!-- collate results -->
+            <iterate list="datasets" entry="dataset">
+                <set field="dataList" from="[]"/>
+                <set field="dataset.data" from="dataList"/>
+                <set field="byClassesList" from="periodClassSummaryList.cloneList().filterByAnd([glAccountClassEnumId:dataset.classSet])"/>
+                <iterate list="timePeriodGroups" entry="timePeriodIds">
+                    <set field="periodIdSet" from="new HashSet(timePeriodIds)"/>
+                    <set field="negateClassIdSet" from="new HashSet(dataset.negateClasses)"/>
+                    <set field="curTotal" from="0.0"/>
+                    <iterate list="byClassesList" entry="gaotpSummary">
+                        <if condition="periodIdSet.contains(gaotpSummary.timePeriodId)">
+                            <!-- which total do we want? -->
+                            <set field="curAmount" from="0.0"/>
+                            <if condition="'Posted'.equalsIgnoreCase(dataset.totalBasis)"><then>
+                                <set field="curAmount" from="gaotpSummary.endingBalance - gaotpSummary.beginningBalance"/>
+                            </then><else-if condition="'Ending'.equalsIgnoreCase(dataset.totalBasis)">
+                                <set field="curAmount" from="gaotpSummary.endingBalance"/>
+                            </else-if><else>
+                                <set field="curAmount" from="'Y'.equals(gaotpSummary.isDebit) ?
+                                        ((gaotpSummary.postedDebitsNoClosing ?: 0.0) - (gaotpSummary.postedCreditsNoClosing ?: 0.0)) :
+                                        ((gaotpSummary.postedCreditsNoClosing ?: 0.0) - (gaotpSummary.postedDebitsNoClosing ?: 0.0))"/>
+                            </else></if>
+                            <!-- negate? -->
+                            <if condition="negateClassIdSet.contains(gaotpSummary.glAccountClassEnumId)">
+                                <set field="curAmount" from="-curAmount"/></if>
+                            <set field="curTotal" from="curTotal + curAmount"/>
+                        </if>
+                    </iterate>
+                    <script>dataList.add(curTotal)</script>
+                </iterate>
+
+                <log level="warn" message="Result ${dataset.label}: ${dataset.data}"/>
             </iterate>
         </actions>
     </service>
