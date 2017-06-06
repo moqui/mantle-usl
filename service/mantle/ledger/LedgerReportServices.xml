@@ -825,7 +825,9 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="datasets" type="List" required="true"><parameter name="dataset" type="Map">
                 <description>Describes the set of data to include in the results. All map entries are passed through for
                     convenience with 'data' entries added as a List of BigDecimal.</description>
+                <parameter name="datasetId"><description>If specified this dataset will be added to datasetsById</description></parameter>
                 <parameter name="label"/>
+                <parameter name="backgroundColor"/>
                 <parameter name="classes" type="List"><parameter name="glAccountClassEnumId"/></parameter>
                 <parameter name="classGroupEnumId"/>
                 <parameter name="negateDebit" type="Boolean" default="false"/>
@@ -835,8 +837,10 @@ along with this software (see the LICENSE.md file). If not, see
                     <description>Can be one of: Posted, PostedNoClosing, Ending.
                         Defaults to PostedNoClosing which is best for income statement accounts.</description></parameter>
             </parameter></parameter>
+            <parameter name="datasetsById" type="Map"/>
         </in-parameters>
         <out-parameters>
+            <parameter name="periodLabels" type="List"><parameter name="label"/></parameter>
             <!-- NOTE: the parameter names used here match those from the Chart.js parameters
                 (see http://www.chartjs.org/docs/latest/getting-started/usage.html) -->
             <parameter name="datasets" type="List"><parameter name="dataset" type="Map">
@@ -847,9 +851,19 @@ along with this software (see the LICENSE.md file). If not, see
             </parameter></parameter>
         </out-parameters>
         <actions>
-            <!-- get single set of time period IDs -->
+            <set field="defaultColors" from="['rgba(75, 192, 192, 0.4)','rgba(54, 162, 235, 0.4)','rgba(153, 102, 255, 0.4)','rgba(255, 99, 132, 0.4)','rgba(255, 159, 64, 0.4)','rgba(255, 205, 86, 0.4)','rgba(201, 203, 207, 0.4)']"/>
+
+            <!-- get single set of time period IDs and default period labels -->
             <set field="allPeriods" from="new HashSet()"/>
-            <iterate list="timePeriodGroups" entry="timePeriodIds"><script>allPeriods.addAll(timePeriodIds)</script></iterate>
+            <set field="periodLabels" from="[]"/>
+            <iterate list="timePeriodGroups" entry="timePeriodIds">
+                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="curPeriod">
+                    <field-map field-name="timePeriodId" from="timePeriodIds.last()"/></entity-find-one>
+                <script>
+                    periodLabels.add(curPeriod != null ? ec.l10n.format(curPeriod.fromDate, 'yyyy-MM') : "Period ${timePeriodIds_index}")
+                    allPeriods.addAll(timePeriodIds)
+                </script>
+            </iterate>
 
             <!-- expand classes and classGroupEnumId -->
             <set field="allClasses" from="new HashSet()"/>
@@ -868,9 +882,16 @@ along with this software (see the LICENSE.md file). If not, see
                             <script>dataset.negateClasses.addAll(childOut.enumIdSet)</script></if>
                     </if>
                 </iterate>
-                <if condition="classGroupEnumId">
+                <if condition="dataset.classGroupEnumId">
+                    <!-- set a default label if there is none -->
+                    <if condition="!dataset.label">
+                        <entity-find-one entity-name="moqui.basic.Enumeration" value-field="classGroupEnum">
+                            <field-map field-name="enumId" from="dataset.classGroupEnumId"/></entity-find-one>
+                        <set field="dataset.label" from="classGroupEnum?.description"/>
+                    </if>
+                    <!-- get the enum groups enums, look for 'negate' in memberInfo -->
                     <entity-find entity-name="moqui.basic.EnumGroupMember" list="classMemberList">
-                        <econdition field-name="enumGroupEnumId" from="classGroupEnumId"/></entity-find>
+                        <econdition field-name="enumGroupEnumId" from="dataset.classGroupEnumId"/></entity-find>
                     <iterate list="classMemberList" entry="classMember">
                         <service-call name="org.moqui.impl.BasicServices.find#EnumerationByParent" out-map="childOut" out-map-add-to-existing="false"
                                 in-map="[parentEnumId:classMember.enumId, includeNested:true]"/>
@@ -886,6 +907,8 @@ along with this software (see the LICENSE.md file). If not, see
                         </else-if></if>
                     </iterate>
                 </if>
+                <if condition="!dataset.backgroundColor &amp;&amp; dataset_index &lt; 7">
+                    <set field="dataset.backgroundColor" from="defaultColors.get(dataset_index)"/></if>
             </iterate>
 
             <!-- do single big query grouped by timePeriodId and glAccountClassEnumId -->
@@ -898,6 +921,7 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
 
             <!-- collate results -->
+            <set field="datasetsById" from="[:]"/>
             <iterate list="datasets" entry="dataset">
                 <set field="dataList" from="[]"/>
                 <set field="dataset.data" from="dataList"/>
@@ -928,7 +952,33 @@ along with this software (see the LICENSE.md file). If not, see
                     <script>dataList.add(curTotal)</script>
                 </iterate>
 
-                <log level="warn" message="Result ${dataset.label}: ${dataset.data}"/>
+                <if condition="dataset.datasetId"><script>datasetsById.put(dataset.datasetId, dataset)</script></if>
+
+                <log level="warn" message="Result ${dataset.label} ${dataset.data} ${dataset.classSet}"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="get" noun="PeriodSeriesSummaryRows">
+        <description>Exports list of rows, each being a list of values. The first row has the dataset label.</description>
+        <in-parameters>
+            <parameter name="datasets" type="List" required="true"><parameter name="dataset" type="Map">
+                <parameter name="label"/>
+                <parameter name="data" type="List"><parameter name="amount" type="BigDecimal"/></parameter>
+            </parameter></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="rowsList" type="List"><parameter name="row" type="List"><parameter name="value"/></parameter></parameter>
+        </out-parameters>
+        <actions>
+            <set field="numDatasets" from="datasets.size()"/>
+            <set field="rowsList" from="[new ArrayList(Collections.nCopies(numDatasets, ''))]"/>
+            <iterate list="datasets" entry="dataset">
+                <script>rowsList[0].set(dataset_index, dataset.label)</script>
+                <iterate list="dataset.data" entry="amount">
+                    <if condition="rowsList.size() &lt; (amount_index+2)">
+                        <script>rowsList.add(new ArrayList(Collections.nCopies(numDatasets, BigDecimal.ZERO)))</script></if>
+                    <script>rowsList[amount_index+1].set(dataset_index, amount)</script>
+                </iterate>
             </iterate>
         </actions>
     </service>
