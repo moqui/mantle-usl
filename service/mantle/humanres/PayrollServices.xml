@@ -430,8 +430,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
                     <econdition field-name="partyId" from="employment.fromPartyId"/>
                     <econdition field-name="clientPartyId" from="employment.toPartyId"/>
-                    <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp"/>
-                    <econdition field-name="thruDate" operator="less-equals" from="thruTimestamp"/>
+                    <econdition field-name="fromDate" operator="greater-equals" from="fromTimestamp"/>
+                    <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
                 </entity-find>
                 <iterate list="timeEntryList" entry="timeEntry">
                     <!-- NOTE: this service gets the higher of hourly and piece amounts -->
@@ -558,6 +558,13 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="taxableYtdIncome" from="taxableYtdIncome + taxablePayAmount"/>
                     <set field="socialTaxableYtdIncome" from="socialTaxableYtdIncome + socialTaxablePayAmount"/>
                     <set field="medicalTaxableYtdIncome" from="medicalTaxableYtdIncome + medicalTaxablePayAmount"/>
+                </if>
+
+                <!-- TODO: Call RRP Calculation service -->
+                <if condition="payrollPhaseEnumId == 'PrphBreak'">
+                    <service-call name="mantle.humanres.PayrollServices.calculate#RegularRatesOfPay" in-map="context" out-map="context"/>
+
+                    <!-- TODO: Nothing uses the regular rates of pay yet. -->
                 </if>
 
                 <set field="phaseAdjList" from="allPayrollAdjustmentList.findAll({ it.payrollPhaseEnumId == payrollPhaseEnumId })"/>
@@ -1010,6 +1017,211 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="amount &gt; 0"><set field="amount" from="0.0"/></if>
                 </if>
             </if>
+        </actions>
+    </service>
+
+    <service verb="calculate" noun="RegularRateOfPay">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="fromTimestamp" required="true" type="Timestamp"/>
+            <parameter name="thruTimestamp" required="true" type="Timestamp"/>
+            <parameter name="currencyUomId" default-value="USD"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="regularRateOfPay" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <set field="regularRateOfPay" value="0.0" type="BigDecimal"/>
+
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromDetail">
+                <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
+
+            <set field="salaryFlag" from="emplPosition.salaryFlag ?: 'N'"/>
+
+            <if condition="salaryFlag == 'Y'"><then>
+                <!-- TODO: This presumes the Salary Flag is sufficient to determine overtime exemption (and thus no need for an RRP) -->
+                <set field="regularRateOfPay" value="0.0" type="BigDecimal"/>
+            </then><else>
+                <!-- Should hourly breaks be excluded from the RRP calc? If no, their time and pay should be included here. -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollRrpExclBreak',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="rrpExclBreak" from="getPsvOut.settingValue=='Y'" type="Boolean"/>
+
+                <!--&lt;!&ndash; TODO: Do we need this question, or does the existence of RatpPaidBreakStd and RatpPaidBreakRrp preclude its need? &ndash;&gt;-->
+                <!--&lt;!&ndash; Should hourly breaks be paid paid RRP or the hourly rate? &ndash;&gt;-->
+                <!--<service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"-->
+                              <!--in-map="[partySettingTypeId:'PayrollRrpPayOnHourlyBreak',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>-->
+                <!--<set field="rrpPayOnHourlyBreak" from="getPsvOut.settingValue=='Y'" type="Boolean"/>-->
+
+                <!-- Should hourly pay be included in RRP Calc? -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollRrpInclHourly',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="rrpInclHourly" from="getPsvOut.settingValue=='Y'" type="Boolean"/>
+
+                <!-- Should shift differentials (extra pay for non-prefered shifts) be included in RRP calc? -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollRrpInclShDiff',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="rrpInclShDiff" from="getPsvOut.settingValue=='Y'" type="Boolean"/>
+
+                <!-- Is employee subject to minimum wage? -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollMwCheck',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="mwCheck" from="getPsvOut.settingValue=='Y'" type="Boolean"/>
+
+                <!-- What is the minimum wage? -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollMwDefault',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="mwDefault" from="getPsvOut.settingValue" type="BigDecimal"/>
+
+                <!-- TODO: Should the employee's hourly rate be used instead of minimum wage if it is higher? -->
+
+                <!-- Find the time entries in this date range -->
+                <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
+                    <econdition field-name="partyId" from="employment.fromPartyId"/>
+                    <econdition field-name="clientPartyId" from="employment.toPartyId"/>
+                    <econdition field-name="fromDate" operator="greater-equals" from="fromTimestamp"/>
+                    <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
+                </entity-find>
+                
+                <set field="amountTotal" value="0.0" type="BigDecimal"/>
+                <set field="hoursTotal" value="0.0" type="BigDecimal"/>
+
+                <iterate list="timeEntryList" entry="timeEntry">
+
+                    <set field="hours" from="timeEntry?.hours ?: 0.0" type="BigDecimal"/>
+                    <set field="hourlyRate" from="timeEntry?.vendorHourRate ?: 0.0" type="BigDecimal"/>
+                    <set field="pieceCount" from="timeEntry?.pieceCount ?: 0.0" type="BigDecimal"/>
+                    <set field="pieceRate" from="timeEntry?.vendorPieceRate ?: 0.0" type="BigDecimal"/>
+
+                    <if condition="timeEntry.rateTypeEnumId in ['RatpStandard', 'RatpEvening', 'RatpNight', 'RatpWeekend', 'RatpHoliday']"><then>
+                        <if condition="rrpInclHourly"> <!-- Include Hourly Rates in RRP Calc -->
+                            <set field="hoursTotal" from="hoursTotal + hours"/>
+                            <if condition="rrpInclShDiff"><then> <!-- Include Shift Differential Premium in RRP Calc -->
+                                <set field="amountTotal" from="amountTotal + (hours * hourlyRate)"/>
+                            </then><else> <!-- Exclude Shift Differential Premium in RRP Calc -->
+                                <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="standardRate"
+                                              in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor',
+                                                        rateTypeEnumId:timeEntry.rateType.relatedEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                                <set field="amountTotal" from="amountTotal + (hours * (standardRate.vendorHourRate ?: 0.0))"/>
+                            </else></if>
+                        </if>
+                    </then><else-if condition="timeEntry.rateTypeEnumId in ['RatpPaidBreakStd', 'RatpPaidNptStd']">
+                        <if condition="!rrpPayOnHourlyBreak"><then> <!-- Hourly "breaks" are being rolled in -->
+                            <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="standardRate"
+                                          in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor',
+                                                        rateTypeEnumId:timeEntry.rateType.relatedEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                            <set field="hoursTotal" from="hoursTotal + hours"/>
+                            <set field="amountTotal" from="amountTotal + (hours * (standardRate.vendorHourRate ?: 0.0))"/>
+                        </then></if>
+                    </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPiece'">
+                        <set field="hoursTotal" from="hoursTotal + hours"/>
+                        <set field="hourlyAmount" from="hours * hourlyRate"/>
+                        <set field="pieceAmount" from="pieceCount * pieceRate"/>
+                        <set field="amountTotal" from="amountTotal + (hourlyAmount > pieceAmount ? hourlyAmount : pieceAmount)"/>
+                    </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPiecePlusHour'">
+                        <set field="hoursTotal" from="hoursTotal + hours"/>
+                        <set field="amountTotal" from="amountTotal + (hours * hourlyRate) + (pieceCount * pieceRate)"/>
+                    </else-if></if>
+                </iterate>
+
+                <set field="calculatedRrp" from="hoursTotal > 0.0 ? amountTotal / hoursTotal : 0.0 " type="BigDecimal"/>
+
+                <!-- Compare against minimum wage if necessary -->
+                <if condition="mwCheck &amp;&amp; mwDefault > calculatedRrp">
+                    <set field="calculatedRrp" from="mwDefault"/>
+                </if>
+
+                <set field="regularRateOfPay" from="calculatedRrp"/>
+
+             </else></if>
+        </actions>
+    </service>
+
+    <service verb="calculate" noun="RegularRatesOfPay">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="currencyUomId" default-value="USD"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="regularRatesOfPay" type="List"/>
+        </out-parameters>
+        <actions>
+            <set field="regularRatesOfPay" from="[]"/>
+
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromDetail">
+                <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
+
+            <set field="fromTpTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.fromDate} 00:00:00.000&quot;, '')"/>
+            <set field="fromTpTimestampZdt" from="java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli((long) fromTpTimestamp.time),
+                    (java.time.ZoneId) ec.entity.databaseTimeZone.toZoneId())"/>
+            <set field="thruTpTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.thruDate} 23:59:59.999&quot;, '')"/>
+            <set field="thruTpTimestampZdt" from="java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli((long) thruTpTimestamp.time),
+                    (java.time.ZoneId) ec.entity.databaseTimeZone.toZoneId())"/>
+
+            <!-- How frequently is RRP calculated? -->
+            <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                          in-map="[partySettingTypeId:'PayrollRrpCalcPer',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+            <set field="rrpCalcPer" from="getPsvOut.settingValue"/> <!-- PcfWorkWeek/PcfPayPeriod -->
+
+            <!-- Determine the periods in which RRP rates need to be determined -->
+            <if condition="rrpCalcPer == 'PcfPayPeriod'"><then>
+                <service-call name="mantle.humanres.PayrollServices.calculate#RegularRateOfPay" in-map="[partyRelationshipId:partyRelationshipId,
+                    fromTimestamp:fromTpTimestamp,thruTimestamp:thruTpTimestamp,currencyUomId:currencyUomId]" out-map="context"/>
+                <set field="rrpMap" from="[regularRateOfPay:regularRateOfPay,currencyUomId:currencyUomId,
+                                           fromTimestamp:fromTpTimestamp,thruTimestamp:thruTpTimestamp]"/>
+                <script>regularRatesOfPay.add(rrpMap)</script>
+            </then><else><!-- Default to PcfWorkweek -->
+                <!-- There may be multiple RRP, and the RRP could span pay periods since it is based on the work week and
+                     the pay periods may not align -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollFlsaWrkWkBegOn',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="flsaWrkWkBegOnEnumId" from="getPsvOut.settingValue"/>
+                <entity-find-one entity-name="moqui.basic.Enumeration" value-field="flsaWrkWkBegOn">
+                    <field-map field-name="enumId" from="flsaWrkWkBegOnEnumId"/>
+                </entity-find-one>
+
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollFlsaWrkDayBegAt',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="flsaWrkDayBegAt" from="getPsvOut.settingValue"/>
+
+                <!-- Find the start of the first workweek and set the time to midnight -->
+                <set field="fromTimestampZdt" from="fromTpTimestampZdt.withHour(0).withMinute(0).withSecond(0).withNano(0)"/>
+                <set field="hhMmFormatter" from="java.time.format.DateTimeFormatter.ofPattern('HH:MM')"/>
+                <set field="flsaWrkDayBegAtHhMm" from="java.time.LocalTime.parse(flsaWrkDayBegAt, hhMmFormatter)"/>
+                <set field="fromTimestampDowValue" from="fromTimestampZdt.getDayOfWeek().getValue()"/>
+                <if condition="fromTimestampDowValue != flsaWrkWkBegOn.sequenceNum">
+                    <set field="fromTimestampZdt" from="fromTimestampZdt.minus(fromTimestampDowValue - flsaWrkWkBegOn.sequenceNum +
+                    (fromTimestampDowValue > flsaWrkWkBegOn.sequenceNum ? 0 : 7), java.time.temporal.ChronoUnit.DAYS)"/>
+                </if>
+
+                <!-- Adjust the hour up to the time the FLSA work day begins -->
+                <set field="fromTimestampZdt" from="fromTimestampZdt.withHour(flsaWrkDayBegAtHhMm.getHour()).withMinute(flsaWrkDayBegAtHhMm.getMinute())"/>
+
+                <set field="workweekList" from="[]"/>
+                <while condition="fromTimestampZdt.isBefore(thruTpTimestampZdt)">
+                    <script>workweekList.add([fromTimestamp:java.sql.Timestamp.from(fromTimestampZdt.toInstant()),
+                                              thruTimestamp:java.sql.Timestamp.from(fromTimestampZdt.plus(1, java.time.temporal.ChronoUnit.WEEKS).minus(1, java.time.temporal.ChronoUnit.MILLIS).toInstant())])</script>
+                    <set field="fromTimestampZdt" from="fromTimestampZdt.plus(1, java.time.temporal.ChronoUnit.WEEKS)"/> <!-- TODO: Is adding a week "safe" during daylight savings and standard time stransitions? -->
+                </while>
+
+                <iterate list="workweekList" entry="workweek">
+                    <service-call name="mantle.humanres.PayrollServices.calculate#RegularRateOfPay" in-map="[partyRelationshipId:partyRelationshipId,
+                        fromTimestamp:workweek.fromTimestamp,thruTimestamp:workweek.thruTimestamp,currencyUomId:currencyUomId]" out-map="context"/>
+                    <set field="rrpMap" from="[regularRateOfPay:regularRateOfPay,currencyUomId:currencyUomId,
+                                           fromTimestamp:workweek.fromTimestamp,thruTimestamp:workweek.thruTimestamp]"/>
+                    <script>regularRatesOfPay.add(rrpMap)</script>
+                </iterate>
+            </else></if>
         </actions>
     </service>
 
