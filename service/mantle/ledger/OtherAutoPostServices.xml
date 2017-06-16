@@ -36,13 +36,6 @@ along with this software (see the LICENSE.md file). If not, see
                     relationship-name="mantle.account.financial.FinancialAccount" to-value-field="financialAccount"/>
             <if condition="!financialAccount"><return error="true" message="Not posting, could not find Financial Account with ID [${financialAccountTrans.finAccountId}] for financial account transaction with ID [${finAccountTransId}]"/></if>
 
-            <if condition="!financialAccountTrans.reasonEnumId">
-                <log level="trace" message="Not posting FinancialAccountTrans [${finAccountTransId}], has no reasonEnumId"/>
-                <set field="financialAccountTrans.acctgTransResultEnumId" value="AtrNoTransReason"/>
-                <entity-update value-field="financialAccountTrans"/>
-                <return/>
-            </if>
-
             <!-- get partyAcctgPreference -->
             <if condition="!financialAccount.organizationPartyId">
                 <log level="trace" message="Not posting, Financial Account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)} has no organization Party; for financial account transaction with ID [${finAccountTransId}]"/>
@@ -52,6 +45,18 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
                     in-map="[organizationPartyId:financialAccount.organizationPartyId]"/>
+
+            <!-- if no reason set to default based on trans type -->
+            <if condition="!financialAccountTrans.reasonEnumId">
+                <set field="defaultReasonByType" from="['FattDeposit':'FatrReplenish', 'FattWithdraw':'FatrDisbursement', 'FattAdjustment':'FatrErrorAdjust']"/>
+                <set field="financialAccountTrans.reasonEnumId" from="defaultReasonByType.get(financialAccountTrans.finAccountTransTypeEnumId)"/>
+                <!-- if there is still no reason carry on, will end up in error journal
+                <log level="warn" message="Not posting FinancialAccountTrans [${finAccountTransId}], has no reasonEnumId"/>
+                <set field="financialAccountTrans.acctgTransResultEnumId" value="AtrNoTransReason"/>
+                <entity-update value-field="financialAccountTrans"/>
+                <return/>
+                -->
+            </if>
 
             <!-- determine acctgTransTypeEnumId based on finAccountTransTypeEnumId -->
             <set field="transTypeMap" from="[FattDeposit:'AttFinancialDeposit', FattWithdraw:'AttFinancialWithdrawal',
@@ -91,48 +96,43 @@ along with this software (see the LICENSE.md file). If not, see
                     glAccountTypeEnumId:accountOut.glAccountTypeEnumId, glAccountId:accountOut.glAccountId,
                     amount:amount]"/>
 
-            <if condition="isWithdraw">
-                <then>
-                    <!-- withdrawal or negative adjustment -->
+            <if condition="isWithdraw"><then>
+                <!-- withdrawal or negative adjustment -->
 
-                    <!-- create the credit entry for the financial transaction side, for deposits an expense (decrease
-                        balance) or in transit liability (increase balance) account for incoming funds -->
-                    <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                            in-map="transMap + [debitCreditFlag:'C']"/>
+                <!-- create the credit entry for the financial transaction side, for deposits an expense (decrease
+                    balance) or in transit liability (increase balance) account for incoming funds -->
+                <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
+                        in-map="transMap + [debitCreditFlag:'C']"/>
 
-                    <!-- create the debit entry for the financial account side, for deposits (decrease balance)
-                        of the GL account representing financial account liability -->
-                    <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                            in-map="accountMap + [debitCreditFlag:'D']"/>
-                </then>
-                <else>
-                    <!-- otherwise deposit or positive adjustment -->
+                <!-- create the debit entry for the financial account side, for deposits (decrease balance)
+                    of the GL account representing financial account liability -->
+                <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
+                        in-map="accountMap + [debitCreditFlag:'D']"/>
+            </then><else>
+                <!-- otherwise deposit or positive adjustment -->
 
-                    <!-- create the debit entry for the financial transaction side, for deposits an expense (increase
-                        balance) or in transit liability (decrease balance) account for incoming funds -->
-                    <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                            in-map="transMap + [debitCreditFlag:'D']"/>
+                <!-- create the debit entry for the financial transaction side, for deposits an expense (increase
+                    balance) or in transit liability (decrease balance) account for incoming funds -->
+                <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
+                        in-map="transMap + [debitCreditFlag:'D']"/>
 
-                    <!-- create the credit entry for the financial account side, for deposits (increasing balance)
-                        of the GL account representing financial account liability -->
-                    <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                            in-map="accountMap + [debitCreditFlag:'C']"/>
-                </else>
-            </if>
+                <!-- create the credit entry for the financial account side, for deposits (increasing balance)
+                    of the GL account representing financial account liability -->
+                <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
+                        in-map="accountMap + [debitCreditFlag:'C']"/>
+            </else></if>
 
             <!-- ==== post the tx ==== -->
-            <if condition="useErrorJournal">
+            <if condition="useErrorJournal"><then>
                 <!-- put in the error journal for the org -->
                 <if condition="partyAcctgPreference?.errorGlJournalId">
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
                             in-map="[acctgTransId:acctgTrans.acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
                 </if>
-
-                <else>
-                    <!-- call the post service -->
-                    <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
-                </else>
-            </if>
+            </then><else>
+                <!-- call the post service -->
+                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+            </else></if>
 
             <!-- set acctg trans result to Success -->
             <set field="financialAccountTrans.acctgTransResultEnumId" value="AtrSuccess"/>

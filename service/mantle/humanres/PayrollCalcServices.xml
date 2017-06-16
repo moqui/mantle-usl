@@ -1,0 +1,894 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a 
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.1.xsd">
+
+    <service verb="get" noun="EmploymentTimeEntryInvoiceDetailV2">
+        <description>Calculate the amount for a time entry (for worker).</description>
+        <in-parameters>
+            <parameter name="timeEntryId" required="true"/>
+            <parameter name="timeEntry" type="Map"/>
+            <parameter name="ratePurposeEnumId" default-value="RaprVendor"/>
+            <parameter name="regularRatesOfPay" required="true" type="List"/>
+            <parameter name="sickRatesOfPay" required="true" type="List"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="amountTotal" type="BigDecimal"/>
+            <parameter name="amount" type="BigDecimal"/> <!-- TODO: Is this necessary if this creates the invoice details already? -->
+            <parameter name="quantity" type="BigDecimal"/> <!-- TODO: Is this necessary if this creates the invoice details already? -->
+            <parameter name="currencyUomId"/>
+
+            <!-- TODO: Is this necessary if this creates the invoice details already? -->
+            <parameter name="hourlyRateTotal" type="BigDecimal"/>
+            <parameter name="pieceRateTotal" type="BigDecimal"/>
+            <parameter name="hourlyRate" type="BigDecimal"/>
+            <parameter name="piecePrate" type="BigDecimal"/>
+            <parameter name="hours" type="BigDecimal"/>
+            <parameter name="pieceCount" type="BigDecimal"/>
+
+            <!-- TODO: Return actual invoice detail items -->
+        </out-parameters>
+        <actions>
+            <if condition="timeEntry == null"><entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="timeEntry"/></if>
+
+            <set field="amountTotal" from="0.0"/>
+            <set field="hours" from="timeEntry.hours ?: 0.0"/>
+            <set field="pieceCount" from="timeEntry.pieceCount ?: 0.0"/>
+
+            <!-- Retrieve the hourly and and piece rates for the time entry, whether on the entry already or retrieved. -->
+            <if condition="hours">
+                <set field="hourlyRate" from="timeEntry.vendorHourRate ?: timeEntry.clientHourRate"/>
+                <if condition="hourlyRate == null">
+                    <set field="rateAmountId" from="timeEntry.vendorRateAmountId ?: timeEntry.rateAmountId"/>
+                    <if condition="rateAmountId"><then>
+                        <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="rateAmount" cache="true">
+                            <field-map field-name="rateAmountId"/></entity-find-one>
+                    </then><else>
+                        <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="getTerOut" in-map="[timeEntryId:timeEntryId]"/>
+                        <!-- set the values in the timeEntry record for use below since the service updates the DB record and we don't want to re-query to get it -->
+                        <set field="timeEntry.rateAmountId" from="getTerOut.rateAmountId"/>
+                        <set field="timeEntry.vendorRateAmountId" from="getTerOut.vendorRateAmountId"/>
+
+                        <set field="rateAmountId" from="ratePurposeEnumId == 'RaprVendor' ? getTerOut.vendorRateAmountId : getTerOut.rateAmountId"/>
+                        <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="rateAmount" cache="true">
+                            <field-map field-name="rateAmountId"/></entity-find-one>
+                    </else></if>
+
+                    <if condition="rateAmount"><then>
+                        <set field="hourlyRate" from="rateAmount.rateAmount"/>
+                        <set field="currencyUomId" from="rateAmount.rateCurrencyUomId"/>
+                    </then><else>
+                        <set field="hourlyRate" from="0.0"/>
+                    </else></if>
+                </if>
+            </if>
+            <if condition="pieces">
+                <set field="pieceRate" from="timeEntry.vendorPieceRate ?: timeEntry.clientPieceRate"/>
+                <if condition="pieceRate == null">
+                    <set field="pieceRateAmountId" from="timeEntry.vendorPieceRateAmountId ?: timeEntry.pieceRateAmountId"/>
+                    <if condition="pieceRateAmountId"><then>
+                        <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="pieceRateAmount" cache="true">
+                            <field-map field-name="rateAmountId" from="pieceRateAmountId"/></entity-find-one>
+                    </then><else>
+                        <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="getTerOut" in-map="[timeEntryId:timeEntryId]"/>
+                        <!-- set the values in the timeEntry record for use below since the service updates the DB record and we don't want to re-query to get it -->
+                        <set field="timeEntry.pieceRateAmountId" from="getTerOut.pieceRateAmountId"/>
+                        <set field="timeEntry.vendorPieceRateAmountId" from="getTerOut.vendorPieceRateAmountId"/>
+
+                        <set field="pieceRateAmountId" from="ratePurposeEnumId == 'RaprVendor' ? getTerOut.vendorPieceRateAmountId : getTerOut.pieceRateAmountId"/>
+                        <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="pieceRateAmount" cache="true">
+                            <field-map field-name="rateAmountId" from="pieceRateAmountId"/></entity-find-one>
+                    </else></if>
+
+                    <if condition="pieceRateAmount"><then>
+                        <set field="pieceRate" from="pieceRateAmount.rateAmount"/>
+                        <set field="currencyUomId" from="rateAmount.rateCurrencyUomId"/>
+                    </then><else>
+                        <set field="pieceRate" from="0.0"/>
+                    </else></if>
+                </if>
+            </if>
+
+            <set field="pieceTotal" from="pieceCount * pieceRate"/>
+            <set field="hourlyTotal" from="hours * hourlyRate"/>
+
+            <if condition="timeEntry.rateTypeEnumId == 'RatpStandard'"><then>
+                <set field="amountTotal" from="hourlyTotal"/>
+                <!-- TODO: Create an invoice detail for hours * hourly rate -->
+
+            </then><else-if condition="timeEntry.rateTypeEnumId == 'RatpPiece'">
+                <!-- Note: Using the greater of pieces * piece rate OR hours * rate, while not an uncommon practice for
+                           handling the minimimum wage test, it potentially over inflates the RRP calculation.  A better
+                           practice would be to use this without a base hourly rate and to let the minimum wage makeup
+                           test be handled later in the calculation process. -->
+                <set field="amountTotal" from="pieceTotal > hourlyTotal ? pieceTotal : hourlyTotal"/>
+                <!-- TODO: Create an invoice detail for whichever is greater pieces * piece rate OR hours * rate -->
+            </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPiecePlusHour'">
+                <set field="amountTotal" from="pieceTotal + hourlyTotal"/>
+                <!-- TODO: Create an invoice detail for the sum of pieces * piece rate AND hours * rate-->
+            </else-if><else-if condition="timeEntry.rateTypeEnumId in ['RatpPaidBreakStd, RatpPaidNptStd']">
+                <set field="amountTotal" from="hourlyTotal"/>
+                <set field="stubCombineBrHr" from="false" type="Boolean"/>
+                <if condition="timeEntry.parentEntryId != null">
+                    <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                                  in-map="[partySettingTypeId:'PayrollStubCombineBrHr',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                    <set field="stubCombineBrHr" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>
+                </if>
+
+                <if condition="stubCombineBrHr"><then>
+                    <!-- TODO: Find and adjust the invoice detail for the time entry of the parent -->
+                    <!-- How feasible is this? Should it be done later? -->
+                </then><else>
+                    <!-- TODO: Either create an invoice detail for hours * rate -->
+                    <!-- This may be fairly verbose detailing every break; perhaps the invoice detail items will need a
+                         summarization pass later? -->
+                </else></if>
+            </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPaidNptStd'">
+                <set field="amountTotal" from="hourlyTotal"/>
+                <!-- TODO: Create an invoice detail for hours * rate -->
+            </else-if><else-if condition="timeEntry.rateTypeEnumId in ['RatpEvening', RatpNight, 'RatpWeekend', 'RatpHoliday']">
+                <set field="amountTotal" from="hourlyTotal"/>
+                <!-- Future: Shift Premiums: There is a possible need for special handling of shift premiums for workers comp.  i.e.
+                             for some jurisdictions, workers comp may exclude the additional premium paid for the shifts -->
+                <!-- TODO: Create an invoice detail for hours * rate -->
+            </else-if><else-if condition="timeEntry.rateTypeEnumId in ['RatpPaidBreakRrp', 'RatpPaidNptRrp']">
+                <iterate list="regularRatesOfPay" entry="rrp">
+                    <if condition="timeEntry.fromDate &lt; rrp.fromTimestamp">
+                        <set field="amountTotal" from="hours * rrp.regularRateOfPay"/>
+                        <!-- TODO: Create an invoice detail for rrp * rate -->
+                        <break/>
+                    </if>
+                </iterate>
+            </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpVacation'">
+                <!-- TODO: Determine if this should be their standard rate * hours -->
+                <!-- TODO: Should this debit a vacation hours bucket? If so, how does that get carried along in case the invoice
+                           details don't end up being used. -->
+                <!-- TODO: should this come in here, as it should not be included in workers comp -->
+            </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpHoliday'">
+                <!-- TODO: Determine if this should be their standard rate * hours and create an invoice detail. -->
+                <!-- TODO: should this come in here, as it should not be included in workers comp -->
+            </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpSick'">
+                <!-- TODO: Find the sick rate that applies and apply hours * sick rate -->
+                <!-- TODO: should this come in here, as it should not be included in workers comp -->
+                <iterate list="sickRatesOfPay" entry="sickRate">
+                    <if condition="timeEntry.fromDate &lt; sickRate.fromTimestamp">
+                        <set field="amountTotal" from="hours * sickRate.regularRateOfPay"/>
+                        <!-- TODO: Create an invoice detail for rrp * rate -->
+                        <break/>
+                    </if>
+                </iterate>
+            </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPtoOther'">
+                <!-- TODO: Determine if this should be their standard rate * hours and create an invoice detail. -->
+                <!-- TODO: should this come in here, as it should not be included in workers comp -->
+            </else-if><else-if condition="timeEntry.rateTypeEnumId in ['RatpUnpaid', 'RatpNoCharge', 'RatpDiscounted', 'RatpOnsite']">
+                <!-- No Op -->
+            </else-if><else>
+                <!-- Unknown Rate Type -->
+                <log message="Unknown Rate Type: ${timeEntry.rateTypeEnumId}" level="error"/>
+            </else></if>
+
+            <!-- TODO: Previously overtime was calculated at a later phase; do we care, as we'll have to make multiple passes? -->
+            <!-- If there is a pay rate modifier for overtime or double time, create invoice items for those -->
+            <if condition="timeEntry.rateModifierEnumId != null">
+                <if condition="RatmRegular"><then>
+                    <!-- No Op -->
+                </then><else-if condition="RatmOvertime">
+                    <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                                  in-map="[partySettingTypeId:'PayrollOtOtPrem',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                    <set field="otOtPrem" from="getPsvOut.settingValue" type="BigDecimal"/>
+                    <iterate list="regularRatesOfPay" entry="rrp">
+                        <if condition="timeEntry.fromDate &lt; rrp.fromTimestamp">
+                            <set field="amountTotal" from="amountTotal + (hours * otOtPrem * rrp.regularRateOfPay)"/>
+                            <!-- TODO: Create an invoice detail for rrp * otOtPrem * rate -->
+                            <break/>
+                        </if>
+                    </iterate>
+                </else-if><else-if condition="RatmDouble">
+                    <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                                  in-map="[partySettingTypeId:'PayrollOtDtPrem',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                    <set field="otDtPrem" from="getPsvOut.settingValue" type="BigDecimal"/>
+                    <iterate list="regularRatesOfPay" entry="rrp">
+                        <if condition="timeEntry.fromDate &lt; rrp.fromTimestamp">
+                            <set field="amountTotal" from="amountTotal + (hours * otDtPrem * rrp.regularRateOfPay)"/>
+                            <!-- TODO: Create an invoice detail for rrp * otDtPrem * rate -->
+                            <break/>
+                        </if>
+                    </iterate>
+                </else-if><else>
+                    <log message="Unknown Rate Modifier: ${timeEntry.rateModifierEnumId}"/>
+
+                </else></if>
+            </if>
+
+            <check-errors/>
+
+
+            <if condition="hours"><then>
+                <set field="hourlyAmount" from="ratePurposeEnumId == 'RaprVendor' ? timeEntry.vendorHourRate : timeEntry.clientHourRate"/>
+                <if condition="hourlyAmount == null"><then>
+                    <set field="rateAmountId" from="ratePurposeEnumId == 'RaprVendor' ? timeEntry.vendorRateAmountId : timeEntry.rateAmountId"/>
+                    <if condition="rateAmountId"><then>
+                        <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="rateAmount" cache="true">
+                            <field-map field-name="rateAmountId"/></entity-find-one>
+                    </then><else>
+                        <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="getTerOut" in-map="[timeEntryId:timeEntryId]"/>
+                        <!-- set the values in the timeEntry record for use below since the service updates the DB record and we don't want to re-query to get it -->
+                        <set field="timeEntry.rateAmountId" from="getTerOut.rateAmountId"/>
+                        <set field="timeEntry.vendorRateAmountId" from="getTerOut.vendorRateAmountId"/>
+
+                        <set field="rateAmountId" from="ratePurposeEnumId == 'RaprVendor' ? getTerOut.vendorRateAmountId : getTerOut.rateAmountId"/>
+                        <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="rateAmount" cache="true">
+                            <field-map field-name="rateAmountId"/></entity-find-one>
+                    </else></if>
+                    <if condition="rateAmount"><then>
+                        <set field="hourlyAmount" from="rateAmount.rateAmount"/>
+                        <set field="hourlyAmountTotal" from="hours * hourlyAmount"/>
+                        <set field="currencyUomId" from="rateAmount.rateCurrencyUomId"/>
+                    </then><else>
+                        <set field="purposeDesc" from="ec.entity.find('enums').condition('enumId', ratePurposeEnumId).one()?.description"/>
+                        <message error="true">No hourly ${purposeDesc} rate amount found for time entry ${timeEntryId}</message>
+                    </else></if>
+                </then><else>
+                    <set field="hourlyAmountTotal" from="hours * hourlyAmount"/>
+                </else></if>
+            </then><else>
+                <set field="hourlyAmount" from="0.0"/>
+                <set field="hourlyAmountTotal" from="0.0"/>
+            </else></if>
+            <if condition="pieceCount"><then>
+                <set field="pieceAmount" from="ratePurposeEnumId == 'RaprVendor' ? timeEntry.vendorPieceRate : timeEntry.clientPieceRate"/>
+                <if condition="pieceAmount == null"><then>
+                    <set field="pieceRateAmountId" from="ratePurposeEnumId == 'RaprVendor' ? timeEntry.vendorPieceRateAmountId : timeEntry.pieceRateAmountId"/>
+                    <if condition="pieceRateAmountId"><then>
+                        <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="pieceRateAmount" cache="true">
+                            <field-map field-name="rateAmountId" from="pieceRateAmountId"/></entity-find-one>
+                    </then><else>
+                        <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="getTerOut" in-map="[timeEntryId:timeEntryId]"/>
+                        <!-- set the values in the timeEntry record for use below since the service updates the DB record and we don't want to re-query to get it -->
+                        <set field="timeEntry.pieceRateAmountId" from="getTerOut.pieceRateAmountId"/>
+                        <set field="timeEntry.vendorPieceRateAmountId" from="getTerOut.vendorPieceRateAmountId"/>
+
+                        <set field="pieceRateAmountId" from="ratePurposeEnumId == 'RaprVendor' ? getTerOut.vendorPieceRateAmountId : getTerOut.pieceRateAmountId"/>
+                        <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="pieceRateAmount" cache="true">
+                            <field-map field-name="rateAmountId" from="pieceRateAmountId"/></entity-find-one>
+                    </else></if>
+                    <if condition="pieceRateAmount"><then>
+                        <set field="pieceAmount" from="pieceRateAmount.rateAmount"/>
+                        <set field="pieceAmountTotal" from="pieceCount * pieceAmount"/>
+                        <set field="currencyUomId" from="rateAmount.rateCurrencyUomId"/>
+                    </then><else>
+                        <set field="purposeDesc" from="ec.entity.find('enums').condition('enumId', ratePurposeEnumId).one()?.description"/>
+                        <message>No ${purposeDesc} piece rate amount found for time entry ${timeEntryId}</message>
+                    </else></if>
+                </then><else>
+                    <set field="pieceAmountTotal" from="pieceCount * pieceAmount"/>
+                </else></if>
+            </then><else>
+                <set field="pieceAmount" from="0.0"/>
+                <set field="pieceAmountTotal" from="0.0"/>
+            </else></if>
+
+            <check-errors/>
+
+            <if condition="pieceAmountTotal"><then>
+                <if condition="pieceRateAmount?.rateTypeEnumId == 'RatpPiecePlusHour'"><then>
+                    <set field="amountTotal" from="(hourlyAmountTotal ?: 0.0) + pieceAmountTotal"/>
+                    <set field="amount" from="amountTotal"/>
+                    <set field="quantity" from="1.0"/>
+                </then><else>
+                    <if condition="hourlyAmountTotal &gt; pieceAmountTotal"><then>
+                        <set field="amountTotal" from="hourlyAmountTotal"/>
+                        <set field="amount" from="hourlyAmount"/>
+                        <set field="quantity" from="hours"/>
+                    </then><else>
+                        <set field="amountTotal" from="pieceAmountTotal"/>
+                        <set field="amount" from="pieceAmount"/>
+                        <set field="quantity" from="pieceCount"/>
+                    </else></if>
+                </else></if>
+            </then><else>
+                <set field="amountTotal" from="hourlyAmountTotal"/>
+                <set field="amount" from="hourlyAmount"/>
+                <set field="quantity" from="hours"/>
+            </else></if>
+        </actions>
+    </service>
+
+
+
+
+
+
+    <service verb="get" noun="EmploymentPayAmountV2">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="regularRatesOfPay" required="true" type="List"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="payAmount" type="BigDecimal"/>
+            <parameter name="currencyUomId"/>
+            <parameter name="salaryFlag"/>
+            <parameter name="timeEntryList" type="List"/>
+
+            <parameter name="employment" type="Map"/>
+            <parameter name="emplPosition" type="Map"/>
+            <parameter name="timePeriod" type="Map"/>
+            <parameter name="fromTimestamp" type="Timestamp"/>
+            <parameter name="thruTimestamp" type="Timestamp"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromDetail">
+                <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
+
+            <set field="salaryFlag" from="emplPosition.salaryFlag ?: 'N'"/>
+            <set field="payAmount" from="0.0"/>
+
+            <if condition="employment.timePeriodTypeId != timePeriod.timePeriodTypeId">
+                <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is not paid in this type of period"/></if>
+
+            <set field="fromTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.fromDate} 00:00:00.000&quot;, '')"/>
+            <set field="thruTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.thruDate} 23:59:59.999&quot;, '')"/>
+
+            <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; thruTimestamp">
+                <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is not yet employed"/></if>
+            <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; fromTimestamp">
+                <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is no longer employed"/></if>
+
+            <if condition="salaryFlag == 'Y'"><then>
+                <!-- TODO: This presumes the Salary Flag is sufficient to determine overtime exemption (and thus no need for an RRP) -->
+                <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
+                <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
+                    <date-filter valid-date="thruTimestamp"/>
+                    <econdition field-name="partyRelationshipId"/>
+                    <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+                    <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
+                </entity-find>
+
+                <if condition="!employmentSalaryList">
+                    <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
+                <set field="employmentSalary" from="employmentSalaryList[0]"/>
+
+                <set field="payAmount" from="employmentSalary.amount"/>
+                <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
+
+                <!-- handle partial period for salary (first and last, ie by from and thru) -->
+                <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; fromTimestamp">
+                    <set field="partialFrom" from="employment.fromDate"/></if>
+                <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; thruTimestamp">
+                    <set field="partialThru" from="employment.thruDate"/></if>
+                <if condition="partialFrom || partialThru">
+                    <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
+                        <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
+                    <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time)"/>
+                        <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
+                    <!-- TODO: this is messy, consider working days, etc? -->
+                    <!-- for now do a simple ratio of milliseconds -->
+                    <set field="partialTime" from="partialThru.time - partialFrom.time"/>
+                    <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
+                    <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                </if>
+            </then><else>
+                <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
+                    <econdition field-name="partyId" from="employment.fromPartyId"/>
+                    <econdition field-name="clientPartyId" from="employment.toPartyId"/>
+                    <econdition field-name="fromDate" operator="greater-equals" from="fromTimestamp"/>
+                    <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
+                </entity-find>
+                <iterate list="timeEntryList" entry="timeEntry">
+                    <!-- NOTE: this service gets the higher of hourly and piece amounts -->
+                    <service-call name="mantle.humanres.PayrollCalcServices.get#EmploymentTimeEntryInvoiceDetailV2" out-map="getTeaOut"
+                                  in-map="[timeEntryId:timeEntry.timeEntryId, timeEntry:timeEntry, ratePurposeEnumId:ratePurposeEnumId,
+                                           regularRatesOfPay, sickRatesOfPay:sickRatesOfPay]"/>
+                    <set field="payAmount" from="payAmount + getTeaOut.amountTotal"/>
+                    <set field="currencyUomId" from="getTeaOut.currencyUomId"/>
+                </iterate>
+                <!-- round total to 2 decimal places -->
+                <set field="payAmount" from="payAmount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+            </else></if>
+        </actions>
+    </service>
+
+
+    <service verb="get" noun="EmploymentPayDetailV2">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="payAmount" type="BigDecimal"/>
+            <parameter name="currencyUomId"/>
+            <parameter name="salaryFlag"/>
+            <parameter name="timeEntryList" type="List"/>
+
+            <parameter name="employment" type="Map" required="true"/>
+            <parameter name="homePostalAddress" type="Map"/>
+            <parameter name="emplPosition" type="Map" required="true"/>
+            <parameter name="timePeriod" type="Map" required="true"/>
+            <parameter name="payDate" type="Date"/>
+
+            <parameter name="regularRatesOfPay" type="List"/>
+            <parameter name="sickRatesOfPay" type="List"/>
+            <parameter name="adjustmentList" type="List">
+                <description>List of Maps with out parameters from calculate#Adjustment interface</description></parameter>
+            <parameter name="netPayAmount" type="BigDecimal"/>
+
+            <parameter name="taxablePayAmount" type="BigDecimal"/>
+            <parameter name="socialTaxablePayAmount" type="BigDecimal"/>
+            <parameter name="medicalTaxablePayAmount" type="BigDecimal"/>
+            <parameter name="disposablePayAmount" type="BigDecimal"/>
+            <parameter name="taxableYtdIncome" type="BigDecimal"/>
+            <parameter name="socialTaxableYtdIncome" type="BigDecimal"/>
+            <parameter name="medicalTaxableYtdIncome" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <!-- Calculate RRP, as it will be needed to calculate some time entries. -->
+            <service-call name="mantle.humanres.PayrollCalcServices.calculate#RegularRatesOfPay" in-map="context" out-map="context"/>
+            <service-call name="mantle.humanres.PayrollCalcServices.calculate#SickRatesOfPay" in-map="context" out-map="context"/>
+
+            <!-- TODO: Future, what if an RRP was calculated for a week that crossed a pay period and it used an RRP for
+                       calculating part of the paycheck.  Perhaps a makeup entry would be necessary here.  -->
+
+            <!-- get the pay amount and employment, emplPosition, timePeriod, fromTimestamp, thruTimestamp -->
+            <service-call name="mantle.humanres.PayrollCalcServices.get#EmploymentPayAmountV2" in-map="context" out-map="context"/>
+
+
+
+            <!-- TODO: What follows is the prior calculation; pull up what is needed -->
+
+
+
+
+            <if condition="!payDate"><set field="payDate" from="timePeriod.thruDate"/></if>
+            <set field="payTimestamp" from="ec.l10n.parseTimestamp(&quot;${payDate} 12:00:00.000&quot;, '')"/>
+
+            <!-- is this employee's income social and medical taxable? NOTE: special cases here, and not all potential yet handled: -->
+            <!-- see https://www.irs.gov/individuals/international-taxpayers/aliens-employed-in-the-u-s-social-security-taxes -->
+            <set field="socialMedicalExempt" from="emplPosition.taxExemptEnumId == 'EtxForeignAg'"/>
+
+            <!-- set initial taxablePayAmount, socialTaxablePayAmount, medicalTaxablePayAmount -->
+            <set field="taxablePayAmount" from="payAmount"/>
+            <set field="socialTaxablePayAmount" from="socialMedicalExempt ? 0.0 : payAmount"/>
+            <set field="medicalTaxablePayAmount" from="socialMedicalExempt ? 0.0 : payAmount"/>
+
+            <!-- calc taxableYtdIncome, socialTaxableYtdIncome, medicalTaxableYtdIncome -->
+            <set field="taxableYtdIncome" from="0.0"/>
+            <set field="socialTaxableYtdIncome" from="0.0"/>
+            <set field="medicalTaxableYtdIncome" from="0.0"/>
+            <set field="thisYearList" from="ec.user.getPeriodRange('year', '0')"/>
+            <set field="yearStart" from="new java.sql.Date(thisYearList[0].time)"/>
+            <set field="yearEnd" from="new java.sql.Date(thisYearList[1].time)"/>
+            <entity-find entity-name="mantle.humanres.employment.EmploymentPayHistory" list="payHistoryList">
+                <econdition field-name="partyRelationshipId"/>
+                <econdition field-name="payDate" operator="greater-equals" from="yearStart"/>
+                <econdition field-name="payDate" operator="less" from="yearEnd"/>
+            </entity-find>
+            <iterate list="payHistoryList" entry="payHistory">
+                <set field="taxableYtdIncome" from="taxableYtdIncome + payHistory.taxablePayAmount"/>
+                <set field="socialTaxableYtdIncome" from="socialTaxableYtdIncome + payHistory.socialTaxablePayAmount"/>
+                <set field="medicalTaxableYtdIncome" from="medicalTaxableYtdIncome + payHistory.medicalTaxablePayAmount"/>
+            </iterate>
+
+            <!-- get homePostalAddress -->
+            <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="employeeHomeContactInfo"
+                          in-map="[partyId:employment.toPartyId, postalContactMechId:employment.taxHomeContactMechId,
+                        postalContactMechPurposeId:'PostalHome']"/>
+            <set field="homePostalAddress" from="employeeHomeContactInfo.postalAddress"/>
+
+            <!-- calculate the adjustments -->
+            <set field="adjustmentList" from="[]"/>
+
+            <entity-find entity-name="mantle.humanres.employment.PayrollAdjustment" list="allPayrollAdjustmentList">
+                <date-filter valid-date="payTimestamp"/>
+                <econdition field-name="organizationPartyId" from="employment.toPartyId" or-null="true"/>
+                <econdition field-name="partyRelationshipId" or-null="true"/>
+                <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId" or-null="true"/>
+            </entity-find>
+
+            <!-- calculate adjustments and run other calculations by phase, including those with no phase after the other taxable/deductible phase -->
+            <set field="phaseEnumIdList" from="['PrphBonus', 'PrphBreak', 'PrphOvertime', 'PrphDeductible', null, 'PrphTax', 'PrphGarnish', 'PrphExpenses']"/>
+
+            <set field="calcAdjParameters" from="[partyRelationshipId:partyRelationshipId, employment:employment,
+                    timePeriod:timePeriod, timeEntryList:timeEntryList, timePeriodTypeId:timePeriod.timePeriodTypeId,
+                    payTimestamp:payTimestamp, payAmount:payAmount, homePostalAddress:homePostalAddress]"/>
+
+            <iterate list="phaseEnumIdList" entry="payrollPhaseEnumId">
+                <if condition="payrollPhaseEnumId == 'PrphTax'">
+                    <!-- before tax phase update taxableYtdIncome, socialTaxableYtdIncome, medicalTaxableYtdIncome -->
+                    <set field="taxableYtdIncome" from="taxableYtdIncome + taxablePayAmount"/>
+                    <set field="socialTaxableYtdIncome" from="socialTaxableYtdIncome + socialTaxablePayAmount"/>
+                    <set field="medicalTaxableYtdIncome" from="medicalTaxableYtdIncome + medicalTaxablePayAmount"/>
+                </if>
+
+                <!-- TODO: Call RRP Calculation service -->
+                <if condition="payrollPhaseEnumId == 'PrphBreak'">
+                    <service-call name="mantle.humanres.PayrollCalcServices.calculate#RegularRatesOfPay" in-map="context" out-map="context"/>
+
+                    <!-- TODO: Nothing uses the regular rates of pay yet. -->
+                </if>
+
+                <set field="phaseAdjList" from="allPayrollAdjustmentList.findAll({ it.payrollPhaseEnumId == payrollPhaseEnumId })"/>
+                <iterate list="phaseAdjList" entry="payrollAdjustment">
+                    <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut" out-map-add-to-existing="false"
+                                  in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
+                                payrollPhaseEnumId:payrollPhaseEnumId, taxablePayAmount:taxablePayAmount,
+                                socialTaxablePayAmount:socialTaxablePayAmount, medicalTaxablePayAmount:medicalTaxablePayAmount,
+                                taxableYtdIncome:taxableYtdIncome, socialTaxableYtdIncome:socialTaxableYtdIncome,
+                                medicalTaxableYtdIncome:medicalTaxableYtdIncome] + calcAdjParameters"/>
+                    <if condition="!calcOut.adjustmentApplies"><continue/></if>
+                    <script>adjustmentList.add(calcOut)</script>
+                    <if condition="!calcOut.quantity"><set field="calcOut.quantity" from="1.0"/></if>
+                    <set field="amountTotal" from="calcOut.quantity * calcOut.amount"/>
+                    <if condition="payrollPhaseEnumId == 'PrphBonus'">
+                        <set field="payAmount" from="payAmount + amountTotal"/>
+                        <set field="calcAdjParameters.payAmount" from="payAmount"/>
+                    </if>
+
+                    <!-- update taxablePayAmount, socialTaxablePayAmount, medicalTaxablePayAmount -->
+                    <if condition="payrollAdjustment.isTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                        <set field="taxablePayAmount" from="taxablePayAmount + amountTotal"/></if>
+                    <if condition="payrollAdjustment.isSocialTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                        <set field="socialTaxablePayAmount" from="socialTaxablePayAmount + amountTotal"/></if>
+                    <if condition="payrollAdjustment.isMedicalTaxable == 'Y' &amp;&amp; payrollAdjustment.isEmployerPaid != 'Y'">
+                        <set field="medicalTaxablePayAmount" from="medicalTaxablePayAmount + amountTotal"/></if>
+                </iterate>
+
+                <!-- run any services configured for this phase -->
+                <entity-find entity-name="mantle.humanres.employment.PayrollAdjCalcService" list="adjCalcServiceList" cache="true">
+                    <econdition field-name="organizationPartyId" from="employment.toPartyId" or-null="true"/>
+                    <econdition field-name="payrollPhaseEnumId"/>
+                    <order-by field-name="sequenceNum"/>
+                </entity-find>
+                <script><![CDATA[
+                for (adjCalcService in adjCalcServiceList) { try {
+                    Map parmMap = new HashMap([adjCalcServiceId:adjCalcService.adjCalcServiceId,
+                            description:adjCalcService.description, payrollPhaseEnumId:payrollPhaseEnumId,
+                            taxablePayAmount:taxablePayAmount, socialTaxablePayAmount:socialTaxablePayAmount,
+                            medicalTaxablePayAmount:medicalTaxablePayAmount, taxableYtdIncome:taxableYtdIncome,
+                            socialTaxableYtdIncome:socialTaxableYtdIncome, medicalTaxableYtdIncome:medicalTaxableYtdIncome])
+                    parmMap.putAll(calcAdjParameters)
+                    List adjParameterList = adjCalcService.parameters
+                    for (adjParameter in adjParameterList) parmMap.put(adjParameter.parameterName, adjParameter.parameterValue)
+
+                    Map serviceRegister = adjCalcService.serviceRegister
+                    Map result = ec.service.sync().name(serviceRegister.serviceName).parameters(parmMap).disableAuthz().call()
+                    if (!ec.message.hasError()) ec.context.putAll(result)
+                } catch (Throwable t) {
+                    ec.logger.log(300, "Error calling payroll adjustment calc service ${adjCalcService.adjCalcServiceId}", t)
+                } }
+                ]]></script>
+
+            </iterate>
+
+            <!-- ===== adjust garnishments for min garnish wage, disposable income ===== -->
+            <!-- calculate disposablePayAmount from payAmount and adjustments added -->
+            <set field="disposablePayAmount" from="payAmount"/>
+            <iterate list="adjustmentList" entry="adjustment">
+                <if condition="adjustment.deductFromDisposable == 'Y' &amp;&amp; adjustment.isEmployerPaid != 'Y'">
+                    <set field="disposablePayAmount" from="disposablePayAmount + adjustment.amount"/></if>
+            </iterate>
+
+            <!-- find applicable garnish minimum wage -->
+            <entity-find entity-name="mantle.humanres.employment.PayrollGarnishMinWage" list="garnishMinWageList">
+                <date-filter/><econdition field-name="stateOrCountryGeoId" from="homePostalAddress.stateProvinceGeoId"/>
+                <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+            </entity-find>
+            <if condition="!garnishMinWageList">
+                <entity-find entity-name="mantle.humanres.employment.PayrollGarnishMinWage" list="garnishMinWageList">
+                    <date-filter/><econdition field-name="stateOrCountryGeoId" from="homePostalAddress.countryGeoId"/>
+                    <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+                </entity-find>
+            </if>
+            <if condition="garnishMinWageList"><set field="garnishMinWage" from="garnishMinWageList[0]"/></if>
+
+            <!-- adjust garnishments for disposable income limit (using garnishDisposablePercent, garnishPriority) -->
+            <set field="disposableRemaining" from="disposablePayAmount"/>
+            <order-map-list list="adjustmentList"><order-by field-name="garnishPriority"/></order-map-list>
+            <iterate list="adjustmentList" entry="adjustment">
+                <if condition="!adjustment.garnishPartyId"><continue/></if>
+
+                <if condition="adjustment.garnishDisposablePercent">
+                    <then><set field="garnishDisposableRatio" from="adjustment.garnishDisposablePercent / 100"/></then>
+                    <else><set field="garnishDisposableRatio" from="0.25"/><!-- this is a good default for the USA, not necessarily for other places --></else>
+                </if>
+                <!-- calculate max amount from garnishMinWage (if applicable) or garnishDisposableRatio -->
+                <set field="deductionAmount" from="-adjustment.amount"/><!-- negate it so the code is easier to read -->
+                <if condition="adjustment.garnishMinWageApplies == 'Y' &amp;&amp; garnishMinWage"><then>
+                    <if condition="disposableRemaining &lt;= garnishMinWage.rangeLow">
+                        <then><!-- do nothing, leave deductionAmount as-is --></then>
+                        <else-if condition="disposableRemaining &gt; garnishMinWage.rangeLow &amp;&amp; disposableRemaining &lt; garnishMinWage.rangeHigh">
+                            <set field="deductionAmount" from="disposableRemaining - garnishMinWage.rangeLow"/>
+                        </else-if>
+                        <else>
+                            <set field="maxDedAmount" from="disposablePayAmount * garnishDisposableRatio"/>
+                            <set field="deductionAmount" from="deductionAmount &gt; maxDedAmount ? maxDedAmount : deductionAmount"/>
+                        </else>
+                    </if>
+                </then><else>
+                    <set field="maxDedAmount" from="disposablePayAmount * garnishDisposableRatio"/>
+                    <set field="deductionAmount" from="deductionAmount &gt; maxDedAmount ? maxDedAmount : deductionAmount"/>
+                </else></if>
+
+                <!-- ROUND_HALF_DOWN here so the deduction amount is never more than the percentage limit -->
+                <set field="deductionAmount" from="deductionAmount.setScale(2, BigDecimal.ROUND_HALF_DOWN)"/>
+                <set field="adjustment.amount" from="-deductionAmount"/>
+                <set field="disposableRemaining" from="disposableRemaining - deductionAmount"/>
+            </iterate>
+
+            <!-- calculate netPayAmount -->
+            <set field="netPayAmount" from="payAmount"/>
+            <iterate list="adjustmentList" entry="adjustment">
+                <if condition="adjustment.isEmployerPaid != 'Y'">
+                    <set field="netPayAmount" from="netPayAmount + adjustment.amount"/></if>
+            </iterate>
+
+            <!-- <log message="===== payAmount=${payAmount}, netPayAmount=${netPayAmount}, adjustmentList:\n${adjustmentList}"/> -->
+        </actions>
+    </service>
+
+
+
+
+
+    <service verb="calculate" noun="RegularRateOfPay">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="fromTimestamp" required="true" type="Timestamp"/>
+            <parameter name="thruTimestamp" required="true" type="Timestamp"/>
+            <parameter name="currencyUomId" default-value="USD"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="regularRateOfPay" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <set field="regularRateOfPay" value="0.0" type="BigDecimal"/>
+
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromDetail">
+                <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
+
+            <set field="salaryFlag" from="emplPosition.salaryFlag ?: 'N'"/>
+
+            <if condition="salaryFlag == 'Y'"><then>
+                <!-- TODO: This presumes the Salary Flag is sufficient to determine overtime exemption (and thus no need for an RRP) -->
+                <set field="regularRateOfPay" value="0.0" type="BigDecimal"/>
+            </then><else>
+                <!-- Should hourly breaks be excluded from the RRP calc? If no, their time and pay should be included here. -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollRrpExclBreak',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="rrpExclBreak" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>
+
+                <!--&lt;!&ndash; TODO: Do we need this question, or does the existence of RatpPaidBreakStd and RatpPaidBreakRrp preclude its need? &ndash;&gt;-->
+                <!--&lt;!&ndash; Should hourly breaks be paid paid RRP or the hourly rate? &ndash;&gt;-->
+                <!--<service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"-->
+                              <!--in-map="[partySettingTypeId:'PayrollRrpPayOnHourlyBreak',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>-->
+                <!--<set field="rrpPayOnHourlyBreak" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>-->
+
+                <!-- Should hourly pay be included in RRP Calc? -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollRrpInclHourly',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="rrpInclHourly" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>
+
+                <!-- Should shift differentials (extra pay for non-prefered shifts) be included in RRP calc? -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollRrpInclShDiff',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="rrpInclShDiff" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>
+
+                <!-- Is employee subject to minimum wage? -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollMwCheck',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="mwCheck" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>
+
+                <!-- What is the minimum wage? -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollMwDefault',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="mwDefault" from="getPsvOut.settingValue" type="BigDecimal"/>
+
+                <!-- TODO: Should the employee's hourly rate be used instead of minimum wage if it is higher? -->
+
+                <!-- Find the time entries in this date range -->
+                <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
+                    <econdition field-name="partyId" from="employment.fromPartyId"/>
+                    <econdition field-name="clientPartyId" from="employment.toPartyId"/>
+                    <econdition field-name="fromDate" operator="greater-equals" from="fromTimestamp"/>
+                    <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
+                </entity-find>
+                
+                <set field="amountTotal" value="0.0" type="BigDecimal"/>
+                <set field="hoursTotal" value="0.0" type="BigDecimal"/>
+
+                <iterate list="timeEntryList" entry="timeEntry">
+
+                    <set field="hours" from="timeEntry?.hours ?: 0.0" type="BigDecimal"/>
+                    <set field="hourlyRate" from="timeEntry?.vendorHourRate ?: 0.0" type="BigDecimal"/>
+                    <set field="pieceCount" from="timeEntry?.pieceCount ?: 0.0" type="BigDecimal"/>
+                    <set field="pieceRate" from="timeEntry?.vendorPieceRate ?: 0.0" type="BigDecimal"/>
+
+                    <if condition="timeEntry.rateTypeEnumId in ['RatpStandard', 'RatpEvening', 'RatpNight', 'RatpWeekend', 'RatpShHoliday']"><then>
+                        <if condition="rrpInclHourly"> <!-- Include Hourly Rates in RRP Calc -->
+                            <set field="hoursTotal" from="hoursTotal + hours"/>
+                            <if condition="rrpInclShDiff"><then> <!-- Include Shift Differential Premium in RRP Calc -->
+                                <set field="amountTotal" from="amountTotal + (hours * hourlyRate)"/>
+                            </then><else> <!-- Exclude Shift Differential Premium in RRP Calc -->
+                                <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="standardRate"
+                                              in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor',
+                                                        rateTypeEnumId:timeEntry.rateType.relatedEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                                <set field="amountTotal" from="amountTotal + (hours * (standardRate.vendorHourRate ?: 0.0))"/>
+                            </else></if>
+                        </if>
+                    </then><else-if condition="timeEntry.rateTypeEnumId in ['RatpPaidBreakStd', 'RatpPaidNptStd']">
+                        <if condition="!rrpPayOnHourlyBreak"><then> <!-- Hourly "breaks" are being rolled in -->
+                            <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="standardRate"
+                                          in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor',
+                                                        rateTypeEnumId:timeEntry.rateType.relatedEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                            <set field="hoursTotal" from="hoursTotal + hours"/>
+                            <set field="amountTotal" from="amountTotal + (hours * (standardRate.vendorHourRate ?: 0.0))"/>
+                        </then></if>
+                    </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPiece'">
+                        <!-- Note: Using the greater of pieces * piece rate OR hours * rate, while not an uncommon practice for
+                                   handling the minimimum wage test, it potentially over inflates the RRP calculation.  A better
+                                   practice would be to use this without a base hourly rate and to let the minimum wage makeup
+                                   test be handled later in the calculation process. -->
+                        <set field="hoursTotal" from="hoursTotal + hours"/>
+                        <set field="hourlyAmount" from="hours * hourlyRate"/>
+                        <set field="pieceAmount" from="pieceCount * pieceRate"/>
+                        <set field="amountTotal" from="amountTotal + (hourlyAmount > pieceAmount ? hourlyAmount : pieceAmount)"/>
+                    </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPiecePlusHour'">
+                        <set field="hoursTotal" from="hoursTotal + hours"/>
+                        <set field="amountTotal" from="amountTotal + (hours * hourlyRate) + (pieceCount * pieceRate)"/>
+                    </else-if></if>
+                </iterate>
+
+                <!-- TODO: RRP amountTotal needs to include non-discretionary bonuses.  This does not currently support them.
+                     In the interim, a time entry with 0 hours and pieces will have the same effect.
+                     TODO: It is necessary to know the from and thru dates the non-discretionary bonus is for (perhaps even
+                     the work type it was for), it is possible this span weeks, pay periods, etc. -->
+
+                <set field="calculatedRrp" from="hoursTotal > 0.0 ? amountTotal / hoursTotal : 0.0 " type="BigDecimal"/>
+
+                <!-- Compare against minimum wage if necessary -->
+                <if condition="mwCheck &amp;&amp; mwDefault > calculatedRrp">
+                    <set field="calculatedRrp" from="mwDefault"/>
+                </if>
+
+                <set field="regularRateOfPay" from="calculatedRrp"/>
+
+             </else></if>
+        </actions>
+    </service>
+
+    <service verb="calculate" noun="RegularRatesOfPay">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="currencyUomId" default-value="USD"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="regularRatesOfPay" type="List"/>
+        </out-parameters>
+        <actions>
+            <set field="regularRatesOfPay" from="[]"/>
+
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="fromDetail">
+                <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
+
+            <set field="fromTpTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.fromDate} 00:00:00.000&quot;, '')"/>
+            <set field="fromTpTimestampZdt" from="java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli((long) fromTpTimestamp.time),
+                    (java.time.ZoneId) ec.entity.databaseTimeZone.toZoneId())"/>
+            <set field="thruTpTimestamp" from="ec.l10n.parseTimestamp(&quot;${timePeriod.thruDate} 23:59:59.999&quot;, '')"/>
+            <set field="thruTpTimestampZdt" from="java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli((long) thruTpTimestamp.time),
+                    (java.time.ZoneId) ec.entity.databaseTimeZone.toZoneId())"/>
+
+            <!-- How frequently is RRP calculated? -->
+            <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                          in-map="[partySettingTypeId:'PayrollRrpCalcPer',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+            <set field="rrpCalcPer" from="getPsvOut.settingValue"/> <!-- PcfWorkWeek/PcfPayPeriod -->
+
+            <!-- Determine the periods in which RRP rates need to be determined -->
+            <if condition="rrpCalcPer == 'PcfPayPeriod'"><then>
+                <service-call name="mantle.humanres.PayrollCalcServices.calculate#RegularRateOfPay" in-map="[partyRelationshipId:partyRelationshipId,
+                    fromTimestamp:fromTpTimestamp,thruTimestamp:thruTpTimestamp,currencyUomId:currencyUomId]" out-map="context"/>
+                <set field="rrpMap" from="[regularRateOfPay:regularRateOfPay,currencyUomId:currencyUomId,
+                                           fromTimestamp:fromTpTimestamp,thruTimestamp:thruTpTimestamp]"/>
+                <script>regularRatesOfPay.add(rrpMap)</script>
+            </then><else><!-- Default to PcfWorkweek -->
+                <!-- There may be multiple RRP, and the RRP could span pay periods since it is based on the work week and
+                     the pay periods may not align -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollFlsaWrkWkBegOn',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="flsaWrkWkBegOnEnumId" from="getPsvOut.settingValue"/>
+                <entity-find-one entity-name="moqui.basic.Enumeration" value-field="flsaWrkWkBegOn">
+                    <field-map field-name="enumId" from="flsaWrkWkBegOnEnumId"/>
+                </entity-find-one>
+
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollFlsaWrkDayBegAt',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="flsaWrkDayBegAt" from="getPsvOut.settingValue"/>
+
+                <!-- Find the start of the first workweek and set the time to midnight -->
+                <set field="fromTimestampZdt" from="fromTpTimestampZdt.withHour(0).withMinute(0).withSecond(0).withNano(0)"/>
+                <set field="hhMmFormatter" from="java.time.format.DateTimeFormatter.ofPattern('HH:MM')"/>
+                <set field="flsaWrkDayBegAtHhMm" from="java.time.LocalTime.parse(flsaWrkDayBegAt, hhMmFormatter)"/>
+                <set field="fromTimestampDowValue" from="fromTimestampZdt.getDayOfWeek().getValue()"/>
+                <if condition="fromTimestampDowValue != flsaWrkWkBegOn.sequenceNum">
+                    <set field="fromTimestampZdt" from="fromTimestampZdt.minus(fromTimestampDowValue - flsaWrkWkBegOn.sequenceNum +
+                    (fromTimestampDowValue > flsaWrkWkBegOn.sequenceNum ? 0 : 7), java.time.temporal.ChronoUnit.DAYS)"/>
+                </if>
+
+                <!-- Adjust the hour up to the time the FLSA work day begins -->
+                <set field="fromTimestampZdt" from="fromTimestampZdt.withHour(flsaWrkDayBegAtHhMm.getHour()).withMinute(flsaWrkDayBegAtHhMm.getMinute())"/>
+
+                <set field="workweekList" from="[]"/>
+                <while condition="fromTimestampZdt.isBefore(thruTpTimestampZdt)">
+                    <script>workweekList.add([fromTimestamp:java.sql.Timestamp.from(fromTimestampZdt.toInstant()),
+                                              thruTimestamp:java.sql.Timestamp.from(fromTimestampZdt.plus(1, java.time.temporal.ChronoUnit.WEEKS).minus(1, java.time.temporal.ChronoUnit.MILLIS).toInstant())])</script>
+                    <set field="fromTimestampZdt" from="fromTimestampZdt.plus(1, java.time.temporal.ChronoUnit.WEEKS)"/> <!-- TODO: Is adding a week "safe" during daylight savings and standard time stransitions? -->
+                </while>
+
+                <iterate list="workweekList" entry="workweek">
+                    <service-call name="mantle.humanres.PayrollCalcServices.calculate#RegularRateOfPay" in-map="[partyRelationshipId:partyRelationshipId,
+                        fromTimestamp:workweek.fromTimestamp,thruTimestamp:workweek.thruTimestamp,currencyUomId:currencyUomId]" out-map="context"/>
+                    <set field="rrpMap" from="[regularRateOfPay:regularRateOfPay,currencyUomId:currencyUomId,
+                                           fromTimestamp:workweek.fromTimestamp,thruTimestamp:workweek.thruTimestamp]"/>
+                    <script>regularRatesOfPay.add(rrpMap)</script>
+                </iterate>
+            </else></if>
+        </actions>
+    </service>
+
+    <service verb="calculate" noun="SickRateOfPay">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="fromTimestamp" required="true" type="Timestamp"/>
+            <parameter name="thruTimestamp" required="true" type="Timestamp"/>
+            <parameter name="currencyUomId" default-value="USD"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="sickRateOfPay" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <set field="sickRateOfPay" value="0.0" type="BigDecimal"/>
+            <!-- TODO: Everything -->
+        </actions>
+    </service>
+
+    <service verb="calculate" noun="SickRatesOfPay">
+        <in-parameters>
+            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="currencyUomId" default-value="USD"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="sickRatesOfPay" type="List"/>
+        </out-parameters>
+        <actions>
+            <set field="sickRatesOfPay" from="[]"/>
+            <!-- TODO: Everything -->
+        </actions>
+    </service>
+</services>
