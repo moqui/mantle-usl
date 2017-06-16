@@ -593,7 +593,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     isSummary="N" invoiceItemSeqId="05"/>
 
                 <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="06" debitCreditFlag="C"
-                    amount="23795" glAccountTypeEnumId="GatAccountsPayable" glAccountId="210000000"
+                    amount="23795" glAccountTypeEnumId="GatAccountsPayable" glAccountId="212000000"
                     reconcileStatusId="AterNot" isSummary="N"/>
             </mantle.ledger.transaction.AcctgTrans>
 
@@ -627,7 +627,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="50" glAccountId="517000000"
                         reconcileStatusId="AterNot" invoiceItemSeqId="06" isSummary="N" glAccountTypeEnumId="GatCogs"
                         debitCreditFlag="D"/>
-                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" amount="50" glAccountId="210000000"
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" amount="50" glAccountId="212000000"
                         reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatAccountsPayable" debitCreditFlag="C"/>
             </mantle.ledger.transaction.AcctgTrans>
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55406" otherPartyId="ZiddlemanInc"
@@ -636,7 +636,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="15" glAccountId="864000000"
                         reconcileStatusId="AterNot" invoiceItemSeqId="07" isSummary="N" glAccountTypeEnumId="GatIncome"
                         debitCreditFlag="C"/>
-                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" amount="15" glAccountId="210000000"
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" amount="15" glAccountId="212000000"
                         reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatAccountsPayable" debitCreditFlag="D"/>
             </mantle.ledger.transaction.AcctgTrans>
         </entity-facade-xml>""").check(dataCheckErrors)
@@ -710,7 +710,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 otherPartyId="ZiddlemanInc" paymentId="${setInfoOut.paymentId}"
                 paymentApplicationId="${sendPmtResult.paymentApplicationId}"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55408" acctgTransEntrySeqId="01" debitCreditFlag="D"
-                amount="23830" glAccountId="210000000" reconcileStatusId="AterNot" isSummary="N"/>
+                amount="23830" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55408" acctgTransEntrySeqId="02" debitCreditFlag="C"
                 amount="23830" glAccountId="216000000" reconcileStatusId="AterNot" isSummary="N"/>
         </entity-facade-xml>""").check(dataCheckErrors)

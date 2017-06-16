@@ -119,7 +119,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.ledger.config.GlAccountTypeDefault glAccountTypeEnumId="GatAccountsReceivable"
                 organizationPartyId="${vendorResult.partyId}" glAccountId="121000000"/>
             <mantle.ledger.config.GlAccountTypeDefault glAccountTypeEnumId="GatAccountsPayable"
-                organizationPartyId="${vendorResult.partyId}" glAccountId="210000000"/>
+                organizationPartyId="${vendorResult.partyId}" glAccountId="212000000"/>
             <mantle.ledger.config.PaymentInstrumentGlAccount paymentInstrumentEnumId="PiCompanyCheck" isPayable="E"
                 organizationPartyId="${vendorResult.partyId}" glAccountId="111100000"/>
             <mantle.ledger.config.ItemTypeGlAccount glAccountId="412000000" direction="O" itemTypeEnumId="ItemTimeEntry"
@@ -129,11 +129,11 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.ledger.config.ItemTypeGlAccount itemTypeEnumId="ItemExpTravAir" direction="E" glAccountId="681100000"
                 organizationPartyId="${vendorResult.partyId}"/>
             <mantle.ledger.account.GlAccountOrganization glAccountId="121000000" organizationPartyId="${vendorResult.partyId}"/>
-            <mantle.ledger.account.GlAccountOrganization glAccountId="210000000" organizationPartyId="${vendorResult.partyId}"/>
+            <mantle.ledger.account.GlAccountOrganization glAccountId="212000000" organizationPartyId="${vendorResult.partyId}"/>
             <mantle.ledger.config.PaymentTypeGlAccount paymentTypeEnumId="PtInvoicePayment"
                 organizationPartyId="${vendorResult.partyId}" isPayable="N" isApplied="Y" glAccountId="121000000"/>
             <mantle.ledger.config.PaymentTypeGlAccount paymentTypeEnumId="PtInvoicePayment"
-                organizationPartyId="${vendorResult.partyId}" isPayable="Y" isApplied="Y" glAccountId="210000000"/>
+                organizationPartyId="${vendorResult.partyId}" isPayable="Y" isApplied="Y" glAccountId="212000000"/>
 
             <mantle.party.Party partyId="${vendorRepResult.partyId}" partyTypeEnumId="PtyPerson" disabled="N"/>
             <mantle.party.Person partyId="${vendorRepResult.partyId}" firstName="Vendor" lastName="TestRep"/>
@@ -683,7 +683,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="06" debitCreditFlag="D"
                 amount="160" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="06"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="07" debitCreditFlag="C"
-                amount="1009.12" glAccountTypeEnumId="GatAccountsPayable" glAccountId="210000000" reconcileStatusId="AterNot" isSummary="N"/>
+                amount="1009.12" glAccountTypeEnumId="GatAccountsPayable" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
             <mantle.work.effort.WorkEffortInvoice invoiceId="${expInvResult.invoiceId}" workEffortId="TEST"/>
 
             <mantle.account.payment.Payment paymentId="${expPmtResult.paymentId}" paymentTypeEnumId="PtInvoicePayment"
@@ -696,7 +696,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" otherPartyId="${workerResult.partyId}"
                 paymentId="${expPmtResult.paymentId}"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55901" acctgTransEntrySeqId="01" debitCreditFlag="D"
-                amount="1009.12" glAccountId="210000000" reconcileStatusId="AterNot" isSummary="N"/>
+                amount="1009.12" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55901" acctgTransEntrySeqId="02" debitCreditFlag="C"
                 amount="1009.12" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N"/>
 
