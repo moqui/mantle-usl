@@ -1273,7 +1273,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" cache="false">
                 <econdition field-name="shipmentId"/><econdition field-name="productId"/>
-                <econdition field-name="quantityNotHandled" operator="not-equals" from="0"/>
+                <econdition field-name="quantityNotHandled" operator="not-equals" from="0.0"/>
             </entity-find>
             <set field="quantityRemaining" from="quantity"/>
             <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
@@ -1305,7 +1305,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if an assetReservationId is passed make sure it is for the same order item, etc -->
             <if condition="assetReservationId">
                 <entity-find-one entity-name="mantle.product.issuance.AssetReservation" value-field="assetReservation"/>
-                <if condition="!assetReservation"><return error="true" message="Reservation [${assetReservationId}] not found, not packing"/></if>
+                <if condition="assetReservation == null"><return error="true" message="Reservation [${assetReservationId}] not found, not packing"/></if>
                 <if condition="shipmentItemSource.orderId != assetReservation.orderId || shipmentItemSource.orderItemSeqId != assetReservation.orderItemSeqId">
                     <return error="true" message="Reservation order item [${assetReservation.orderId}:${assetReservation.orderItemSeqId}] does not match shipment item source order item [${shipmentItemSource.orderId}:${shipmentItemSource.orderItemSeqId}], not packing"/></if>
                 <if condition="quantity &gt; assetReservation.quantityNotIssued">
@@ -1335,7 +1335,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="quantityRemaining" from="quantity"/>
 
             <!-- first issue based on AssetReservation records if available -->
-            <if condition="assetReservation"><then>
+            <if condition="assetReservation != null"><then>
                 <set field="assetReservationList" from="[assetReservation]"/>
             </then><else-if condition="!assetReservationList">
                 <!-- get these by order of assetId so that different threads behave consistently for locking (avoid deadlocks!) -->
@@ -1362,14 +1362,14 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- issue based on reservations -->
                 <iterate list="assetReservationList" entry="assetReservation">
                     <if condition="assetReservation.quantityNotIssued &lt; 0">
-                        <return error="true" message="In pack#ShipmentItemSource found AssetReservation ${assetReservation.assetReservationId} with invalid (negative) quantityNotIssued ${assetReservation.quantityNotIssued}"/></if>
+                        <return error="true" message="In pack ShipmentItemSource found AssetReservation ${assetReservation.assetReservationId} with invalid (negative) quantityNotIssued ${assetReservation.quantityNotIssued}"/></if>
                     <set field="quantityToIssue" from="assetReservation.quantityNotIssued > quantityRemaining ?
                         quantityRemaining : assetReservation.quantityNotIssued"/>
                     <set field="quantityRemaining" from="quantityRemaining > assetReservation.quantityNotIssued ?
                         (quantityRemaining - assetReservation.quantityNotIssued) : 0"/>
                     <service-call name="mantle.product.AssetServices.issue#AssetReservation"
                             in-map="[assetReservation:assetReservation, shipmentId:shipmentItemSource.shipmentId,
-                                issuedDate:packDate, quantity:quantityToIssue]"/>
+                                shipmentItemSourceId:shipmentItemSourceId, issuedDate:packDate, quantity:quantityToIssue]"/>
 
                     <!-- if the asset has a shipmentBoxTypeId it is already packaged, so create a package just for it -->
                     <!-- TODO: do something similar if Product is set as already packaged -->
@@ -1391,8 +1391,9 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <!-- do a non-reservation asset issuance -->
                 <service-call name="mantle.product.AssetServices.issue#Asset"
-                        in-map="[shipmentId:shipmentItemSource.shipmentId, quantity:quantityToIssue, issuedDate:packDate,
-                            assetId:assetId, orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId]"/>
+                        in-map="[shipmentId:shipmentItemSource.shipmentId, shipmentItemSourceId:shipmentItemSourceId,
+                            quantity:quantityToIssue, issuedDate:packDate, assetId:assetId,
+                            orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId]"/>
             </if>
 
             <!-- quantityRemaining? something didn't work, wasn't able to get all so return an error and roll back -->
@@ -1419,6 +1420,37 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.order.OrderServices.checkComplete#OrderPart"
                         in-map="[orderId:orderItem.orderId, orderPartSeqId:orderItem.orderPartSeqId]"/>
             </if>
+        </actions>
+    </service>
+
+    <service verb="unpack" noun="ShipmentItemIssuance">
+        <in-parameters>
+            <parameter name="assetIssuanceId" required="true"/>
+            <parameter name="unpackDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+        </in-parameters>
+        <out-parameters><parameter name="assetReservationId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.product.issuance.AssetIssuance" value-field="assetIssuance"/>
+            <set field="shipmentId" from="assetIssuance.shipmentId"/>
+            <if condition="!shipmentId"><return error="true" message="Cannot unpack issuance ${assetIssuanceId}, not on a shipment"/></if>
+            <set field="originalQuantity" from="assetIssuance.quantity"/>
+            <if condition="!originalQuantity">
+                <return message="No quantity to unpack for issuance ${assetIssuanceId} of asset ${assetIssuance.assetId} in shipment ${shipmentId}"/></if>
+            <if condition="!assetIssuance.shipmentItemSourceId">
+                <return error="true" message="Cannot unpack issuance ${assetIssuanceId}, has no shipment item source"/></if>
+
+            <entity-find-one entity-name="mantle.shipment.ShipmentItemSource" value-field="shipmentItemSource" for-update="true">
+                <field-map field-name="shipmentItemSourceId" from="assetIssuance.shipmentItemSourceId"/></entity-find-one>
+            <if condition="shipmentItemSource.invoiceId">
+                <return error="true" message="Cannot unpack issuance ${assetIssuanceId}, item source ${assetIssuance.shipmentItemSourceId} already on invoice ${shipmentItemSource.invoiceId}"/></if>
+
+            <set field="shipmentItemSource.quantityNotHandled" from="shipmentItemSource.quantityNotHandled + originalQuantity"/>
+            <if condition="shipmentItemSource.statusId == 'SisPacked'">
+                <set field="shipmentItemSource.statusId" value="SisPending"/></if>
+            <entity-update value-field="shipmentItemSource"/>
+
+            <service-call name="mantle.product.AssetServices.cancel#AssetIssuance" out-map="context"
+                    in-map="[assetIssuanceId:assetIssuanceId, cancelDate:unpackDate]"/>
         </actions>
     </service>
 
