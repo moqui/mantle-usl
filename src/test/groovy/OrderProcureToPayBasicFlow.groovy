@@ -838,7 +838,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                         availableToPromiseDiff="-1" shipmentId="55401" effectiveDate="${effectiveTime}" quantityOnHandDiff="-1"/>
             </mantle.product.issuance.AssetIssuance>
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55411" assetIssuanceId="55400" postedDate="${effectiveTime}"
-                    amountUomId="USD" isPosted="Y" assetId="${equip1AssetId}" acctgTransTypeEnumId="AttInventoryIssuance"
+                    amountUomId="USD" isPosted="Y" assetId="${equip1AssetId}" acctgTransTypeEnumId="AttAssetIssuance"
                     glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry amount="10000" productId="EQUIP_1" glAccountId="131100000"
                         reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatFixedAsset"
@@ -950,7 +950,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                         availableToPromiseDiff="-1" shipmentId="55402" effectiveDate="${effectiveTime}" quantityOnHandDiff="-1"/>
             </mantle.product.issuance.AssetIssuance>
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55414" assetIssuanceId="55401" postedDate="${effectiveTime}"
-                    amountUomId="USD" isPosted="Y" assetId="${equip2AssetId}" acctgTransTypeEnumId="AttInventoryIssuance"
+                    amountUomId="USD" isPosted="Y" assetId="${equip2AssetId}" acctgTransTypeEnumId="AttAssetIssuance"
                     glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry amount="10000" productId="EQUIP_1" glAccountId="131100000"
                         reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatFixedAsset"
