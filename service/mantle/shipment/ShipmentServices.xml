@@ -1694,6 +1694,60 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="print" noun="ShipmentLabels">
+        <in-parameters>
+            <parameter name="networkPrinterId" required="true"/>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="shipmentRouteSegmentSeqId"/>
+            <parameter name="shipmentPackageSeqId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="printJobIdList" type="List"><parameter name="printJobId"/></parameter>
+        </out-parameters>
+        <actions>
+            <entity-find entity-name="mantle.shipment.ShipmentPackageRouteSeg" list="packageRouteSegList">
+                <econdition field-name="shipmentId"/>
+                <econdition field-name="shipmentRouteSegmentSeqId" ignore-if-empty="true"/>
+                <econdition field-name="shipmentPackageSeqId" ignore-if-empty="true"/>
+            </entity-find>
+            <iterate list="packageRouteSegList" entry="packageRouteSeg">
+                <set field="labelUrl" from="packageRouteSeg.labelUrl"/>
+                <set field="labelImage" from="packageRouteSeg.getSerialBlob('labelImage')"/>
+                <if condition="!labelUrl &amp;&amp; labelImage == null">
+                    <message>Package ${packageRouteSeg.shipmentPackageSeqId} route segment ${packageRouteSeg.shipmentRouteSegmentSeqId} has no label URL or image</message>
+                    <continue/>
+                </if>
+                <!-- get label binary from URL -->
+                <if condition="labelImage == null"><script><![CDATA[
+                    byte[] labelBytes = null
+                    contentType = null
+                    try {
+                        org.moqui.context.ExecutionContext ec = context.ec
+                        org.moqui.util.RestClient.RestResponse labelResponse = ec.service.rest().method("GET").uri((String) labelUrl).call()
+                        if (labelResponse.statusCode == 200) {
+                            labelBytes = labelResponse.bytes()
+                            contentType = labelResponse.getContentType()
+                            if (labelBytes == null || labelBytes.length == 0)
+                                ec.message.addMessage("Got empty response downloading label for package ${packageRouteSeg.shipmentPackageSeqId} route segment ${packageRouteSeg.shipmentRouteSegmentSeqId}")
+                        } else {
+                            ec.message.addMessage("Error downloading label for package ${packageRouteSeg.shipmentPackageSeqId} route segment ${packageRouteSeg.shipmentRouteSegmentSeqId}: ${labelResponse.getReasonPhrase()}")
+                        }
+                    } catch (Exception e) {
+                        ec.logger.log(ec.logger.ERROR_INT, "Error downloading label for package ${packageRouteSeg.shipmentPackageSeqId} route segment ${packageRouteSeg.shipmentRouteSegmentSeqId} at ${labelUrl}: ${e.toString()}", e)
+                        ec.message.addMessage("Error downloading label for package ${packageRouteSeg.shipmentPackageSeqId} route segment ${packageRouteSeg.shipmentRouteSegmentSeqId}: ${e.toString()}")
+                    }
+                    if (labelBytes != null && labelBytes.length > 0) labelImage = new javax.sql.rowset.serial.SerialBlob(labelBytes)
+                ]]></script></if>
+                <if condition="labelImage == null"><continue/></if>
+
+                <set field="jobName" value="ShipmentLabel${shipmentId}-${packageRouteSeg.shipmentRouteSegmentSeqId}-${packageRouteSeg.shipmentPackageSeqId}"/>
+                <service-call name="org.moqui.impl.PrintServices.print#Document" out-map="printOut" out-map-add-to-existing="false"
+                        in-map="[networkPrinterId:networkPrinterId, jobName:jobName, serialBlob:labelImage, contentType:contentType]"/>
+                <message>Printed label for package ${packageRouteSeg.shipmentPackageSeqId} route segment ${packageRouteSeg.shipmentRouteSegmentSeqId}, print job ${printOut.printJobId} CUPS job ${printOut.jobId}</message>
+            </iterate>
+        </actions>
+    </service>
+
     <!-- ============================================ -->
     <!-- ========== Status Update Services ========== -->
     <!-- ============================================ -->
