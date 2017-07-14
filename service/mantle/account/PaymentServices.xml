@@ -495,12 +495,13 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="paymentApplicationId" from="paymentAppList ? paymentAppList[0].paymentApplicationId : null"/>
         </actions>
     </service>
-    <service verb="send" noun="PromisedPayment" transaction="cache">
+    <service verb="send" noun="PromisedPayment">
+        <!-- TODO: with transaction="cache" here is unable to find PaymentApplication for paymentId and invoiceId in apply#InvoicePayment -->
         <in-parameters>
             <parameter name="paymentId" required="true"/>
             <parameter name="invoiceId" required="true"/>
             <parameter name="statusId" default-value="PmntDelivered"/>
-            <parameter name="effectiveDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="effectiveDate" type="Timestamp"/>
             <parameter name="paymentRefNum"/>
             <parameter name="comments"/>
             <parameter name="billingAccountId"/>
@@ -516,10 +517,10 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <service-call name="mantle.account.PaymentServices.check#InvoiceStatusForPayment" in-map="[invoiceId:invoiceId]"/>
 
-            <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
+            <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment" for-update="true"/>
             <if condition="!amount"><set field="amount" from="payment.amount"/></if>
-            <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, amount:amount,
-                    statusId:statusId, effectiveDate:effectiveDate, paymentRefNum:paymentRefNum, comments:comments]"/>
+            <if condition="effectiveDate == null"><set field="effectiveDate" from="payment.effectiveDate ?: ec.user.nowTimestamp"/></if>
+            <service-call name="update#mantle.account.payment.Payment" in-map="context"/>
             <service-call name="mantle.account.PaymentServices.apply#InvoicePayment" in-map="context" out-map="context"/>
         </actions>
     </service>
@@ -588,7 +589,14 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:paymentId]" out-map="context"/>
             <if condition="amountApplied > unappliedTotal"><set field="amountApplied" from="unappliedTotal"/></if>
 
-            <if condition="amountApplied == 0.0"><return/></if>
+            <if condition="amountApplied == 0.0">
+                <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
+                    <econdition field-name="paymentId"/><econdition field-name="invoiceId"/></entity-find>
+                <log level="warn" message="apply amountApplied zero ${paymentId}:${invoiceId}: ${paymentApplicationList}"/>
+                <if condition="paymentApplicationList?.size() == 1">
+                    <set field="paymentApplicationId" from="paymentApplicationList[0].paymentApplicationId"/></if>
+                <return/>
+            </if>
 
             <if condition="payment.amountUomId != invoice.currencyUomId">
                 <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment has a different currency ${payment.amountUomId} than invoice ${invoice.currencyUomId}</message></if>
@@ -941,6 +949,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <log level="info" message="Not authorizing Payment [${paymentId}], already delivered (captured)"/>
                 <return/>
             </if>
+            <if condition="payment.statusId in ['PmntCancelled', 'PmntVoid', 'PmntRefunded']">
+                <return message="Not authorizing cancelled, void, or refunded Payment ${paymentId} [${payment.statusId}]"/></if>
 
             <!-- use paymentGatewayConfigId from Payment if present -->
             <if condition="!paymentGatewayConfigId"><set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/></if>
@@ -1049,8 +1059,8 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if the Payment.statusId is already PmntDelivered don't try again -->
             <!-- NOTE: also handle other statuses, ie anything other than PmntAuthorized? might be too inflexible... -->
             <if condition="payment.statusId != 'PmntAuthorized'">
-                <log level="info" message="Not capturing Payment ${paymentId}, is in ${payment.statusId} and not the Authorized status."/>
-                <return/>
+                <log level="info" message="Not capturing Payment ${paymentId}, is in ${payment.statusId} and not the Authorized status"/>
+                <return message="Not capturing Payment ${paymentId}, is in ${payment.statusId} and not the Authorized status"/>
             </if>
 
             <!-- use paymentGatewayConfigId from Payment if present -->

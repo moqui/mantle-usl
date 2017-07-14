@@ -361,7 +361,7 @@ class OrderToCashBasicFlow extends Specification {
             <!-- Invoice created and Finalized (status set by action in SECA rule), then Payment Received (status set by Payment application) -->
             <mantle.account.invoice.Invoice invoiceId="55500" invoiceTypeEnumId="InvoiceSales"
                 fromPartyId="ORG_ZIZI_RETAIL" toPartyId="CustJqp" statusId="InvoicePmtRecvd" invoiceDate="${effectiveTime}"
-                description="Invoice for Order ${cartOrderId} part 01 and Shipment ${shipResult.shipmentId}" currencyUomId="USD"/>
+                description="For Order ${cartOrderId} part 01 and Shipment ${shipResult.shipmentId}" currencyUomId="USD"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="55500" invoiceItemSeqId="01" itemTypeEnumId="ItemProduct"
                 productId="DEMO_1_1" quantity="1" amount="16.99" description="Demo Product One-One" itemDate="${effectiveTime}"/>
@@ -445,7 +445,7 @@ class OrderToCashBasicFlow extends Specification {
                 glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" otherPartyId="CustJqp"
                 paymentId="${setInfoOut.paymentId}"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55503" acctgTransEntrySeqId="01" debitCreditFlag="C"
-                amount="${kieEnabled ? '145.68' : '140.68'}" glAccountId="126000000" reconcileStatusId="AterNot" isSummary="N"/>
+                amount="${kieEnabled ? '145.68' : '140.68'}" glAccountId="121000000" reconcileStatusId="AterNot" isSummary="N"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55503" acctgTransEntrySeqId="02" debitCreditFlag="D"
                 amount="${kieEnabled ? '145.68' : '140.68'}" glAccountId="122000000" reconcileStatusId="AterNot" isSummary="N"/>
         </entity-facade-xml>""").check()
