@@ -29,6 +29,7 @@ class WorkPlanToCashBasicFlow extends Specification {
     @Shared Map vendorResult, workerResult, clientRateResult, vendorRateResult, clientResult, expInvResult, clientInvResult
     @Shared long effectiveTime
     @Shared Timestamp effectiveThruDate
+    @Shared String startYear = "2016"
 
     def setupSpec() {
         // init the framework, get the ec
@@ -78,7 +79,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         // internal org and accounting config default settings
         ec.service.sync().name("create#mantle.party.PartyRole").parameters([partyId:vendorResult.partyId, roleTypeId:'OrgInternal']).call()
         ec.service.sync().name("mantle.ledger.LedgerServices.init#PartyAccountingConfiguration")
-                .parameters([sourcePartyId:'DefaultSettings', organizationPartyId:vendorResult.partyId]).call()
+                .parameters([sourcePartyId:'DefaultSettings', organizationPartyId:vendorResult.partyId, startYear:startYear]).call()
         // vendor payment/ar rep
         Map vendorRepResult = ec.service.sync().name("mantle.party.PartyServices.create#Account")
                 .parameters([firstName:'Vendor', lastName:'TestRep', emailAddress:'vendor.rep@test.com',
@@ -313,7 +314,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         // assign Joe Developer to TEST project as Programmer (necessary for determining RateAmount, etc)
         ec.service.sync().name("create#mantle.work.effort.WorkEffortParty")
                 .parameters([workEffortId:'TEST', partyId:workerResult.partyId, roleTypeId:'Assignee', emplPositionClassId:'Programmer',
-                    fromDate:'2013-11-01', statusId:'WeptAssigned']).call()
+                    fromDate:startYear + '-11-01', statusId:'WeptAssigned']).call()
 
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.work.effort.WorkEffort workEffortId="TEST" workEffortTypeEnumId="WetProject" statusId="WeInProgress" workEffortName="Test Project"/>
@@ -321,7 +322,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${clientResult.partyId}" roleTypeId="Customer" fromDate="${effectiveTime}"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${vendorResult.partyId}" roleTypeId="Vendor" fromDate="${effectiveTime}"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST" partyId="${workerResult.partyId}" roleTypeId="Assignee"
-                fromDate="1383282000000" statusId="WeptAssigned" emplPositionClassId="Programmer"/>
+                fromDate="1477976400000" statusId="WeptAssigned" emplPositionClassId="Programmer"/>
 
             <moqui.entity.EntityAuditLog auditHistorySeqId="55909" changedEntityName="mantle.work.effort.WorkEffort"
                 changedFieldName="statusId" pkPrimaryValue="TEST" newValueText="WeInPlanning" changedDate="${effectiveTime}"
@@ -335,7 +336,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55912" changedEntityName="mantle.work.effort.WorkEffortParty"
                 changedFieldName="statusId" pkPrimaryValue="TEST" pkSecondaryValue="${workerResult.partyId}"
-                pkRestCombinedValue="roleTypeId:'Assignee',fromDate:'1383282000000'" newValueText="WeptAssigned"
+                pkRestCombinedValue="roleTypeId:'Assignee',fromDate:'1477976400000'" newValueText="WeptAssigned"
                 changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
 
             </entity-facade-xml>""").check()
@@ -349,18 +350,18 @@ class WorkPlanToCashBasicFlow extends Specification {
         when:
         ec.service.sync().name("mantle.work.ProjectServices.create#Milestone")
                 .parameters([rootWorkEffortId:'TEST', workEffortId:'TEST-MS-01', workEffortName:'Test Milestone 1',
-                    estimatedStartDate:'2013-11-01', estimatedCompletionDate:'2013-11-30', statusId:'WeInProgress'])
+                    estimatedStartDate:startYear + '-11-01', estimatedCompletionDate:startYear + '-11-30', statusId:'WeInProgress'])
                 .call()
         ec.service.sync().name("mantle.work.ProjectServices.create#Milestone")
                 .parameters([rootWorkEffortId:'TEST', workEffortId:'TEST-MS-02', workEffortName:'Test Milestone 2',
-                    estimatedStartDate:'2013-12-01', estimatedCompletionDate:'2013-12-31', statusId:'WeApproved'])
+                    estimatedStartDate:startYear + '-12-01', estimatedCompletionDate:startYear + '-12-31', statusId:'WeApproved'])
                 .call()
 
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.work.effort.WorkEffort workEffortId="TEST-MS-01" rootWorkEffortId="TEST" workEffortTypeEnumId="WetMilestone"
-                statusId="WeInProgress" workEffortName="Test Milestone 1" estimatedStartDate="2013-11-01 00:00:00.0" estimatedCompletionDate="2013-11-30 00:00:00.0"/>
+                statusId="WeInProgress" workEffortName="Test Milestone 1" estimatedStartDate="${startYear}-11-01 00:00:00.0" estimatedCompletionDate="${startYear}-11-30 00:00:00.0"/>
             <mantle.work.effort.WorkEffort workEffortId="TEST-MS-02" rootWorkEffortId="TEST" workEffortTypeEnumId="WetMilestone"
-                statusId="WeApproved" workEffortName="Test Milestone 2" estimatedStartDate="2013-12-01 00:00:00.0" estimatedCompletionDate="2013-12-31 00:00:00.0"/>
+                statusId="WeApproved" workEffortName="Test Milestone 2" estimatedStartDate="${startYear}-12-01 00:00:00.0" estimatedCompletionDate="${startYear}-12-31 00:00:00.0"/>
 
             <moqui.entity.EntityAuditLog auditHistorySeqId="55913" changedEntityName="mantle.work.effort.WorkEffort"
                 changedFieldName="statusId" pkPrimaryValue="TEST-MS-01" newValueText="WeInProgress"
@@ -379,19 +380,19 @@ class WorkPlanToCashBasicFlow extends Specification {
         when:
         ec.service.sync().name("mantle.work.TaskServices.create#Task")
                 .parameters([rootWorkEffortId:'TEST', parentWorkEffortId:null, workEffortId:'TEST-001', milestoneWorkEffortId:'TEST-MS-01',
-                    workEffortName:'Test Task 1', estimatedCompletionDate:'2013-11-15', statusId:'WeApproved',
+                    workEffortName:'Test Task 1', estimatedCompletionDate:startYear + '-11-15', statusId:'WeApproved',
                     assignToPartyId:workerResult.partyId, priority:3, purposeEnumId:'WepTask', estimatedWorkTime:10,
                     description:'Will be really great when it\'s done'])
                 .call()
         ec.service.sync().name("mantle.work.TaskServices.create#Task")
                 .parameters([rootWorkEffortId:'TEST', parentWorkEffortId:'TEST-001', workEffortId:'TEST-001A', milestoneWorkEffortId:'TEST-MS-01',
-                    workEffortName:'Test Task 1A', estimatedCompletionDate:'2013-11-15', statusId:'WeInPlanning',
+                    workEffortName:'Test Task 1A', estimatedCompletionDate:startYear + '-11-15', statusId:'WeInPlanning',
                     assignToPartyId:workerResult.partyId, priority:4, purposeEnumId:'WepNewFeature', estimatedWorkTime:2,
                     description:'One piece of the puzzle'])
                 .call()
         ec.service.sync().name("mantle.work.TaskServices.create#Task")
                 .parameters([rootWorkEffortId:'TEST', parentWorkEffortId:'TEST-001', workEffortId:'TEST-001B', milestoneWorkEffortId:'TEST-MS-01',
-                    workEffortName:'Test Task 1B', estimatedCompletionDate:'2013-11-15', statusId:'WeApproved',
+                    workEffortName:'Test Task 1B', estimatedCompletionDate:startYear + '-11-15', statusId:'WeApproved',
                     assignToPartyId:workerResult.partyId, priority:4, purposeEnumId:'WepFix', estimatedWorkTime:2,
                     description:'Broken piece of the puzzle'])
                 .call()
@@ -399,7 +400,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.work.effort.WorkEffort workEffortId="TEST-001" rootWorkEffortId="TEST" workEffortTypeEnumId="WetTask"
                 purposeEnumId="WepTask" resolutionEnumId="WerUnresolved" statusId="WeApproved" priority="3"
                 workEffortName="Test Task 1" description="Will be really great when it's done"
-                estimatedCompletionDate="1384495200000" estimatedWorkTime="10" remainingWorkTime="10" timeUomId="TF_hr"/>
+                estimatedWorkTime="10" remainingWorkTime="10" timeUomId="TF_hr"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST-001" partyId="${workerResult.partyId}" roleTypeId="Assignee"
                 fromDate="${effectiveTime}" statusId="WeptAssigned"/>
             <mantle.work.effort.WorkEffortAssoc workEffortId="TEST-MS-01" toWorkEffortId="TEST-001"
@@ -408,7 +409,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.work.effort.WorkEffort workEffortId="TEST-001A" parentWorkEffortId="TEST-001" rootWorkEffortId="TEST"
                 workEffortTypeEnumId="WetTask" purposeEnumId="WepNewFeature" resolutionEnumId="WerUnresolved"
                 statusId="WeInPlanning" priority="4" workEffortName="Test Task 1A" description="One piece of the puzzle"
-                estimatedCompletionDate="1384495200000" estimatedWorkTime="2" remainingWorkTime="2" timeUomId="TF_hr"/>
+                estimatedWorkTime="2" remainingWorkTime="2" timeUomId="TF_hr"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST-001A" partyId="${workerResult.partyId}" roleTypeId="Assignee"
                 fromDate="${effectiveTime}" statusId="WeptAssigned"/>
             <mantle.work.effort.WorkEffortAssoc workEffortId="TEST-MS-01" toWorkEffortId="TEST-001A"
@@ -417,7 +418,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.work.effort.WorkEffort workEffortId="TEST-001B" parentWorkEffortId="TEST-001" rootWorkEffortId="TEST"
                 workEffortTypeEnumId="WetTask" purposeEnumId="WepFix" resolutionEnumId="WerUnresolved" statusId="WeApproved"
                 priority="4" workEffortName="Test Task 1B" description="Broken piece of the puzzle"
-                estimatedCompletionDate="1384495200000" estimatedWorkTime="2" remainingWorkTime="2" timeUomId="TF_hr"/>
+                estimatedWorkTime="2" remainingWorkTime="2" timeUomId="TF_hr"/>
             <mantle.work.effort.WorkEffortParty workEffortId="TEST-001B" partyId="${workerResult.partyId}" roleTypeId="Assignee"
                 fromDate="${effectiveTime}" statusId="WeptAssigned"/>
             <mantle.work.effort.WorkEffortAssoc workEffortId="TEST-MS-01" toWorkEffortId="TEST-001B"
@@ -474,7 +475,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         // break and from/thru dates, hours determined automatically
         ec.service.sync().name("mantle.work.TaskServices.add#TaskTime")
                 .parameters([workEffortId:'TEST-001B', partyId:workerResult.partyId, rateTypeEnumId:'RatpStandard', remainingWorkTime:0.5,
-                             hours:null, fromDate:"2013-11-03 12:00:00", thruDate:"2013-11-03 15:00:00", breakHours:1,
+                             hours:null, fromDate:"${startYear}-11-03 12:00:00", thruDate:"${startYear}-11-03 15:00:00", breakHours:1,
                              comments:"Break and from/thru dates test, hours calculated"]).call()
         // no charge time entry, test invoicing time with no amount and make sure hour quantity makes it through
         ec.service.sync().name("mantle.work.TaskServices.add#TaskTime")
@@ -506,7 +507,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 estimatedWorkTime="2" remainingWorkTime="0.5" actualWorkTime="6"/>
             <mantle.work.time.TimeEntry timeEntryId="55902" partyId="${workerResult.partyId}" rateTypeEnumId="RatpStandard"
                 rateAmountId="${clientRateResult.rateAmountId}" vendorRateAmountId="${vendorRateResult.rateAmountId}"
-                fromDate="1383501600000" thruDate="1383512400000" hours="2" breakHours="1" workEffortId="TEST-001B"/>
+                hours="2" breakHours="1" workEffortId="TEST-001B"/>
 
             <moqui.entity.EntityAuditLog auditHistorySeqId="55933" changedEntityName="mantle.work.effort.WorkEffort"
                 changedFieldName="statusId" pkPrimaryValue="TEST-001" oldValueText="WeApproved"
@@ -555,13 +556,13 @@ class WorkPlanToCashBasicFlow extends Specification {
         Map createReqResult = ec.service.sync().name("mantle.request.RequestServices.create#Request")
                 .parameters([clientPartyId:clientResult.partyId, assignToPartyId:workerResult.partyId, requestName:'Test Request 1',
                     description:'Description of Test Request 1', priority:7, requestTypeEnumId:'RqtSupport',
-                    statusId:'ReqSubmitted', responseRequiredDate:'2013-11-15 15:00:00']).call()
+                    statusId:'ReqSubmitted', responseRequiredDate:startYear + '-11-15 15:00:00']).call()
         ec.service.sync().name("mantle.request.RequestServices.update#Request")
                 .parameters([requestId:createReqResult.requestId, statusId:'ReqReviewed']).call()
 
         Map createReqTskResult = ec.service.sync().name("mantle.work.TaskServices.create#Task")
                 .parameters([rootWorkEffortId:'TEST', workEffortName:'Test Request 1 Task',
-                    estimatedCompletionDate:'2013-11-15', statusId:'WeApproved', assignToPartyId:workerResult.partyId,
+                    estimatedCompletionDate:startYear + '-11-15', statusId:'WeApproved', assignToPartyId:workerResult.partyId,
                     priority:7, purposeEnumId:'WepTask', estimatedWorkTime:2, description:'']).call()
         ec.service.sync().name("create#mantle.request.RequestWorkEffort")
                 .parameters([workEffortId:createReqTskResult.workEffortId, requestId:createReqResult.requestId]).call()
@@ -576,7 +577,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.request.Request requestId="${createReqResult.requestId}" requestTypeEnumId="RqtSupport"
                 statusId="ReqCompleted" requestName="Test Request 1" description="Description of Test Request 1" priority="7"
-                responseRequiredDate="1384549200000" requestResolutionEnumId="RrUnresolved" filedByPartyId="EX_JOHN_DOE"/>
+                requestResolutionEnumId="RrUnresolved" filedByPartyId="EX_JOHN_DOE"/>
             <mantle.request.RequestWorkEffort requestId="${createReqResult.requestId}"
                 workEffortId="${createReqTskResult.workEffortId}"/>
             <mantle.request.RequestParty requestId="${createReqResult.requestId}" partyId="${workerResult.partyId}"
@@ -585,7 +586,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 roleTypeId="Customer" fromDate="${effectiveTime}"/>
             <mantle.work.effort.WorkEffort workEffortId="${createReqTskResult.workEffortId}" rootWorkEffortId="TEST"
                 workEffortTypeEnumId="WetTask" purposeEnumId="WepTask" resolutionEnumId="WerCompleted" statusId="WeComplete"
-                priority="7" workEffortName="Test Request 1 Task" estimatedCompletionDate="1384495200000"
+                priority="7" workEffortName="Test Request 1 Task"
                 estimatedWorkTime="2" remainingWorkTime="2" timeUomId="TF_hr"/>
             <mantle.work.effort.WorkEffortParty workEffortId="${createReqTskResult.workEffortId}" partyId="${workerResult.partyId}"
                 roleTypeId="Assignee" fromDate="${effectiveTime}" statusId="WeptAssigned"/>
@@ -627,10 +628,10 @@ class WorkPlanToCashBasicFlow extends Specification {
                 .parameters([workEffortId:'TEST', fromPartyId:workerResult.partyId]).call()
         ec.service.sync().name("create#mantle.account.invoice.InvoiceItem")
                 .parameters([invoiceId:expInvResult.invoiceId, itemTypeEnumId:'ItemExpTravAir',
-                    description:'United SFO-LAX', itemDate:'2013-11-02', quantity:1, amount:345.67]).call()
+                    description:'United SFO-LAX', itemDate:startYear + '-11-02', quantity:1, amount:345.67]).call()
         ec.service.sync().name("create#mantle.account.invoice.InvoiceItem")
                 .parameters([invoiceId:expInvResult.invoiceId, itemTypeEnumId:'ItemExpTravLodging',
-                    description:'Fleabag Inn 2 nights', itemDate:'2013-11-04', quantity:1, amount:123.45]).call()
+                    description:'Fleabag Inn 2 nights', itemDate:startYear + '-11-04', quantity:1, amount:123.45]).call()
         // add worker/vendor time to the expense invoice
         ec.service.sync().name("mantle.account.InvoiceServices.create#ProjectInvoiceItems")
                 .parameters([invoiceId:expInvResult.invoiceId, workerPartyId:workerResult.partyId,
@@ -642,7 +643,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         // pay the invoice (345.67 + 123.45 + (13.5 * 40) = 1009.12)
         Map expPmtResult = ec.service.sync().name("mantle.account.PaymentServices.create#InvoicePayment")
                 .parameters([invoiceId:expInvResult.invoiceId, statusId:'PmntDelivered', amount:'1009.12',
-                    paymentInstrumentEnumId:'PiCompanyCheck', effectiveDate:'2013-11-10 12:00:00',
+                    paymentInstrumentEnumId:'PiCompanyCheck', effectiveDate:startYear + '-11-10 12:00:00',
                     paymentRefNum:'1234', comments:'Delivered by Fedex']).call()
 
         // NOTE: this has sequenced IDs so is sensitive to run order!
@@ -650,9 +651,9 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.account.invoice.Invoice invoiceId="${expInvResult.invoiceId}" invoiceTypeEnumId="InvoiceSales" fromPartyId="${workerResult.partyId}"
                 toPartyId="${vendorResult.partyId}" statusId="InvoicePmtSent" invoiceDate="${effectiveTime}" currencyUomId="USD"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="01" itemTypeEnumId="ItemExpTravAir"
-                quantity="1" amount="345.67" description="United SFO-LAX" itemDate="1383368400000"/>
+                quantity="1" amount="345.67" description="United SFO-LAX"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="02" itemTypeEnumId="ItemExpTravLodging"
-                quantity="1" amount="123.45" description="Fleabag Inn 2 nights" itemDate="1383544800000"/>
+                quantity="1" amount="123.45" description="Fleabag Inn 2 nights"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="03" itemTypeEnumId="ItemTimeEntry"
                 quantity="6" amount="40" itemDate="${effectiveThruDate.time}"/>
@@ -661,7 +662,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 quantity="1.5" amount="40" itemDate="${effectiveThruDate.time}"/>
             <mantle.work.time.TimeEntry timeEntryId="55901" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="04"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="05" itemTypeEnumId="ItemTimeEntry"
-                quantity="2" amount="40" itemDate="1383512400000"/>
+                quantity="2" amount="40"/>
             <mantle.work.time.TimeEntry timeEntryId="55902" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="05"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="06" itemTypeEnumId="ItemTimeEntry"
                 quantity="4" amount="40" itemDate="${effectiveThruDate.time}"/>
@@ -688,11 +689,11 @@ class WorkPlanToCashBasicFlow extends Specification {
 
             <mantle.account.payment.Payment paymentId="${expPmtResult.paymentId}" paymentTypeEnumId="PtInvoicePayment"
                 fromPartyId="${vendorResult.partyId}" toPartyId="${workerResult.partyId}" paymentInstrumentEnumId="PiCompanyCheck"
-                statusId="PmntDelivered" effectiveDate="1384106400000" paymentRefNum="1234" comments="Delivered by Fedex"
+                statusId="PmntDelivered" paymentRefNum="1234" comments="Delivered by Fedex" effectiveDate="${startYear + '-11-10 12:00:00'}"
                 amount="1009.12" amountUomId="USD"/>
 
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55901" acctgTransTypeEnumId="AttOutgoingPayment"
-                organizationPartyId="${vendorResult.partyId}" transactionDate="${effectiveTime}" isPosted="Y"
+                organizationPartyId="${vendorResult.partyId}" transactionDate="${startYear + '-11-10 12:00:00'}" isPosted="Y"
                 postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" otherPartyId="${workerResult.partyId}"
                 paymentId="${expPmtResult.paymentId}"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55901" acctgTransEntrySeqId="01" debitCreditFlag="D"
@@ -761,18 +762,18 @@ class WorkPlanToCashBasicFlow extends Specification {
                 itemTypeEnumId="ItemTimeEntry" quantity="1.5" amount="60" itemDate="${effectiveThruDate.time}"/>
             <mantle.work.time.TimeEntry timeEntryId="55901" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="02"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="03"
-                itemTypeEnumId="ItemTimeEntry" quantity="2" amount="60" itemDate="1383512400000"/>
+                itemTypeEnumId="ItemTimeEntry" quantity="2" amount="60"/>
             <mantle.work.time.TimeEntry timeEntryId="55902" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="03"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="04"
                 itemTypeEnumId="ItemTimeEntry" quantity="4" amount="0" itemDate="${effectiveThruDate.time}"/>
             <mantle.work.time.TimeEntry timeEntryId="55903" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="04"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="05"
-                itemTypeEnumId="ItemExpTravAir" quantity="1" amount="345.67" description="United SFO-LAX" itemDate="1383368400000"/>
+                itemTypeEnumId="ItemExpTravAir" quantity="1" amount="345.67" description="United SFO-LAX"/>
             <mantle.account.invoice.InvoiceItemAssoc invoiceItemAssocId="55900" invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="01"
                 toInvoiceId="${clientInvResult.invoiceId}" toInvoiceItemSeqId="05" invoiceItemAssocTypeEnumId="IiatBillThrough" quantity="1" amount="345.67"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="06"
-                itemTypeEnumId="ItemExpTravLodging" quantity="1" amount="123.45" description="Fleabag Inn 2 nights" itemDate="1383544800000"/>
+                itemTypeEnumId="ItemExpTravLodging" quantity="1" amount="123.45" description="Fleabag Inn 2 nights"/>
             <mantle.account.invoice.InvoiceItemAssoc invoiceItemAssocId="55901" invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="02"
                 toInvoiceId="${clientInvResult.invoiceId}" toInvoiceItemSeqId="06" invoiceItemAssocTypeEnumId="IiatBillThrough" quantity="1" amount="123.45"/>
 
@@ -821,20 +822,20 @@ class WorkPlanToCashBasicFlow extends Specification {
         when:
         Map clientPmtResult = ec.service.sync().name("mantle.account.PaymentServices.create#InvoicePayment")
                 .parameters([invoiceId:clientInvResult.invoiceId, statusId:'PmntDelivered', amount:1039.12,
-                    paymentInstrumentEnumId:'PiCompanyCheck', effectiveDate:'2013-11-12 12:00:00', paymentRefNum:'54321']).call()
+                    paymentInstrumentEnumId:'PiCompanyCheck', effectiveDate:startYear + '-11-12 12:00:00', paymentRefNum:'54321']).call()
 
         // NOTE: this has sequenced IDs so is sensitive to run order!
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.account.invoice.Invoice invoiceId="${clientInvResult.invoiceId}" statusId="InvoicePmtRecvd"/>
             <mantle.account.payment.Payment paymentId="${clientPmtResult.paymentId}" paymentTypeEnumId="PtInvoicePayment"
                 fromPartyId="${clientResult.partyId}" toPartyId="${vendorResult.partyId}" paymentInstrumentEnumId="PiCompanyCheck"
-                statusId="PmntDelivered" effectiveDate="1384279200000" paymentRefNum="54321" amount="1,039.12" amountUomId="USD"/>
+                statusId="PmntDelivered" paymentRefNum="54321" amount="1,039.12" amountUomId="USD" effectiveDate="${startYear + '-11-12 12:00:00'}"/>
             <mantle.account.payment.PaymentApplication paymentApplicationId="${clientPmtResult.paymentApplicationId}"
                 paymentId="${clientPmtResult.paymentId}" invoiceId="${clientInvResult.invoiceId}"
                 amountApplied="1,039.12" appliedDate="${effectiveTime}"/>
 
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55903" acctgTransTypeEnumId="AttIncomingPayment"
-                organizationPartyId="${vendorResult.partyId}" transactionDate="${effectiveTime}" isPosted="Y" postedDate="${effectiveTime}"
+                organizationPartyId="${vendorResult.partyId}" transactionDate="${startYear + '-11-12 12:00:00'}" isPosted="Y" postedDate="${effectiveTime}"
                 glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" otherPartyId="${clientResult.partyId}" paymentId="${clientPmtResult.paymentId}"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55903" acctgTransEntrySeqId="01" debitCreditFlag="C"
                 amount="1,039.12" glAccountId="121000000" reconcileStatusId="AterNot" isSummary="N"/>
