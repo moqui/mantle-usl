@@ -365,10 +365,19 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="acctgTrans" for-update="true"/>
 
             <if condition="acctgTrans.isPosted == 'Y'">
-                <return error="true" message="Not deleting transaction [${acctgTransId}], transaction is posted"/></if>
+                <return error="true" message="Not deleting transaction ${acctgTransId}, transaction is posted"/></if>
 
+            <!-- if this transaction reverses another clear its reference to this -->
+            <if condition="acctgTrans.reverseOfAcctgTransId">
+                <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="revOfAcctgTrans" for-update="true">
+                    <field-map field-name="acctgTransId" from="acctgTrans.reverseOfAcctgTransId"/></entity-find-one>
+                <set field="revOfAcctgTrans.reversedByAcctgTransId" from="null"/>
+                <entity-update value-field="revOfAcctgTrans"/>
+            </if>
+            <!-- delete entries -->
             <entity-delete-by-condition entity-name="mantle.ledger.transaction.AcctgTransEntry">
                 <econdition field-name="acctgTransId"/></entity-delete-by-condition>
+            <!-- delete the TX -->
             <entity-delete value-field="acctgTrans"/>
         </actions>
     </service>
@@ -707,6 +716,7 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="acctgTransId" required="true"/>
             <parameter name="deleteIfNotPosted" type="Boolean" default="false"/>
+            <parameter name="createOnly" type="Boolean" default="false"/>
         </in-parameters>
         <out-parameters><parameter name="acctgTransId" required="true"/></out-parameters>
         <actions>
@@ -716,8 +726,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTransId]"/>
                 <return/>
             </then><else>
-                <return error="true" message="Not reversing transaction [${acctgTransId}], transaction is not posted"/>
+                <return error="true" message="Not reversing transaction ${acctgTransId}, transaction is not posted"/>
             </else></if></if>
+
+            <if condition="acctgTrans.reversedByAcctgTransId">
+                <return error="true" message="Not reversing transaction ${acctgTransId}, already reversed by transaction ${acctgTrans.reversedByAcctgTransId}"/></if>
 
             <entity-find entity-name="mantle.ledger.transaction.AcctgTransEntry" list="acctgTransEntryList">
                 <econdition field-name="acctgTransId"/><order-by field-name="acctgTransEntrySeqId"/></entity-find>
@@ -744,6 +757,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="!reverseAcctgTransEntry.glAccountId"><set field="useErrorJournal" from="true"/></if>
             </iterate>
 
+            <message>Created GL transaction ${reverseAcctgTransId} to reverse transaction ${acctgTransId}</message>
+
             <if condition="useErrorJournal"><then>
                 <!-- put in the error journal for the org -->
                 <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
@@ -753,10 +768,11 @@ along with this software (see the LICENSE.md file). If not, see
                             in-map="[acctgTransId:reverseAcctgTrans.acctgTransId,
                                 glJournalId:partyAcctgPreference.errorGlJournalId]"/>
                 </if>
-            </then><else>
+            </then><else-if condition="!createOnly">
                 <!-- call the post service -->
                 <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="[acctgTransId:reverseAcctgTransId]"/>
-            </else></if>
+                <message>Posted transaction ${reverseAcctgTransId}</message>
+            </else-if></if>
 
             <set field="acctgTrans.reversedByAcctgTransId" from="reverseAcctgTransId"/>
             <entity-update value-field="acctgTrans"/>
