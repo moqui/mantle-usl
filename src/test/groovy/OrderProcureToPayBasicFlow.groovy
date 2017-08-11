@@ -942,7 +942,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 .parameters([invoiceId:invoiceId]).call()
 
         // recalculate summaries, create GlAccountOrgTimePeriod records
-        ec.service.sync().name("mantle.ledger.LedgerServices.recalculate#GlAccountOrgSummaries").call()
+        // ec.service.sync().name("mantle.ledger.LedgerServices.recalculate#GlAccountOrgSummaries").call()
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
