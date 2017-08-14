@@ -1789,21 +1789,94 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
         <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
-            <service-call name="update#mantle.shipment.Shipment" out-map="context"
-                    in-map="[shipmentId:shipmentId, statusId:'ShipPacked']"/>
+            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipment == null"><return error="true" message="Shipment not found with ID ${shipmentId}"/></if>
+            <set field="shipmentTypeEnum" from="shipment.'ShipmentType#moqui.basic.Enumeration'"/>
+            <set field="isIncoming" from="shipmentTypeEnum?.enumId == 'ShpTpIncoming' || shipmentTypeEnum?.parentEnumId == 'ShpTpIncoming'"/>
+            <if condition="!isIncoming">
+                <service-call name="mantle.shipment.ShipmentServices.reduce#QuantitiesToHandled" in-map="[shipmentId:shipmentId]"/></if>
+
+            <service-call name="update#mantle.shipment.Shipment" in-map="[shipmentId:shipmentId, statusId:'ShipPacked']" out-map="context"/>
         </actions>
     </service>
     <service verb="ship" noun="Shipment">
         <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
         <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
-            <service-call name="update#mantle.shipment.Shipment" out-map="context"
-                    in-map="[shipmentId:shipmentId, statusId:'ShipShipped']"/>
+            <service-call name="update#mantle.shipment.Shipment" in-map="[shipmentId:shipmentId, statusId:'ShipShipped']" out-map="context"/>
             <entity-find entity-name="mantle.shipment.ShipmentRouteSegmentDetail" list="shipmentRouteSegmentList">
                 <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
             <service-call name="update#mantle.shipment.ShipmentRouteSegment"
                     in-map="[shipmentId:shipmentId, shipmentRouteSegmentSeqId:shipmentRouteSegmentList[0].shipmentRouteSegmentSeqId,
                              actualStartDate:shipmentRouteSegmentList[0].actualStartDate?:ec.user.nowTimestamp]"/>
+        </actions>
+    </service>
+    <service verb="deliver" noun="Shipment">
+        <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
+        <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipment == null"><return error="true" message="Shipment not found with ID ${shipmentId}"/></if>
+            <set field="shipmentTypeEnum" from="shipment.'ShipmentType#moqui.basic.Enumeration'"/>
+            <set field="isIncoming" from="shipmentTypeEnum?.enumId == 'ShpTpIncoming' || shipmentTypeEnum?.parentEnumId == 'ShpTpIncoming'"/>
+            <if condition="isIncoming">
+                <service-call name="mantle.shipment.ShipmentServices.reduce#QuantitiesToHandled" in-map="[shipmentId:shipmentId]"/></if>
+
+            <service-call name="update#mantle.shipment.Shipment" in-map="[shipmentId:shipmentId, statusId:'ShipDelivered']" out-map="context"/>
+        </actions>
+    </service>
+
+    <service verb="cancel" noun="Shipment">
+        <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
+        <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipment == null"><return error="true" message="Shipment not found with ID ${shipmentId}"/></if>
+            <set field="shipmentTypeEnum" from="shipment.'ShipmentType#moqui.basic.Enumeration'"/>
+            <set field="isIncoming" from="shipmentTypeEnum?.enumId == 'ShpTpIncoming' || shipmentTypeEnum?.parentEnumId == 'ShpTpIncoming'"/>
+
+            <entity-find-count entity-name="mantle.shipment.ShipmentItemSource" count-field="handledCount">
+                <econdition field-name="shipmentId"/>
+                <econdition field-name="quantity" operator="greater" to-field-name="quantityNotHandled"/>
+            </entity-find-count>
+            <if condition="handledCount">
+                <return error="true" message="Shipment ${shipmentId} has items already handled, cannot cancel."/></if>
+
+            <if condition="isIncoming"><then>
+                <entity-find-count entity-name="mantle.product.receipt.AssetReceipt" count-field="assetReceiptCount">
+                    <econdition field-name="shipmentId"/><econdition field-name="quantityAccepted" operator="greater" from="0.0"/></entity-find-count>
+                <if condition="assetReceiptCount">
+                    <return error="true" message="Incoming shipment ${shipmentId} has items already received, cannot cancel."/></if>
+            </then><else>
+                <entity-find-count entity-name="mantle.product.issuance.AssetIssuance" count-field="assetIssuanceCount">
+                    <econdition field-name="shipmentId"/><econdition field-name="quantity" operator="greater" from="0.0"/></entity-find-count>
+                <if condition="assetIssuanceCount">
+                    <return error="true" message="Outgoing shipment ${shipmentId} has items already issued/packed, cannot cancel."/></if>
+            </else></if>
+
+            <service-call name="mantle.shipment.ShipmentServices.reduce#QuantitiesToHandled" in-map="[shipmentId:shipmentId]"/>
+
+            <service-call name="update#mantle.shipment.Shipment" in-map="[shipmentId:shipmentId, statusId:'ShipCancelled']" out-map="context"/>
+        </actions>
+    </service>
+
+    <service verb="reduce" noun="QuantitiesToHandled">
+        <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.shipment.ShipmentItem" list="shipmentItemList">
+                <econdition field-name="shipmentId"/></entity-find>
+
+            <iterate list="shipmentItemList" entry="shipmentItem">
+                <set field="quantityHandled" from="0.0"/>
+                <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="sisList">
+                    <econdition field-name="shipmentId"/><econdition field-name="productId" from="shipmentItem.productId"/></entity-find>
+                <iterate list="sisList" entry="sis">
+                    <set field="quantityHandled" from="quantityHandled + sis.quantity - sis.quantityNotHandled"/></iterate>
+                <if condition="shipmentItem.quantity != quantityHandled">
+                    <service-call name="mantle.shipment.ShipmentServices.update#ShipmentItem"
+                            in-map="[shipmentId:shipmentId, productId:shipmentItem.productId, quantity:quantityHandled]"/>
+                </if>
+            </iterate>
         </actions>
     </service>
 
@@ -1858,7 +1931,7 @@ along with this software (see the LICENSE.md file). If not, see
                         headerImagePath:storeEmail.headerImagePath, detailLinkPath:storeEmail.detailLinkPath]"/>
 
                     <if condition="!storeEmail.emailTemplateId"><continue/></if>
-                    <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="true"
+                    <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="false"
                             in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId,
                                 toAddresses:toAddresses, bodyParameters:bodyParameters, toUserId:toUserId]"/>
                     <script>if (sendOut.emailMessageId) { ec.service.sync().name("create#mantle.shipment.ShipmentEmailMessage")
