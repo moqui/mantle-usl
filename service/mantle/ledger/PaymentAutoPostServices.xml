@@ -107,9 +107,10 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- Payment Type entry for to Party (incoming) -->
             <if condition="toPartyAcctgPreference != null">
                 <iterate list="paymentApplicationList" entry="paymentApplication">
+                    <if condition="paymentApplication.amountApplied == 0.0"><continue/></if>
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:toPartyAcctgPreference,
-                                acctgTrans:toAcctgTrans, amount:appliedTotal,
+                                acctgTrans:toAcctgTrans, amount:paymentApplication.amountApplied,
                                 organizationPartyId:payment.toPartyId, otherPartyId:payment.fromPartyId,
                                 isApplied:'Y', paymentApplication:paymentApplication,
                                 debitCreditFlag:'C', useErrorJournal:useErrorJournal]"
@@ -432,7 +433,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.payment.PaymentApplication" value-field="paymentApplication" for-update="true"/>
             <set field="payment" from="paymentApplication.'mantle.account.payment.Payment'"/>
 
-            <!-- make sure there is no AcctgTrans for this paymentId -->
+            <!-- make sure there is no AcctgTrans for this paymentApplicationId -->
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
                 <econdition field-name="paymentApplicationId"/>
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
@@ -442,7 +443,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <return message="Payment Application ${paymentApplicationId} has already been posted in accounting transaction ${existingTransList*.acctgTransId}"/>
             </if>
 
-            <!-- only post if Payment already posted as unapplied -->
+            <!-- only post if Payment already posted as unapplied AND has an entry for account type GatAccPayableUnapplied or GatAccReceivableUnapplied -->
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="paymentTransList">
                 <econdition field-name="paymentId" from="payment.paymentId"/>
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
@@ -451,7 +452,21 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <if condition="!paymentTransList">
                 <!-- if not yet posted the Payment posting will post as applied and take care of it -->
-                <log level="trace" message="Payment [${payment.paymentId}] has not yet been posted, not posting PaymentApplication"/>
+                <log level="trace" message="Payment ${payment.paymentId} has not yet been posted, not posting PaymentApplication"/>
+                <set field="paymentApplication.acctgTransResultEnumId" value="AtrPaymentNotPosted"/>
+                <entity-update value-field="paymentApplication"/>
+                <return/>
+            </if>
+            <set field="foundUnappliedEntry" from="false"/>
+            <iterate list="paymentTransList" entry="paymentTrans">
+                <entity-find-count entity-name="mantle.ledger.transaction.AcctgTransEntry" count-field="entryCount">
+                    <econdition field-name="acctgTransId" from="paymentTrans.acctgTransId"/>
+                    <econdition field-name="glAccountTypeEnumId" operator="in" value="GatAccPayableUnapplied,GatAccReceivableUnapplied"/>
+                </entity-find-count>
+                <if condition="entryCount &gt; 0"><set field="foundUnappliedEntry" from="true"/></if>
+            </iterate>
+            <if condition="!foundUnappliedEntry">
+                <log message="Payment ${payment.paymentId} has been posted but doesn't have an entry for an unapplied account, not posting PaymentApplication"/>
                 <set field="paymentApplication.acctgTransResultEnumId" value="AtrPaymentNotPosted"/>
                 <entity-update value-field="paymentApplication"/>
                 <return/>
