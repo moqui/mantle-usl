@@ -25,6 +25,10 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="timeEntryId"/>
         </out-parameters>
         <actions>
+            <if condition="partyId">
+                <entity-find-one entity-name="mantle.party.Party" value-field="party"/>
+                <if condition="party.disabled == 'Y'"><return error="true" message="Time Entry not created, ${party.pseudoId} is not active."/></if>
+            </if>
             <if condition="timeEntryId">
                 <entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="timeEntry" for-update="true"/>
                 <if condition="timeEntry">
@@ -152,15 +156,17 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
             </if>
 
-            <!-- if there is a pieceCount but no pieceRateTypeEnumId lookup by related or set to RatpPiece -->
+            <!-- if there is a pieceCount but no pieceRateTypeEnumId lookup by related or set to RatpPieceOrHour -->
+            <!-- NOTE: don't do this, better to leave it null so pieces can be record without pay (ie if no pieceRateTypeEnumId specified:
             <if condition="pieceCount &amp;&amp; !pieceRateTypeEnumId">
                 <entity-find entity-name="moqui.basic.Enumeration" list="relatedEnumList">
                     <econdition field-name="enumTypeId" value="PieceRateType"/>
                     <econdition field-name="relatedEnumId" from="rateTypeEnumId"/>
                 </entity-find>
                 <if condition="relatedEnumList"><set field="pieceRateTypeEnumId" from="relatedEnumList[0].enumId"/>
-                    <else><set field="pieceRateTypeEnumId" value="RatpPiece"/></else></if>
+                    <else><set field="pieceRateTypeEnumId" value="RatpPieceOrHour"/></else></if>
             </if>
+             -->
 
             <set field="hasModifiedRates" value="N"/>
             <if condition="ec.user.hasPermission('TIME_ENTRY_RATE')"><then>
@@ -211,21 +217,26 @@ along with this software (see the LICENSE.md file). If not, see
         <description>Store a WorkEffort record used for bulk time entry, has the required fields for the time entries</description>
         <in-parameters>
             <parameter name="workEffortId"/>
+            <parameter name="childWorkEffortId"/>
             <auto-parameters entity-name="mantle.work.effort.WorkEffort" include="nonpk"/>
             <parameter name="workEffortTypeEnumId" default-value="WetEvent"/>
-            <parameter name="workEffortName" required="true"/>
             <parameter name="actualStartDate" required="true"/>
             <parameter name="actualWorkDuration" required="true"/>
             <parameter name="statusId" default-value="WeComplete"/>
             <parameter name="resolutionEnumId" default-value="WerUnresolved"/>
             <parameter name="timeUomId" default-value="TF_hr"/>
             <parameter name="clientPartyId" required="true"/>
+            <parameter name="actualPaidBreakDuration"/>
         </in-parameters>
         <out-parameters><parameter name="workEffortId"/></out-parameters>
         <actions>
             <service-call name="store#mantle.work.effort.WorkEffort" in-map="context" out-map="context"/>
             <service-call name="mantle.work.WorkEffortServices.replace#WorkEffortParty"
-                    in-map="[workEffortId:workEffortId, roleTypeId:'Customer', newPartyId:clientPartyId]"/>
+                          in-map="[workEffortId:workEffortId, roleTypeId:'Customer', newPartyId:clientPartyId]"/>
+            <if condition="actualPaidBreakDuration"><then>
+                <service-call name="store#mantle.work.effort.WorkEffort"
+                              in-map="context + [workEffortId:childWorkEffortId,actualWorkDuration:actualPaidBreakDuration,actualBreakDuration:null,parentWorkEffortId:workEffortId,workTypeEnumId:'WktpPaidBreak']"/>
+            </then></if>
         </actions>
     </service>
     <service verb="store" noun="WorkEffortPartyTime">
@@ -233,16 +244,21 @@ along with this software (see the LICENSE.md file). If not, see
             Call the store#TimeEntryWorkEffort service first to make sure needed values are in place.</description>
         <in-parameters>
             <parameter name="timeEntryId"><description>If specified updates, if not creates</description></parameter>
+            <parameter name="childTimeEntryId"/>
             <auto-parameters entity-name="mantle.work.time.TimeEntry" include="nonpk"/>
             <parameter name="workEffortId" required="true"/>
             <parameter name="partyId"><description>For convenience (for multi forms with some rows blank) not set as
                 required, but if not passed no TimeEntry will be created.</description></parameter>
             <parameter name="moveToTeam"><description>If Y and a teamPartyId is specified add partyId Party to the team and
                 remove from all other teams</description></parameter>
+            <parameter name="paidBreakHours"/>
         </in-parameters>
         <out-parameters><parameter name="workEffortId"/></out-parameters>
         <actions>
             <if condition="!partyId"><return/></if>
+
+            <entity-find-one entity-name="mantle.party.Party" value-field="party"/>
+            <if condition="party.disabled == 'Y'"><return error="true" message="Time Entry not created, ${party.pseudoId} is not active."/></if>
 
             <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort"/>
 
@@ -267,6 +283,10 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <service-call name="mantle.work.TimeServices.store#TimeEntry" in-map="context" out-map="context"/>
+            <if condition="paidBreakHours"><then>
+                <service-call name="mantle.work.TimeServices.store#TimeEntry"
+                              in-map="context + [timeEntryId:childTimeEntryId,parentEntryId:timeEntryId,hours:paidBreakHours,breakHours:null,workTypeEnumId:'WktpPaidBreak']"/>
+            </then></if>
 
             <if condition="teamPartyId &amp;&amp; moveToTeam == 'Y'">
                 <set field="effectiveThruDate" from="workEffort.actualStartDate ?: ec.user.nowTimestamp"/>
@@ -296,6 +316,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="teamMemberInfoList" type="List"><parameter name="teamMemberInfo" type="Map"/></parameter>
             <!-- the following are only returned if a workEffortId is specified -->
             <parameter name="workEffort" type="Map"/>
+            <parameter name="childWorkEffort" type="Map"/>
             <parameter name="clientDetail" type="Map"/>
             <parameter name="facility" type="Map"/>
             <parameter name="workTypeEnum" type="Map"/>
@@ -314,6 +335,10 @@ along with this software (see the LICENSE.md file). If not, see
                         <field-map field-name="partyId" from="clientWepList[0].partyId"/></entity-find-one>
                 </if>
 
+                <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="childWorkEffort">
+                    <field-map field-name="parentWorkEffortId" from="workEffortId"/>
+                </entity-find-one>
+
                 <set field="workTypeEnum" from="workEffort.workType"/>
                 <set field="facility" from="workEffort.facility"/>
             </if>
@@ -326,14 +351,18 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.work.time.TimeEntry" list="teamTimeEntryList">
                     <econdition field-name="teamPartyId" from="partyId"/>
                     <econdition field-name="workEffortId"/>
+                    <econdition field-name="parentEntryId" operator="is-null"/>
                 </entity-find>
                 <iterate list="teamTimeEntryList" entry="timeEntry">
                     <script>memberIds.add(timeEntry.partyId)</script>
                     <entity-find-one entity-name="mantle.party.PartyDetail" value-field="memberDetail">
                         <field-map field-name="partyId" from="timeEntry.partyId"/></entity-find-one>
+                    <entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="childTimeEntry">
+                        <field-map field-name="parentEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
                     <set field="teamMemberInfo" from="memberDetail.getMap()"/>
                     <set field="teamMemberInfo.fromPartyId" from="timeEntry.partyId"/><!-- so fits with direct team members -->
                     <set field="teamMemberInfo.timeEntry" from="timeEntry"/>
+                    <set field="teamMemberInfo.childTimeEntry" from="childTimeEntry"/>
                     <set field="teamMemberInfo.teWorkTypeEnum" from="timeEntry.workType"/>
 
                     <entity-find-count entity-name="mantle.party.PartyRelationship" count-field="memberRelCount">
