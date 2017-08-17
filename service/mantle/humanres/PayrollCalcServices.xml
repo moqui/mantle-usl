@@ -122,9 +122,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <script>preInvoiceItems.add(preInvoiceItem)</script>
             </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPieceOrHour'">
                 <!-- Note: Using the greater of pieces * piece rate OR hours * rate, while not an uncommon practice for
-                           handling the minimimum wage test, it potentially over inflates the RRP calculation.  A better
-                           practice would be to use this without a base hourly rate and to let the minimum wage makeup
-                           test be handled later in the calculation process. -->
+                           handling the minimimum wage test, it potentially overinflates the RRP calculation.  -->
                 <set field="amountTotal" from="pieceTotal > hourlyTotal ? pieceTotal : hourlyTotal"/>
                 <set field="preInvoiceItem" from="[timeEntry:timeEntry,itemTypeEnumId:'ItemPieceOrHourlyEarnings',quantity:1,
                     amount:amountTotal,description:piiDescription]"/>
@@ -145,7 +143,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <if condition="timeEntry.fromDate &lt; rrp.fromTimestamp">
                             <set field="amountTotal" from="hours * rrp.regularRateOfPay"/>
                             <set field="preInvoiceItem" from="[timeEntry:timeEntry,
-                                itemTypeEnumId:timeEntry.rateTypeEnumId == 'RatpPaidBreakStd'?'ItemRrpBreakEarnings':'ItemNonProductiveEarnings',
+                                itemTypeEnumId:timeEntry.rateTypeEnumId == 'RatpPaidBreakStd'?'ItemBreakRrpEarnings':'ItemNonproductiveEarnings',
                                 quantity:1, amount:amountTotal,description:piiDescription]"/>
                             <script>preInvoiceItems.add(preInvoiceItem)</script>
                             <break/>
@@ -156,24 +154,34 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- This may be fairly verbose detailing every break; perhaps the invoice detail items will need a
                          summarization pass later? -->
                     <set field="preInvoiceItem" from="[timeEntry:timeEntry,
-                                itemTypeEnumId:timeEntry.rateTypeEnumId == 'RatpPaidBreakStd'?'ItemHourlyBreakEarnings':'ItemNonProductiveEarnings',
+                                itemTypeEnumId:timeEntry.rateTypeEnumId == 'RatpPaidBreakStd'?'ItemBreakHourlyEarnings':'ItemNonproductiveEarnings',
                                 quantity:1, amount:amountTotal,description:piiDescription]"/>
                     <script>preInvoiceItems.add(preInvoiceItem)</script>
                 </else></if>
             </else-if><else-if condition="timeEntry.rateTypeEnumId in ['RatpEvening', RatpNight, 'RatpWeekend', 'RatpShHoliday']">
-                <set field="amountTotal" from="hourlyTotal"/>
                 <!-- Future: It is possible premiums for working on weekends and/or holidays is not considered to be a shift
                              differential.  It is currently unknown what, if any, effect this would have. -->
                 <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
                               in-map="[partySettingTypeId:'PayrollWcShDiffPrem',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
                 <set field="wcShDiffPrem" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>
-                <!-- TODO: This does not take into account the premium.  Also, should this be hourly as its rate and then the
-                           premium picked up like overtime premiums? -->
+
                 <if condition="wcShDiffPrem"><then>
-                    <set field="preInvoiceItem" from="[timeEntry:timeEntry,itemTypeEnumId:'ItemShiftPremiumEarnings',quantity:1,
+                    <!-- Include the shift premiums in a single invoice item. -->
+                    <set field="amountTotal" from="hourlyTotal"/>
+                    <set field="preInvoiceItem" from="[timeEntry:timeEntry,itemTypeEnumId:'ItemHourlyEarnings',quantity:1,
                     amount:amountTotal,description:piiDescription]"/>
                     <script>preInvoiceItems.add(preInvoiceItem)</script>
                 </then><else>
+                    <!-- Split this into two invoice items.  One for the normal hourly portion and one for the shift premium portion -->
+                    <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="standardRate"
+                                  in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor',
+                                                        rateTypeEnumId:timeEntry.rateType.relatedEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                    <set field="amountTotal" from="hours * (standardRate.vendorHourRate ?: 0.0)"/>
+                    <set field="preInvoiceItem" from="[timeEntry:timeEntry,itemTypeEnumId:'ItemHourlyEarnings',quantity:1,
+                    amount:amountTotal,description:piiDescription]"/>
+                    <script>preInvoiceItems.add(preInvoiceItem)</script>
+
+                    <set field="amountTotal" from="hours * (hourlyRate - standardRate.vendorHourRate ?: 0.0)"/>
                     <set field="preInvoiceItem" from="[timeEntry:timeEntry,itemTypeEnumId:'ItemShiftPremiumEarnings',quantity:1,
                     amount:amountTotal,description:piiDescription]"/>
                     <script>preInvoiceItems.add(preInvoiceItem)</script>
@@ -183,7 +191,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="timeEntry.fromDate &lt; rrp.fromTimestamp">
                         <set field="amountTotal" from="hours * rrp.regularRateOfPay"/>
                         <set field="preInvoiceItem" from="[timeEntry:timeEntry,
-                                itemTypeEnumId:timeEntry.rateTypeEnumId == 'RatpPaidBreakRrp'?'ItemRrpBreakEarnings':'ItemNonProductiveEarnings',
+                                itemTypeEnumId:timeEntry.rateTypeEnumId == 'RatpPaidBreakRrp'?'ItemBreakRrpEarnings':'ItemNonproductiveEarnings',
                                 quantity:1, amount:amountTotal,description:piiDescription]"/>
                         <script>preInvoiceItems.add(preInvoiceItem)</script>
                         <break/>
@@ -679,7 +687,12 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="pieceCount" from="timeEntry?.pieceCount ?: 0.0" type="BigDecimal"/>
                     <set field="pieceRate" from="timeEntry?.vendorPieceRate ?: 0.0" type="BigDecimal"/>
 
-                    <if condition="timeEntry.rateTypeEnumId in ['RatpStandard', 'RatpEvening', 'RatpNight', 'RatpWeekend', 'RatpShHoliday']"><then>
+                    <if condition="timeEntry.rateTypeEnumId == 'RatpStandard'"><then>
+                        <if condition="rrpInclHourly"> <!-- Include Hourly Rates in RRP Calc -->
+                            <set field="hoursTotal" from="hoursTotal + hours"/>
+                            <set field="amountTotal" from="amountTotal + (hours * hourlyRate)"/>
+                        </if>
+                    </then><else-if condition="timeEntry.rateTypeEnumId in ['RatpEvening', 'RatpNight', 'RatpWeekend', 'RatpShHoliday']">
                         <if condition="rrpInclHourly"> <!-- Include Hourly Rates in RRP Calc -->
                             <set field="hoursTotal" from="hoursTotal + hours"/>
                             <if condition="rrpInclShDiff"><then> <!-- Include Shift Differential Premium in RRP Calc -->
@@ -691,7 +704,7 @@ along with this software (see the LICENSE.md file). If not, see
                                 <set field="amountTotal" from="amountTotal + (hours * (standardRate.vendorHourRate ?: 0.0))"/>
                             </else></if>
                         </if>
-                    </then><else-if condition="timeEntry.rateTypeEnumId in ['RatpPaidBreakStd', 'RatpPaidNptStd']">
+                    </else-if><else-if condition="timeEntry.rateTypeEnumId in ['RatpPaidBreakStd', 'RatpPaidNptStd']">
                         <if condition="!rrpPayOnHourlyBreakNpt"><then> <!-- Hourly "breaks" are being rolled in -->
                             <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="standardRate"
                                           in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor',
@@ -704,9 +717,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <set field="amountTotal" from="amountTotal + (pieceCount * pieceRate)"/>
                     </else-if><else-if condition="timeEntry.rateTypeEnumId == 'RatpPieceOrHour'">
                         <!-- Note: Using the greater of pieces * piece rate OR hours * rate, while not an uncommon practice for
-                                   handling the minimimum wage test, it potentially over inflates the RRP calculation.  A better
-                                   practice would be to use this without a base hourly rate and to let the minimum wage makeup
-                                   test be handled later in the calculation process. -->
+                                   handling the minimimum wage test, it potentially overinflates the RRP calculation.  -->
                         <set field="hoursTotal" from="hoursTotal + hours"/>
                         <set field="hourlyAmount" from="hours * hourlyRate"/>
                         <set field="pieceAmount" from="pieceCount * pieceRate"/>
