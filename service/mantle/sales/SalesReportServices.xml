@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a 
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.1.xsd">
+    <service verb="get" noun="SalesOrderSummary">
+        <in-parameters>
+            <parameter name="interval" default-value="M"/><!-- week = w, month = M, quarter = q, year = y -->
+            <parameter name="intervalCount" type="Integer" default="12"/>
+            <parameter name="thruDate" type="Date" default="new java.sql.Date(ec.user.nowTimestamp.time)"/>
+            <parameter name="offset"/>
+            <parameter name="dateFormat" default-value="dd MMM yyyy"/>
+            <parameter name="indexName" default-value="mantle_sales"/>
+            <parameter name="documentType" default-value="MantleSalesOrderItem"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="salesOrderSummaryList" type="List"><parameter name="result" type="Map"/></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            import org.elasticsearch.action.search.SearchResponse
+            import org.elasticsearch.index.query.QueryBuilders
+            import org.elasticsearch.search.aggregations.AggregationBuilder
+            import org.elasticsearch.search.aggregations.AggregationBuilders
+            import org.elasticsearch.search.aggregations.bucket.histogram.DateHistogramInterval
+            import org.elasticsearch.search.aggregations.bucket.histogram.Histogram
+            import org.moqui.elasticsearch.ElasticSearchUtil
+            import groovy.json.JsonOutput
+
+            import java.time.temporal.ChronoUnit
+            import java.time.temporal.TemporalUnit
+            Map<String, TemporalUnit> tempUnits = [w:ChronoUnit.WEEKS, M:ChronoUnit.MONTHS, q:ChronoUnit.MONTHS, y:ChronoUnit.YEARS]
+            Map<String, String> perMap = [w:'week', M:'month', q:'quarter', y:'year']
+            ArrayList<Timestamp> curPer = ec.user.getPeriodRange(perMap.get(interval), 0, thruDate)
+            Timestamp thruTimestamp = curPer[1]
+            def fromDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(curPer[0].time), TimeZone.getDefault().toZoneId())
+            fromDateDt = fromDateDt.minus(interval == 'q' ? (intervalCount * 3) : intervalCount, tempUnits.get(interval))
+            String thruString = thruTimestamp.time as String
+            ec.logger.warn("from ${fromDateDt} thru ${thruTimestamp}")
+            Map queryMap = [range: [placedDate: [gte:(fromDateDt.toInstant().toEpochMilli() as String), lt:(thruTimestamp.time as String), format: 'epoch_millis']]]
+
+            AggregationBuilder aggBuilder = AggregationBuilders.dateHistogram("DateOuter").field("placedDate").order(Histogram.Order.KEY_DESC)
+                    .dateHistogramInterval(new DateHistogramInterval("1" + (String) interval)).format((String) dateFormat).minDocCount(1)
+            if (offset) aggBuilder.offset((String) offset)
+
+            // order count
+            aggBuilder.subAggregation(AggregationBuilders.cardinality("orderCount").field("orderId"))
+
+            // total sales (itemSaleTotal, no item type restriction)
+            aggBuilder.subAggregation(AggregationBuilders.sum("totalSales").field("itemSaleTotal"))
+
+            // product only counts
+            AggregationBuilder itemProductFilter = AggregationBuilders.filter("ItemProduct",
+                    QueryBuilders.wrapperQuery(JsonOutput.toJson([term:[itemTypeEnumId:"ItemProduct"]])))
+
+            // total product sales (itemSaleTotal; itemTypeEnumId = ItemProduct)
+            itemProductFilter.subAggregation(AggregationBuilders.sum("productSaleTotal").field("itemSaleTotal"))
+            // total product shipped (issuedSaleTotal; itemTypeEnumId = ItemProduct)
+            itemProductFilter.subAggregation(AggregationBuilders.sum("productIssuedTotal").field("issuances.issuedSaleTotal"))
+            // product cost total (issuedCostTotal)
+            itemProductFilter.subAggregation(AggregationBuilders.sum("productCostTotal").field("issuances.issuedCostTotal"))
+            // product quantity total
+            itemProductFilter.subAggregation(AggregationBuilders.sum("productQuantityTotal").field("orderQuantity"))
+
+            aggBuilder.subAggregation(itemProductFilter)
+
+            // total discounts (itemSaleTotal for discount itemTypeEnumId)
+            List discountTypes = ['ItemDiscount', 'ItemPromptDiscount', 'ItemCouponCredit', 'ItemPromoDiscount', 'ItemFreeFills', 'ItemSlottingFees', 'ItemAdjAdvertising', 'ItemAdjJointAdv']
+            AggregationBuilder itemDiscountFilter = AggregationBuilders.filter("ItemDiscount",
+                    QueryBuilders.wrapperQuery(JsonOutput.toJson([terms:[itemTypeEnumId:discountTypes]])))
+            itemDiscountFilter.subAggregation(AggregationBuilders.sum("discountTotal").field("itemSaleTotal"))
+            aggBuilder.subAggregation(itemDiscountFilter)
+
+            // do the search
+            SearchResponse sr = ElasticSearchUtil.aggregationSearch(indexName, [documentType], null, queryMap, aggBuilder, ec)
+
+            salesOrderSummaryList = []
+            for (def dateBucket in sr.getAggregations().get("DateOuter").getBuckets()) {
+                def prodAgg = dateBucket.getAggregations().get("ItemProduct")
+                def discAgg = dateBucket.getAggregations().get("ItemDiscount")
+                salesOrderSummaryList.add([dateKey:dateBucket.getKeyAsString(),
+                        orderCount:dateBucket.getAggregations().get("orderCount").getValue(),
+                        totalSales:new BigDecimal(dateBucket.getAggregations().get("totalSales").getValue()),
+                        productSaleTotal:new BigDecimal(prodAgg.getAggregations().get("productSaleTotal").getValue()),
+                        productIssuedTotal:new BigDecimal(prodAgg.getAggregations().get("productIssuedTotal").getValue()),
+                        productCostTotal:new BigDecimal(prodAgg.getAggregations().get("productCostTotal").getValue()),
+                        productQuantityTotal:new BigDecimal(prodAgg.getAggregations().get("productQuantityTotal").getValue()),
+                        discountTotal:new BigDecimal(discAgg.getAggregations().get("discountTotal").getValue())])
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="get" noun="SalesInvoiceSummary">
+        <in-parameters>
+            <parameter name="interval" default-value="M"/><!-- week = w, month = M, quarter = q, year = y -->
+            <parameter name="intervalCount" type="Integer" default="12"/>
+            <parameter name="thruDate" type="Date" default="new java.sql.Date(ec.user.nowTimestamp.time)"/>
+            <parameter name="offset"/>
+            <parameter name="dateFormat" default-value="dd MMM yyyy"/>
+            <parameter name="indexName" default-value="mantle_sales"/>
+            <parameter name="documentType" default-value="MantleSalesInvoiceItem"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="salesInvoiceSummaryList" type="List"><parameter name="result" type="Map"/></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            import org.elasticsearch.action.search.SearchResponse
+            import org.elasticsearch.index.query.QueryBuilders
+            import org.elasticsearch.search.aggregations.AggregationBuilder
+            import org.elasticsearch.search.aggregations.AggregationBuilders
+            import org.elasticsearch.search.aggregations.bucket.histogram.DateHistogramInterval
+            import org.elasticsearch.search.aggregations.bucket.histogram.Histogram
+            import org.moqui.elasticsearch.ElasticSearchUtil
+            import groovy.json.JsonOutput
+
+            import java.time.temporal.ChronoUnit
+            import java.time.temporal.TemporalUnit
+            Map<String, TemporalUnit> tempUnits = [w:ChronoUnit.WEEKS, M:ChronoUnit.MONTHS, q:ChronoUnit.MONTHS, y:ChronoUnit.YEARS]
+            Map<String, String> perMap = [w:'week', M:'month', q:'quarter', y:'year']
+            ArrayList<Timestamp> curPer = ec.user.getPeriodRange(perMap.get(interval), 0, thruDate)
+            Timestamp thruTimestamp = curPer[1]
+            def fromDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(curPer[0].time), TimeZone.getDefault().toZoneId())
+            fromDateDt = fromDateDt.minus(interval == 'q' ? (intervalCount * 3) : intervalCount, tempUnits.get(interval))
+            String thruString = thruTimestamp.time as String
+            ec.logger.warn("from ${fromDateDt} thru ${thruTimestamp}")
+            Map queryMap = [range: [invoiceDate: [gte:(fromDateDt.toInstant().toEpochMilli() as String), lt:(thruTimestamp.time as String), format: 'epoch_millis']]]
+
+            AggregationBuilder aggBuilder = AggregationBuilders.dateHistogram("DateOuter").field("invoiceDate").order(Histogram.Order.KEY_DESC)
+                    .dateHistogramInterval(new DateHistogramInterval("1" + (String) interval)).format((String) dateFormat).minDocCount(1)
+            if (offset) aggBuilder.offset((String) offset)
+
+            // invoice count
+            aggBuilder.subAggregation(AggregationBuilders.cardinality("invoiceCount").field("invoiceId"))
+
+            // total sales (itemSaleTotal, no item type restriction)
+            aggBuilder.subAggregation(AggregationBuilders.sum("totalSales").field("itemSaleTotal"))
+
+            // product only counts
+            AggregationBuilder itemProductFilter = AggregationBuilders.filter("ItemProduct",
+                    QueryBuilders.wrapperQuery(JsonOutput.toJson([term:[itemTypeEnumId:"ItemProduct"]])))
+
+            // total product sales (itemSaleTotal; itemTypeEnumId = ItemProduct)
+            itemProductFilter.subAggregation(AggregationBuilders.sum("productSaleTotal").field("itemSaleTotal"))
+            // total product shipped (issuedSaleTotal; itemTypeEnumId = ItemProduct)
+            itemProductFilter.subAggregation(AggregationBuilders.sum("productIssuedTotal").field("issuances.issuedSaleTotal"))
+            // product cost total (issuedCostTotal)
+            itemProductFilter.subAggregation(AggregationBuilders.sum("productCostTotal").field("issuances.issuedCostTotal"))
+            // product quantity total
+            itemProductFilter.subAggregation(AggregationBuilders.sum("productQuantityTotal").field("quantity"))
+
+            aggBuilder.subAggregation(itemProductFilter)
+
+            // total discounts (itemSaleTotal for discount itemTypeEnumId)
+            List discountTypes = ['ItemDiscount', 'ItemPromptDiscount', 'ItemCouponCredit', 'ItemPromoDiscount', 'ItemFreeFills', 'ItemSlottingFees', 'ItemAdjAdvertising', 'ItemAdjJointAdv']
+            AggregationBuilder itemDiscountFilter = AggregationBuilders.filter("ItemDiscount",
+                    QueryBuilders.wrapperQuery(JsonOutput.toJson([terms:[itemTypeEnumId:discountTypes]])))
+            itemDiscountFilter.subAggregation(AggregationBuilders.sum("discountTotal").field("itemSaleTotal"))
+            aggBuilder.subAggregation(itemDiscountFilter)
+
+            // do the search
+            SearchResponse sr = ElasticSearchUtil.aggregationSearch(indexName, [documentType], null, queryMap, aggBuilder, ec)
+
+            salesInvoiceSummaryList = []
+            for (def dateBucket in sr.getAggregations().get("DateOuter").getBuckets()) {
+                def prodAgg = dateBucket.getAggregations().get("ItemProduct")
+                def discAgg = dateBucket.getAggregations().get("ItemDiscount")
+                salesInvoiceSummaryList.add([dateKey:dateBucket.getKeyAsString(),
+                        invoiceCount:dateBucket.getAggregations().get("invoiceCount").getValue(),
+                        totalSales:new BigDecimal(dateBucket.getAggregations().get("totalSales").getValue()),
+                        productSaleTotal:new BigDecimal(prodAgg.getAggregations().get("productSaleTotal").getValue()),
+                        productIssuedTotal:new BigDecimal(prodAgg.getAggregations().get("productIssuedTotal").getValue()),
+                        productCostTotal:new BigDecimal(prodAgg.getAggregations().get("productCostTotal").getValue()),
+                        productQuantityTotal:new BigDecimal(prodAgg.getAggregations().get("productQuantityTotal").getValue()),
+                        discountTotal:new BigDecimal(discAgg.getAggregations().get("discountTotal").getValue())])
+            }
+        ]]></script></actions>
+    </service>
+</services>
