@@ -44,8 +44,7 @@ along with this software (see the LICENSE.md file). If not, see
             Timestamp thruTimestamp = curPer[1]
             def fromDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(curPer[0].time), TimeZone.getDefault().toZoneId())
             fromDateDt = fromDateDt.minus(interval == 'q' ? (intervalCount * 3) : intervalCount, tempUnits.get(interval))
-            String thruString = thruTimestamp.time as String
-            ec.logger.warn("from ${fromDateDt} thru ${thruTimestamp}")
+            // ec.logger.warn("from ${fromDateDt} thru ${thruTimestamp}")
 
             Map queryMap = [bool: [filter: [
                     [range: [placedDate: [gte:(fromDateDt.toInstant().toEpochMilli() as String), lt:(thruTimestamp.time as String), format: 'epoch_millis']]],
@@ -62,7 +61,7 @@ along with this software (see the LICENSE.md file). If not, see
             // total sales (itemSaleTotal, no item type restriction)
             aggBuilder.subAggregation(AggregationBuilders.sum("totalSales").field("itemSaleTotal"))
 
-            // product only counts
+            // product only sums
             AggregationBuilder itemProductFilter = AggregationBuilders.filter("ItemProduct",
                     QueryBuilders.wrapperQuery(JsonOutput.toJson([term:[itemTypeEnumId:"ItemProduct"]])))
 
@@ -84,6 +83,12 @@ along with this software (see the LICENSE.md file). If not, see
             itemDiscountFilter.subAggregation(AggregationBuilders.sum("discountTotal").field("itemSaleTotal"))
             aggBuilder.subAggregation(itemDiscountFilter)
 
+            // new customer order count
+            AggregationBuilder newCustFilter = AggregationBuilders.filter("NewCustomer",
+                    QueryBuilders.wrapperQuery(JsonOutput.toJson([term:[isNewCustomer:'Y']])))
+            newCustFilter.subAggregation(AggregationBuilders.cardinality("newCustomerOrderCount").field("orderId"))
+            aggBuilder.subAggregation(newCustFilter)
+
             // do the search
             SearchResponse sr = ElasticSearchUtil.aggregationSearch(indexName, [documentType], null, queryMap, aggBuilder, ec)
 
@@ -91,8 +96,10 @@ along with this software (see the LICENSE.md file). If not, see
             for (def dateBucket in sr.getAggregations().get("DateOuter").getBuckets()) {
                 def prodAgg = dateBucket.getAggregations().get("ItemProduct")
                 def discAgg = dateBucket.getAggregations().get("ItemDiscount")
+                def newCustAgg = dateBucket.getAggregations().get("NewCustomer")
                 salesOrderSummaryList.add([dateKey:dateBucket.getKeyAsString(),
                         orderCount:dateBucket.getAggregations().get("orderCount").getValue(),
+                        newCustomerOrderCount:newCustAgg.getAggregations().get("newCustomerOrderCount").getValue(),
                         totalSales:new BigDecimal(dateBucket.getAggregations().get("totalSales").getValue()),
                         productSaleTotal:new BigDecimal(prodAgg.getAggregations().get("productSaleTotal").getValue()),
                         productIssuedTotal:new BigDecimal(prodAgg.getAggregations().get("productIssuedTotal").getValue()),
@@ -110,7 +117,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="offset"/>
             <parameter name="dateFormat" default-value="dd MMM yyyy"/>
             <parameter name="indexName" default-value="mantle_sales"/>
-            <parameter name="documentType" default-value="MantleSalesInvoiceItem"/>
+            <parameter name="invoiceDocumentType" default-value="MantleSalesInvoice"/>
+            <parameter name="itemDocumentType" default-value="MantleSalesInvoiceItem"/>
         </in-parameters>
         <out-parameters>
             <parameter name="salesInvoiceSummaryList" type="List"><parameter name="result" type="Map"/></parameter>
@@ -133,23 +141,35 @@ along with this software (see the LICENSE.md file). If not, see
             Timestamp thruTimestamp = curPer[1]
             def fromDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(curPer[0].time), TimeZone.getDefault().toZoneId())
             fromDateDt = fromDateDt.minus(interval == 'q' ? (intervalCount * 3) : intervalCount, tempUnits.get(interval))
-            String thruString = thruTimestamp.time as String
-            ec.logger.warn("from ${fromDateDt} thru ${thruTimestamp}")
+            // ec.logger.warn("from ${fromDateDt} thru ${thruTimestamp}")
 
             Map queryMap = [bool: [filter: [
                     [range: [invoiceDate: [gte:(fromDateDt.toInstant().toEpochMilli() as String), lt:(thruTimestamp.time as String), format: 'epoch_millis']]],
                     [terms: [statusId: ['InvoiceFinalized', 'InvoiceSent', 'InvoiceAcked', 'InvoicePmtRecvd']]]
             ]]]
 
-            AggregationBuilder aggBuilder = AggregationBuilders.dateHistogram("DateOuter").field("invoiceDate").order(Histogram.Order.KEY_DESC)
+            // prep the invoice level search
+            AggregationBuilder invAggBuilder = AggregationBuilders.dateHistogram("DateOuter").field("invoiceDate").order(Histogram.Order.KEY_DESC)
                     .dateHistogramInterval(new DateHistogramInterval("1" + (String) interval)).format((String) dateFormat).minDocCount(1)
-            if (offset) aggBuilder.offset((String) offset)
+            if (offset) invAggBuilder.offset((String) offset)
+            // total sales
+            invAggBuilder.subAggregation(AggregationBuilders.sum("invoiceTotal").field("invoiceTotal"))
+            // total paid
+            // NOTE: may want this to behave differently, somehow do a nested aggregation for only applications with appliedDate less than the end date of the current date range
+            invAggBuilder.subAggregation(AggregationBuilders.sum("invoicePaymentsApplied").field("appliedPaymentsTotal"))
+            // do the invoice search
+            SearchResponse invSr = ElasticSearchUtil.aggregationSearch(indexName, [invoiceDocumentType], null, queryMap, invAggBuilder, ec)
+
+            // prep the invoice item search
+            AggregationBuilder itemAggBuilder = AggregationBuilders.dateHistogram("DateOuter").field("invoiceDate").order(Histogram.Order.KEY_DESC)
+                    .dateHistogramInterval(new DateHistogramInterval("1" + (String) interval)).format((String) dateFormat).minDocCount(1)
+            if (offset) itemAggBuilder.offset((String) offset)
 
             // invoice count
-            aggBuilder.subAggregation(AggregationBuilders.cardinality("invoiceCount").field("invoiceId"))
+            itemAggBuilder.subAggregation(AggregationBuilders.cardinality("invoiceIdCount").field("invoiceId"))
 
             // total sales (itemSaleTotal, no item type restriction)
-            aggBuilder.subAggregation(AggregationBuilders.sum("totalSales").field("itemSaleTotal"))
+            itemAggBuilder.subAggregation(AggregationBuilders.sum("totalSales").field("itemSaleTotal"))
 
             // product only counts
             AggregationBuilder itemProductFilter = AggregationBuilders.filter("ItemProduct",
@@ -164,31 +184,45 @@ along with this software (see the LICENSE.md file). If not, see
             // product quantity total
             itemProductFilter.subAggregation(AggregationBuilders.sum("productQuantityTotal").field("quantity"))
 
-            aggBuilder.subAggregation(itemProductFilter)
+            itemAggBuilder.subAggregation(itemProductFilter)
 
             // total discounts (itemSaleTotal for discount itemTypeEnumId)
             List discountTypes = ['ItemDiscount', 'ItemPromptDiscount', 'ItemCouponCredit', 'ItemPromoDiscount', 'ItemFreeFills', 'ItemSlottingFees', 'ItemAdjAdvertising', 'ItemAdjJointAdv']
             AggregationBuilder itemDiscountFilter = AggregationBuilders.filter("ItemDiscount",
                     QueryBuilders.wrapperQuery(JsonOutput.toJson([terms:[itemTypeEnumId:discountTypes]])))
             itemDiscountFilter.subAggregation(AggregationBuilders.sum("discountTotal").field("itemSaleTotal"))
-            aggBuilder.subAggregation(itemDiscountFilter)
+            itemAggBuilder.subAggregation(itemDiscountFilter)
 
-            // do the search
-            SearchResponse sr = ElasticSearchUtil.aggregationSearch(indexName, [documentType], null, queryMap, aggBuilder, ec)
+            // do the invoice item search
+            SearchResponse itemSr = ElasticSearchUtil.aggregationSearch(indexName, [itemDocumentType], null, queryMap, itemAggBuilder, ec)
 
+            // make list for invoice details
+            Map<String, Map> invoiceTempMap = [:]
+            for (def dateBucket in invSr.getAggregations().get("DateOuter").getBuckets()) {
+                invoiceTempMap.put(dateBucket.getKeyAsString(), [dateKey:dateBucket.getKeyAsString(), invoiceCount:dateBucket.getDocCount(),
+                        invoiceTotal:new BigDecimal(dateBucket.getAggregations().get("invoiceTotal").getValue()),
+                        invoicePaymentsApplied:new BigDecimal(dateBucket.getAggregations().get("invoicePaymentsApplied").getValue())])
+            }
+
+            // prep the list from items first
             salesInvoiceSummaryList = []
-            for (def dateBucket in sr.getAggregations().get("DateOuter").getBuckets()) {
+            for (def dateBucket in itemSr.getAggregations().get("DateOuter").getBuckets()) {
+                String keyAsString = dateBucket.getKeyAsString()
+                Map invoiceTemp = invoiceTempMap.remove(keyAsString)
+                if (!invoiceTemp) ec.logger.warn("In SalesInvoiceSummary no invoice summary for ${keyAsString}")
                 def prodAgg = dateBucket.getAggregations().get("ItemProduct")
                 def discAgg = dateBucket.getAggregations().get("ItemDiscount")
-                salesInvoiceSummaryList.add([dateKey:dateBucket.getKeyAsString(),
-                        invoiceCount:dateBucket.getAggregations().get("invoiceCount").getValue(),
+                Map result = [invoiceIdCount:dateBucket.getAggregations().get("invoiceIdCount").getValue(),
                         totalSales:new BigDecimal(dateBucket.getAggregations().get("totalSales").getValue()),
                         productSaleTotal:new BigDecimal(prodAgg.getAggregations().get("productSaleTotal").getValue()),
                         productIssuedTotal:new BigDecimal(prodAgg.getAggregations().get("productIssuedTotal").getValue()),
                         productCostTotal:new BigDecimal(prodAgg.getAggregations().get("productCostTotal").getValue()),
                         productQuantityTotal:new BigDecimal(prodAgg.getAggregations().get("productQuantityTotal").getValue()),
-                        discountTotal:new BigDecimal(discAgg.getAggregations().get("discountTotal").getValue())])
+                        discountTotal:new BigDecimal(discAgg.getAggregations().get("discountTotal").getValue())]
+                if (invoiceTemp) result.putAll(invoiceTemp)
+                salesInvoiceSummaryList.add(result)
             }
+            ec.logger.warn("In SalesInvoiceSummary invoiceTempMap remaining: ${invoiceTempMap}")
         ]]></script></actions>
     </service>
 </services>
