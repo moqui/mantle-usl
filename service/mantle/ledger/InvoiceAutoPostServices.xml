@@ -382,7 +382,7 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="fromAcctgTransId"/><parameter name="toAcctgTransId"/></out-parameters>
         <actions>
-            <!-- TODO: a lot of redundancy between this and post#Invoice, consider extracting some into service(s) both use -->
+            <!-- NOTE: a lot of redundancy between this and post#Invoice, consider extracting some into service(s) both use -->
 
             <!-- make sure there is no AttInvoiceAdjust AcctgTrans/Entry for this invoiceId/invoiceItemSeqId -->
             <entity-find entity-name="mantle.ledger.transaction.AcctgTransAndEntry" list="existingTransList">
@@ -392,14 +392,14 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
             <if condition="existingTransList">
-                <log level="info" message="Invoice Adjustment Item [${invoiceId}:${invoiceItemSeqId}] has already been posted in accounting transaction [${existingTransList[0].acctgTransId}]"/>
+                <log message="Invoice Adjustment Item [${invoiceId}:${invoiceItemSeqId}] has already been posted in accounting transaction [${existingTransList[0].acctgTransId}]"/>
                 <return/>
             </if>
 
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
-            <if condition="!invoice"><return error="true" message="Could not find Invoice with ID [${invoiceId}]"/></if>
+            <if condition="invoice == null"><return error="true" message="Could not find Invoice with ID [${invoiceId}]"/></if>
             <entity-find-one entity-name="mantle.account.invoice.InvoiceItem" value-field="invoiceItem"/>
-            <if condition="!invoiceItem"><return error="true" message="Could not find Invoice Item with ID [${invoiceId}:${invoiceItemSeqId}]"/></if>
+            <if condition="invoiceItem == null"><return error="true" message="Could not find Invoice Item with ID [${invoiceId}:${invoiceItemSeqId}]"/></if>
 
             <!-- is there a OrgInternal PartyRole for from/to parties, and PartyAcctgPreference for the from/to parties or parent orgs of them? -->
             <entity-find-one entity-name="mantle.party.PartyRole" value-field="fromPartyRole">
@@ -432,13 +432,16 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="useErrorJournal" from="false"/>
 
             <!-- ==== create the main tx record(s) ==== -->
+            <!-- TODO: better handling of invoice adjust TX date, should probably be: invoiceItem.itemDate ?: invoice.invoiceDate -->
+            <!-- TODO: don't allow date change for invoice adjust items, or update tx date (unpost, update, post) automatically? would be the first/only like that... -->
+            <set field="transactionDate" from="invoice.invoiceDate"/>
             <if condition="fromPartyAcctgPreference">
                 <service-call name="mantle.ledger.InvoiceAutoPostServices.get#InvoiceTypeTransType" out-map="fromInvoiceTypeTransTypeOut"
                         in-map="[invoiceTypeEnumId:invoice.invoiceTypeEnumId, organizationPartyId:invoice.fromPartyId, isPayable:'N']"/>
                 <service-call name="mantle.ledger.LedgerServices.create#AcctgTrans" out-map="context"
                         in-map="[acctgTransTypeEnumId:'AttInvoiceAdjust',
                             organizationPartyId:invoice.fromPartyId, otherPartyId:invoice.toPartyId,
-                            amountUomId:invoice.currencyUomId, invoiceId:invoiceId, transactionDate:invoice.invoiceDate]"/>
+                            amountUomId:invoice.currencyUomId, invoiceId:invoiceId, transactionDate:transactionDate]"/>
                 <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="fromAcctgTrans"/>
             </if>
             <if condition="toPartyAcctgPreference">
@@ -447,17 +450,16 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.ledger.LedgerServices.create#AcctgTrans" out-map="context"
                         in-map="[acctgTransTypeEnumId:'AttInvoiceAdjust',
                             organizationPartyId:invoice.toPartyId, otherPartyId:invoice.fromPartyId,
-                            amountUomId:invoice.currencyUomId, invoiceId:invoiceId, transactionDate:invoice.invoiceDate]"/>
+                            amountUomId:invoice.currencyUomId, invoiceId:invoiceId, transactionDate:transactionDate]"/>
                 <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="toAcctgTrans"/>
             </if>
 
             <!-- ==== create entry for invoice item ==== -->
 
-            <set field="invoiceTotal" from="0"/>
+            <set field="invoiceTotal" from="0.0"/>
 
-            <!-- TODO -->
-            <set field="itemTotal" from="(invoiceItem.amount ?: 0) * (invoiceItem.quantity ?: 1)"/>
-            <if condition="itemTotal == 0"><return/></if>
+            <set field="itemTotal" from="(invoiceItem.amount ?: 0.0) * (invoiceItem.quantity ?: 1.0)"/>
+            <if condition="itemTotal == 0.0"><return/></if>
             <set field="invoiceTotal" from="invoiceTotal + itemTotal"/>
 
             <set field="entryCommonMap" from="[invoiceItemSeqId:invoiceItem.invoiceItemSeqId,
