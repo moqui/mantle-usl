@@ -797,7 +797,6 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" for-update="true">
                 <econdition field-name="shipmentId"/>
-                <econdition field-name="invoiceId" from="null"/><!-- exclude items already invoiced -->
                 <econdition field-name="orderId" operator="not-equals" from="null"/><!-- only include item sources from orders -->
                 <!-- NOTE: Derby blows up with for-update and order-by: <order-by field-name="orderId"/><order-by field-name="orderItemSeqId"/> -->
             </entity-find>
@@ -806,9 +805,20 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="orderHeaderMap" from="[:]"/>
             <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
                 <set field="orderItem" from="shipmentItemSource.'mantle.order.OrderItem'"/>
-                <if condition="!orderItem || shipmentItemSource.invoiceId"><continue/></if>
+                <if condition="orderItem == null"><continue/></if>
                 <set field="itemAmount" from="(orderItem.unitAmount ?: 0) * (orderItem.quantity ?: 0)"/>
                 <if condition="itemAmount == 0"><continue/></if>
+
+                <!-- look for existing OrderItemBilling quantity: quantity already billed minus quantity on order shipments -->
+                <!-- bill only quantity not already billed -->
+                <set field="billingList" from="orderItem.billings"/>
+                <set field="billedQuantity" from="billingList*.quantity.sum()"/>
+                <set field="allItemSources" from="orderItem.shipmentSources"/>
+                <set field="allShippedQuantity" from="allItemSources*.quantity.sum()"/>
+                <!-- get shippedNotBilled from this OrderItem's quantity on all shipments, including this one, minus billedQuantity -->
+                <!-- only bill up to the quantity on this shipment -->
+                <set field="shippedNotBilled" from="(allShippedQuantity ?: 0.0) - (billedQuantity ?: 0.0)"/>
+                <set field="quantityToBill" from="shipmentItemSource.quantity &gt; shippedNotBilled ? shippedNotBilled : shipmentItemSource.quantity"/>
 
                 <set field="orderHeader" from="orderHeaderMap.get(shipmentItemSource.orderId)"/>
                 <if condition="orderHeader == null">
@@ -851,7 +861,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="invoiceId">
                     <!-- create InvoiceItem, OrderItemBilling, set invoiceId,invoiceItemSeqId -->
                     <set field="parentInvoiceItemSeqId" from="null"/>
-                    <set field="quantityNotOnItems" from="shipmentItemSource.quantity * (orderItem.selectedAmount ?: 1)"/>
+                    <set field="quantityNotBilled" from="quantityToBill * (orderItem.selectedAmount ?: 1.0)"/>
 
                     <!-- first do AssetIssuance -->
                     <if condition="handleIssuances">
@@ -861,13 +871,15 @@ along with this software (see the LICENSE.md file). If not, see
                             <order-by field-name="orderItemSeqId"/>
                         </entity-find>
                         <iterate list="assetIssuanceList" entry="assetIssuance">
-                            <if condition="assetIssuance.quantity == 0.0"><continue/></if>
+                            <set field="issuanceQuantityToBill" from="quantityNotBilled &gt; assetIssuance.quantity ?
+                                    assetIssuance.quantity : quantityNotBilled"/>
+                            <if condition="issuanceQuantityToBill &lt;= 0.0"><continue/></if>
                             <!-- should we make sure the total quantity on all AssetIssuance records matches the
                                 quantity on the ShipmentItemSource record? that should be handled when they are created... -->
                             <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="iiOut"
                                     in-map="[invoiceId:invoiceId, itemTypeEnumId:orderItem.itemTypeEnumId ?: 'ItemProduct',
                                         amount:orderItem.unitAmount, description:orderItem.itemDescription,
-                                        quantity:assetIssuance.quantity, assetId:assetIssuance.assetId,
+                                        quantity:issuanceQuantityToBill, assetId:assetIssuance.assetId,
                                         quantityUomId:orderItem.quantityUomId, productId:orderItem.productId,
                                         otherPartyProductId:orderItem.otherPartyProductId, itemDate:orderHeader.placedDate]"/>
                             <if condition="!parentInvoiceItemSeqId"><set field="parentInvoiceItemSeqId" from="iiOut.invoiceItemSeqId"/></if>
@@ -875,7 +887,7 @@ along with this software (see the LICENSE.md file). If not, see
                                     in-map="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
                                         invoiceId:invoiceId, invoiceItemSeqId:iiOut.invoiceItemSeqId,
                                         assetIssuanceId:assetIssuance.assetIssuanceId, shipmentId:shipmentId,
-                                        amount:orderItem.unitAmount, quantity:assetIssuance.quantity]"/>
+                                        amount:orderItem.unitAmount, quantity:issuanceQuantityToBill]"/>
                             <!-- set invoiceId and invoiceItemSeqId on AssetIssuance -->
                             <set field="assetIssuance.invoiceId" from="invoiceId"/>
                             <set field="assetIssuance.invoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
@@ -887,10 +899,10 @@ along with this software (see the LICENSE.md file). If not, see
                                 <set field="newShipmentItemSource.shipmentItemSourceId" from="null"/>
                                 <entity-sequenced-id-primary value-field="newShipmentItemSource"/>
                                 <set field="newShipmentItemSource.invoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
-                                <set field="newShipmentItemSource.quantity" from="assetIssuance.quantity"/>
+                                <set field="newShipmentItemSource.quantity" from="issuanceQuantityToBill"/>
                                 <entity-create value-field="newShipmentItemSource"/>
 
-                                <set field="shipmentItemSource.quantity" from="shipmentItemSource.quantity - assetIssuance.quantity"/>
+                                <set field="shipmentItemSource.quantity" from="shipmentItemSource.quantity - issuanceQuantityToBill"/>
                                 <entity-update value-field="shipmentItemSource"/>
                             </then><else>
                                 <set field="shipmentItemSource.invoiceId" from="invoiceId"/>
@@ -898,7 +910,7 @@ along with this software (see the LICENSE.md file). If not, see
                                 <entity-update value-field="shipmentItemSource"/>
                             </else></if>
 
-                            <set field="quantityNotOnItems" from="quantityNotOnItems - assetIssuance.quantity"/>
+                            <set field="quantityNotBilled" from="quantityNotBilled - issuanceQuantityToBill"/>
                         </iterate>
                     </if>
 
@@ -911,13 +923,15 @@ along with this software (see the LICENSE.md file). If not, see
                             <order-by field-name="orderItemSeqId"/>
                         </entity-find>
                         <iterate list="assetReceiptList" entry="assetReceipt">
-                            <if condition="assetReceipt.quantityAccepted == 0.0"><continue/></if>
+                            <set field="receiptQuantityToBill" from="quantityNotBilled &gt; assetReceipt.quantityAccepted ?
+                                    assetReceipt.quantityAccepted : quantityNotBilled"/>
+                            <if condition="receiptQuantityToBill &lt;= 0.0"><continue/></if>
                             <!-- should we make sure the total quantity on all AssetReceipt records matches the
                                 quantity on the ShipmentItemSource record? that should be handled when they are created... -->
                             <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="iiOut"
                                     in-map="[invoiceId:invoiceId, itemTypeEnumId:orderItem.itemTypeEnumId ?: 'ItemProduct',
                                         amount:orderItem.unitAmount, description:orderItem.itemDescription,
-                                        quantity:assetReceipt.quantityAccepted, assetId:assetReceipt.assetId,
+                                        quantity:receiptQuantityToBill, assetId:assetReceipt.assetId,
                                         quantityUomId:orderItem.quantityUomId, productId:orderItem.productId,
                                         otherPartyProductId:orderItem.otherPartyProductId, itemDate:orderHeader.placedDate]"/>
                             <if condition="!parentInvoiceItemSeqId"><set field="parentInvoiceItemSeqId" from="iiOut.invoiceItemSeqId"/></if>
@@ -925,7 +939,7 @@ along with this software (see the LICENSE.md file). If not, see
                                     in-map="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
                                         invoiceId:invoiceId, invoiceItemSeqId:iiOut.invoiceItemSeqId,
                                         assetReceiptId:assetReceipt.assetReceiptId, shipmentId:shipmentId,
-                                        amount:orderItem.unitAmount, quantity:assetReceipt.quantityAccepted]"/>
+                                        amount:orderItem.unitAmount, quantity:receiptQuantityToBill]"/>
                             <!-- set invoiceId and invoiceItemSeqId on AssetReceipt -->
                             <set field="assetReceipt.invoiceId" from="invoiceId"/>
                             <set field="assetReceipt.invoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
@@ -937,10 +951,10 @@ along with this software (see the LICENSE.md file). If not, see
                                 <set field="newShipmentItemSource.shipmentItemSourceId" from="null"/>
                                 <entity-sequenced-id-primary value-field="newShipmentItemSource"/>
                                 <set field="newShipmentItemSource.invoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
-                                <set field="newShipmentItemSource.quantity" from="assetReceipt.quantityAccepted"/>
+                                <set field="newShipmentItemSource.quantity" from="receiptQuantityToBill"/>
                                 <entity-create value-field="newShipmentItemSource"/>
 
-                                <set field="shipmentItemSource.quantity" from="shipmentItemSource.quantity - assetReceipt.quantityAccepted"/>
+                                <set field="shipmentItemSource.quantity" from="shipmentItemSource.quantity - receiptQuantityToBill"/>
                                 <entity-update value-field="shipmentItemSource"/>
                             </then><else>
                                 <set field="shipmentItemSource.invoiceId" from="invoiceId"/>
@@ -948,18 +962,18 @@ along with this software (see the LICENSE.md file). If not, see
                                 <entity-update value-field="shipmentItemSource"/>
                             </else></if>
 
-                            <set field="quantityNotOnItems" from="quantityNotOnItems - assetReceipt.quantityAccepted"/>
+                            <set field="quantityNotBilled" from="quantityNotBilled - receiptQuantityToBill"/>
                         </iterate>
                     </if>
 
                     <!-- there should not be any quantity left over after issuance/receipt records, but just make sure -->
                     <set field="mainIiOut" from="null"/>
-                    <if condition="quantityNotOnItems &gt; 0">
+                    <if condition="quantityNotBilled &gt; 0">
                         <!-- NOTE: in this case we don't have an assetId -->
                         <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="mainIiOut"
                                 in-map="[invoiceId:invoiceId, itemTypeEnumId:orderItem.itemTypeEnumId ?: 'ItemProduct',
                                     amount:orderItem.unitAmount, description:orderItem.itemDescription,
-                                    quantity:quantityNotOnItems, quantityUomId:orderItem.quantityUomId,
+                                    quantity:quantityNotBilled, quantityUomId:orderItem.quantityUomId,
                                     productId:orderItem.productId, otherPartyProductId:orderItem.otherPartyProductId,
                                     itemDate:orderHeader.placedDate]"/>
                         <if condition="!parentInvoiceItemSeqId"><set field="parentInvoiceItemSeqId" from="mainIiOut.invoiceItemSeqId"/></if>
@@ -970,10 +984,10 @@ along with this software (see the LICENSE.md file). If not, see
                             <set field="newShipmentItemSource.shipmentItemSourceId" from="null"/>
                             <entity-sequenced-id-primary value-field="newShipmentItemSource"/>
                             <set field="newShipmentItemSource.invoiceItemSeqId" from="mainIiOut.invoiceItemSeqId"/>
-                            <set field="newShipmentItemSource.quantity" from="quantityNotOnItems"/>
+                            <set field="newShipmentItemSource.quantity" from="quantityNotBilled"/>
                             <entity-create value-field="newShipmentItemSource"/>
 
-                            <set field="shipmentItemSource.quantity" from="shipmentItemSource.quantity - quantityNotOnItems"/>
+                            <set field="shipmentItemSource.quantity" from="shipmentItemSource.quantity - quantityNotBilled"/>
                             <entity-update value-field="shipmentItemSource"/>
                         </then><else>
                             <set field="shipmentItemSource.invoiceId" from="invoiceId"/>
@@ -995,7 +1009,7 @@ along with this software (see the LICENSE.md file). If not, see
                                 <econdition field-name="orderItemSeqId" from="childOrderItem.orderItemSeqId"/>
                             </entity-find>
                             <if condition="!orderItemBillingList">
-                                <!-- is prorate by quantity needed? -->
+                                <!-- TODO: is prorate by quantity needed? bill quantity not billed, prorated by cur vs OrderItem quantity -->
                                 <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="childIiOut"
                                         in-map="[invoiceId:invoiceId, itemTypeEnumId:(childOrderItem.itemTypeEnumId ?: 'ItemSales'),
                                             parentItemSeqId:parentInvoiceItemSeqId, amount:childOrderItem.unitAmount,
