@@ -30,7 +30,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment" for-update="true"/>
-            <if condition="!payment"><return error="true" message="Could not find Payment with ID [${paymentId}]"/></if>
+            <if condition="payment == null"><return error="true" message="Could not find Payment with ID [${paymentId}]"/></if>
 
             <service-call name="mantle.ledger.PaymentAutoPostServices.get#PaymentPartyAcctgPreferences"
                     in-map="[payment:payment]" out-map="context"/>
@@ -43,12 +43,22 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/>
             </if>
 
+            <!-- get applied and unapplied totals, are posted differently -->
+            <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
+                <econdition field-name="paymentId"/>
+                <econdition field-name="amountApplied" operator="not-equals" from="0.0"/>
+            </entity-find>
+            <set field="appliedTotal" from="paymentApplicationList*.amountApplied.sum()"/>
+            <set field="unappliedTotal" from="payment.amount - appliedTotal"/>
+            <set field="isFullSinglePa" from="paymentApplicationList.size() == 1 &amp;&amp; unappliedTotal == 0.0"/>
+
             <!-- ==== create the main tx record(s) ==== -->
 
             <if condition="fromPartyAcctgPreference">
                 <service-call name="mantle.ledger.LedgerServices.create#AcctgTrans" out-map="context"
                         in-map="[acctgTransTypeEnumId:'AttOutgoingPayment', organizationPartyId:payment.fromPartyId,
                             otherPartyId:payment.toPartyId, amountUomId:payment.amountUomId, paymentId:payment.paymentId,
+                            invoiceId:(isFullSinglePa ? paymentApplicationList[0].invoiceId : null),
                             transactionDate:payment.effectiveDate]"/>
                 <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="fromAcctgTrans"/>
             </if>
@@ -56,6 +66,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.ledger.LedgerServices.create#AcctgTrans" out-map="context"
                         in-map="[acctgTransTypeEnumId:'AttIncomingPayment', organizationPartyId:payment.toPartyId,
                             otherPartyId:payment.fromPartyId, amountUomId:payment.amountUomId, paymentId:payment.paymentId,
+                            invoiceId:(isFullSinglePa ? paymentApplicationList[0].invoiceId : null),
                             transactionDate:payment.effectiveDate]"/>
                 <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="toAcctgTrans"/>
             </if>
@@ -73,57 +84,59 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- keep track of if we should put in the error journal or post -->
             <set field="useErrorJournal" from="false"/>
 
-            <!-- get applied and unapplied totals, are posted differently -->
-            <set field="appliedTotal" from="0"/>
-            <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
-                <econdition field-name="paymentId"/></entity-find>
-            <iterate list="paymentApplicationList" entry="paymentApplication">
-                <set field="appliedTotal" from="appliedTotal + paymentApplication.amountApplied"/></iterate>
-            <set field="unappliedTotal" from="payment.amount - appliedTotal"/>
-
             <!-- create entries for applied and unapplied totals, as applicable, based on Payment type -->
 
             <!-- Payment Type entry for from Party (outgoing) -->
             <if condition="fromPartyAcctgPreference != null">
-                <iterate list="paymentApplicationList" entry="paymentApplication">
-                    <if condition="paymentApplication.amountApplied == 0.0"><continue/></if>
+                <if condition="isFullSinglePa"><then>
+                    <!-- single payment application for full amount so a single tx direct to AR/AP with invoiceId can be done -->
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:fromPartyAcctgPreference,
-                                acctgTrans:fromAcctgTrans, amount:paymentApplication.amountApplied,
+                                acctgTrans:fromAcctgTrans, amount:payment.amount,
                                 organizationPartyId:payment.fromPartyId, otherPartyId:payment.toPartyId,
-                                isApplied:'Y', paymentApplication:paymentApplication,
+                                isApplied:'Y', paymentApplication:paymentApplicationList[0],
                                 debitCreditFlag:'D', useErrorJournal:useErrorJournal]"
                             out-map="context"/>
-                </iterate>
-                <if condition="unappliedTotal">
+                </then><else>
+                    <!-- with partial or multiple payment applications do a single unapplied TX then a TX for each
+                        PaymentApplication so that each AR/AP trans has an invoiceId -->
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:fromPartyAcctgPreference,
-                                acctgTrans:fromAcctgTrans, amount:unappliedTotal,
+                                acctgTrans:fromAcctgTrans, amount:payment.amount,
                                 organizationPartyId:payment.fromPartyId, otherPartyId:payment.toPartyId,
                                 isApplied:'N', debitCreditFlag:'D', useErrorJournal:useErrorJournal]"
                             out-map="context"/>
-                </if>
+                    <iterate list="paymentApplicationList" entry="paymentApplication">
+                        <service-call name="mantle.ledger.PaymentAutoPostServices.post#PaymentApplication"
+                                in-map="[paymentApplicationId:paymentApplication.paymentApplicationId]"/>
+                    </iterate>
+                </else></if>
             </if>
             <!-- Payment Type entry for to Party (incoming) -->
             <if condition="toPartyAcctgPreference != null">
-                <iterate list="paymentApplicationList" entry="paymentApplication">
-                    <if condition="paymentApplication.amountApplied == 0.0"><continue/></if>
+                <if condition="isFullSinglePa"><then>
+                    <!-- single payment application for full amount so a single tx direct to AR/AP with invoiceId can be done -->
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:toPartyAcctgPreference,
-                                acctgTrans:toAcctgTrans, amount:paymentApplication.amountApplied,
+                                acctgTrans:toAcctgTrans, amount:payment.amount,
                                 organizationPartyId:payment.toPartyId, otherPartyId:payment.fromPartyId,
-                                isApplied:'Y', paymentApplication:paymentApplication,
+                                isApplied:'Y', paymentApplication:paymentApplicationList[0],
                                 debitCreditFlag:'C', useErrorJournal:useErrorJournal]"
                             out-map="context"/>
-                </iterate>
-                <if condition="unappliedTotal">
+                </then><else>
+                    <!-- with partial or multiple payment applications do a single unapplied TX then a TX for each
+                        PaymentApplication so that each AR/AP trans has an invoiceId -->
                     <service-call name="mantle.ledger.PaymentAutoPostServices.create#PaymentTypeEntry"
                             in-map="[payment:payment, partyAcctgPreference:toPartyAcctgPreference,
-                                acctgTrans:toAcctgTrans, amount:unappliedTotal,
+                                acctgTrans:toAcctgTrans, amount:payment.amount,
                                 organizationPartyId:payment.toPartyId, otherPartyId:payment.fromPartyId,
                                 isApplied:'N', debitCreditFlag:'C', useErrorJournal:useErrorJournal]"
                             out-map="context"/>
-                </if>
+                    <iterate list="paymentApplicationList" entry="paymentApplication">
+                        <service-call name="mantle.ledger.PaymentAutoPostServices.post#PaymentApplication"
+                                in-map="[paymentApplicationId:paymentApplication.paymentApplicationId]"/>
+                    </iterate>
+                </else></if>
             </if>
 
             <!-- create balancing entry for PaymentMethod -->
