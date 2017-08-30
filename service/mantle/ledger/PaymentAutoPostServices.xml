@@ -21,7 +21,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- make sure there is no AcctgTrans for this paymentId -->
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
                 <econdition field-name="paymentId"/>
-                <econdition field-name="acctgTransTypeEnumId" operator="not-in" value="AttIncomingPaymentAp,AttOutgoingPaymentAp"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" value="AttOutgoingPayment,AttIncomingPayment"/>
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
@@ -453,6 +453,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="paymentApplicationId"/>
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" value="AttOutgoingPayment,AttIncomingPayment,AttIncomingPaymentAp,AttOutgoingPaymentAp,AttPaymentApplied"/>
             </entity-find>
             <if condition="existingTransList">
                 <return message="Payment Application ${paymentApplicationId} has already been posted in accounting transaction ${existingTransList*.acctgTransId}"/>
@@ -474,9 +475,10 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <set field="foundUnappliedEntry" from="false"/>
             <iterate list="paymentTransList" entry="paymentTrans">
-                <entity-find-count entity-name="mantle.ledger.transaction.AcctgTransEntry" count-field="entryCount">
+                <entity-find-count entity-name="mantle.ledger.transaction.AcctgTransEntryGlAccount" count-field="entryCount">
                     <econdition field-name="acctgTransId" from="paymentTrans.acctgTransId"/>
-                    <econdition field-name="glAccountTypeEnumId" operator="in" value="GatAccPayableUnapplied,GatAccReceivableUnapplied"/>
+                    <econdition field-name="glAccountClassEnumId" operator="in" value="UNEARNED_REVENUE,PREPAID_EXPENSE"/>
+                    <!-- <econdition field-name="glAccountTypeEnumId" operator="in" value="GatAccPayableUnapplied,GatAccReceivableUnapplied"/> -->
                 </entity-find-count>
                 <if condition="entryCount &gt; 0"><set field="foundUnappliedEntry" from="true"/></if>
             </iterate>
@@ -586,12 +588,13 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="revert" noun="PaymentApplicationPost">
         <in-parameters><parameter name="paymentApplicationId" required="true"/></in-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.account.payment.PaymentApplication" value-field="paymentApplication" for-update="true"/>
+
             <!-- there should just be one AcctgTrans for this, if there is more than one may already be reversed -->
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="acctgTransList">
                 <econdition field-name="paymentApplicationId"/>
-                <econdition field-name="reversedByAcctgTransId" from="null"/>
-                <econdition field-name="reverseOfAcctgTransId" from="null"/>
-                <econdition field-name="acctgTransTypeEnumId" operator="in" value="AttOutgoingPaymentAp,AttIncomingPaymentAp"/>
+                <econdition field-name="reversedByAcctgTransId" from="null"/><econdition field-name="reverseOfAcctgTransId" from="null"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" value="AttOutgoingPaymentAp,AttIncomingPaymentAp,AttPaymentApplied"/>
             </entity-find>
             <if condition="acctgTransList"><then>
                 <if condition="acctgTransList.size() == 1"><then>
@@ -603,7 +606,30 @@ along with this software (see the LICENSE.md file). If not, see
                     <return error="true" message="Found more than one accounting transaction for Payment Application ${paymentApplicationId}, may already be reversed, not posting reverse transaction."/>
                 </else></if>
             </then><else>
-                <return message="No accounting transaction found for Payment Application ${paymentApplicationId}, not posting reverse transaction."/>
+                <!-- handle case where Payment was posted directly to AR or AP account with an Outgoing/Incoming Payment transaction -->
+                <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="paymentTransList">
+                    <econdition field-name="paymentId" from="paymentApplication.paymentId"/>
+                    <econdition field-name="reversedByAcctgTransId" from="null"/><econdition field-name="reverseOfAcctgTransId" from="null"/>
+                    <econdition field-name="acctgTransTypeEnumId" operator="in" value="AttOutgoingPayment,AttIncomingPayment"/>
+                </entity-find>
+                <set field="arApTrans" from="null"/>
+                <iterate list="paymentTransList" entry="paymentTrans">
+                    <entity-find entity-name="mantle.ledger.transaction.AcctgTransEntryGlAccount" list="arApEntryList">
+                        <econdition field-name="acctgTransId" from="paymentTrans.acctgTransId"/>
+                        <econdition field-name="glAccountClassEnumId" operator="in" value="ACCOUNTS_PAYABLE,ACCOUNTS_RECEIVABLE"/>
+                        <!-- <econdition field-name="glAccountTypeEnumId" operator="in" value="GatAccountsPayable,GatAccountsReceivable"/> -->
+                    </entity-find>
+                    <if condition="arApEntryList"><set field="arApTrans" from="paymentTrans"/><break/></if>
+                </iterate>
+                <if condition="arApTrans != null"><then>
+                    <!-- un-post and delete transaction, do fresh payment post now unapplied -->
+                    <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:arApTrans.acctgTransId]"/>
+                    <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:arApTrans.acctgTransId]"/>
+
+                    <service-call name="mantle.ledger.PaymentAutoPostServices.post#Payment" in-map="[paymentId:paymentApplication.paymentId]"/>
+                </then><else>
+                    <return message="No accounting transaction found for Payment Application ${paymentApplicationId}, not posting reverse transaction."/>
+                </else></if>
             </else></if>
         </actions>
     </service>
