@@ -72,8 +72,8 @@ if (assetSerialNumber) { ef.condition(ec.entity.conditionFactory.makeCondition("
 
 if (orderByField) {
     if (orderByField.contains("combinedName")) {
-        if (orderByField.contains("-")) ef.orderBy("-organizationName,-lastName,-firstName")
-        else ef.orderBy("organizationName,lastName,firstName")
+        if (orderByField.contains("-")) ef.orderBy("-organizationName,-firstName,-lastName")
+        else ef.orderBy("organizationName,firstName,lastName")
     } else {
         ef.orderBy(orderByField)
     }
