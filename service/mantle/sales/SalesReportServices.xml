@@ -16,7 +16,7 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="get" noun="SalesOrderSummary">
         <in-parameters>
             <parameter name="interval" default-value="M"/><!-- week = w, month = M, quarter = q, year = y -->
-            <parameter name="intervalCount" type="Integer" default="12"/>
+            <parameter name="intervalCount" type="Integer" default="13"/>
             <parameter name="thruDate" type="Date" default="new java.sql.Date(ec.user.nowTimestamp.time)"/>
             <parameter name="offset"/>
             <parameter name="dateFormat" default-value="dd MMM yyyy"/>
@@ -25,6 +25,8 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="salesOrderSummaryList" type="List"><parameter name="result" type="Map"/></parameter>
+            <parameter name="totalLine" type="Map"/>
+            <parameter name="averageLine" type="Map"/>
         </out-parameters>
         <actions><script><![CDATA[
             import org.elasticsearch.action.search.SearchResponse
@@ -93,26 +95,48 @@ along with this software (see the LICENSE.md file). If not, see
             SearchResponse sr = ElasticSearchUtil.aggregationSearch(indexName, [documentType], null, queryMap, aggBuilder, ec)
 
             salesOrderSummaryList = []
+            totalLine = [dateKey:"Prior Total"]
             for (def dateBucket in sr.getAggregations().get("DateOuter").getBuckets()) {
                 def prodAgg = dateBucket.getAggregations().get("ItemProduct")
                 def discAgg = dateBucket.getAggregations().get("ItemDiscount")
                 def newCustAgg = dateBucket.getAggregations().get("NewCustomer")
-                salesOrderSummaryList.add([dateKey:dateBucket.getKeyAsString(),
-                        orderCount:dateBucket.getAggregations().get("orderCount").getValue(),
-                        newCustomerOrderCount:newCustAgg.getAggregations().get("newCustomerOrderCount").getValue(),
+                BigDecimal orderCount = new BigDecimal(dateBucket.getAggregations().get("orderCount").getValue())
+                BigDecimal newCustomerOrderCount = new BigDecimal(newCustAgg.getAggregations().get("newCustomerOrderCount").getValue())
+                BigDecimal productSaleTotal = new BigDecimal(prodAgg.getAggregations().get("productSaleTotal").getValue())
+                BigDecimal productIssuedTotal = new BigDecimal(prodAgg.getAggregations().get("productIssuedTotal").getValue())
+                BigDecimal productCostTotal = new BigDecimal(prodAgg.getAggregations().get("productCostTotal").getValue())
+                BigDecimal discountTotal = new BigDecimal(discAgg.getAggregations().get("discountTotal").getValue())
+                Map curLine = [dateKey:dateBucket.getKeyAsString(),
+                        orderCount:orderCount, newCustomerOrderCount:newCustomerOrderCount,
+                        newCustomerPercent:(orderCount ? (newCustomerOrderCount/orderCount)*100 : 0.0),
                         totalSales:new BigDecimal(dateBucket.getAggregations().get("totalSales").getValue()),
-                        productSaleTotal:new BigDecimal(prodAgg.getAggregations().get("productSaleTotal").getValue()),
-                        productIssuedTotal:new BigDecimal(prodAgg.getAggregations().get("productIssuedTotal").getValue()),
-                        productCostTotal:new BigDecimal(prodAgg.getAggregations().get("productCostTotal").getValue()),
+                        productSaleTotal:productSaleTotal, productIssuedTotal:productIssuedTotal, productCostTotal:productCostTotal,
                         productQuantityTotal:new BigDecimal(prodAgg.getAggregations().get("productQuantityTotal").getValue()),
-                        discountTotal:new BigDecimal(discAgg.getAggregations().get("discountTotal").getValue())])
+                        discountTotal:discountTotal, netSales:(productSaleTotal + discountTotal),
+                        discountPercent:(productSaleTotal ? (-discountTotal/productSaleTotal)*100 : 0.0),
+                        costPercent:(productIssuedTotal ? (productCostTotal/productIssuedTotal)*100 : 0.0)]
+                salesOrderSummaryList.add(curLine)
+                // don't include the first (most recent) period in the total and average
+                if (salesOrderSummaryList.size() > 1) addBigDecimalsInMap(totalLine, curLine)
             }
+
+            BigDecimal avgCount = new BigDecimal(salesOrderSummaryList.size())
+            averageLine = new LinkedHashMap(totalLine)
+            averageLine.dateKey = "Prior Average"
+            divideBigDecimalsInMap(averageLine, avgCount)
+
+            totalLine.newCustomerPercent = null
+            totalLine.discountPercent = null
+            totalLine.costPercent = null
+
+            salesOrderSummaryList.add(averageLine)
+            salesOrderSummaryList.add(totalLine)
         ]]></script></actions>
     </service>
     <service verb="get" noun="SalesInvoiceSummary">
         <in-parameters>
             <parameter name="interval" default-value="M"/><!-- week = w, month = M, quarter = q, year = y -->
-            <parameter name="intervalCount" type="Integer" default="12"/>
+            <parameter name="intervalCount" type="Integer" default="13"/>
             <parameter name="thruDate" type="Date" default="new java.sql.Date(ec.user.nowTimestamp.time)"/>
             <parameter name="offset"/>
             <parameter name="dateFormat" default-value="dd MMM yyyy"/>
@@ -199,30 +223,53 @@ along with this software (see the LICENSE.md file). If not, see
             // make list for invoice details
             Map<String, Map> invoiceTempMap = [:]
             for (def dateBucket in invSr.getAggregations().get("DateOuter").getBuckets()) {
+                BigDecimal invoiceTotal = new BigDecimal(dateBucket.getAggregations().get("invoiceTotal").getValue())
+                BigDecimal invoicePaymentsApplied = new BigDecimal(dateBucket.getAggregations().get("invoicePaymentsApplied").getValue())
                 invoiceTempMap.put(dateBucket.getKeyAsString(), [dateKey:dateBucket.getKeyAsString(), invoiceCount:dateBucket.getDocCount(),
-                        invoiceTotal:new BigDecimal(dateBucket.getAggregations().get("invoiceTotal").getValue()),
-                        invoicePaymentsApplied:new BigDecimal(dateBucket.getAggregations().get("invoicePaymentsApplied").getValue())])
+                        invoiceTotal:invoiceTotal, invoicePaymentsApplied:invoicePaymentsApplied,
+                        paidPercent:(invoiceTotal ? (invoicePaymentsApplied/invoiceTotal)*100 : 0.0)])
             }
 
             // prep the list from items first
             salesInvoiceSummaryList = []
+            totalLine = [dateKey:"Prior Total"]
             for (def dateBucket in itemSr.getAggregations().get("DateOuter").getBuckets()) {
                 String keyAsString = dateBucket.getKeyAsString()
                 Map invoiceTemp = invoiceTempMap.remove(keyAsString)
                 if (!invoiceTemp) ec.logger.warn("In SalesInvoiceSummary no invoice summary for ${keyAsString}")
                 def prodAgg = dateBucket.getAggregations().get("ItemProduct")
                 def discAgg = dateBucket.getAggregations().get("ItemDiscount")
-                Map result = [invoiceIdCount:dateBucket.getAggregations().get("invoiceIdCount").getValue(),
+                BigDecimal invoiceIdCount = dateBucket.getAggregations().get("invoiceIdCount").getValue()
+                BigDecimal invoiceCount = invoiceTemp?.invoiceCount ?: invoiceIdCount
+                BigDecimal productSaleTotal = new BigDecimal(prodAgg.getAggregations().get("productSaleTotal").getValue())
+                BigDecimal productIssuedTotal = new BigDecimal(prodAgg.getAggregations().get("productIssuedTotal").getValue())
+                BigDecimal productCostTotal = new BigDecimal(prodAgg.getAggregations().get("productCostTotal").getValue())
+                BigDecimal discountTotal = new BigDecimal(discAgg.getAggregations().get("discountTotal").getValue())
+                Map curLine = [invoiceCount:invoiceCount, invoiceIdCount:invoiceIdCount,
                         totalSales:new BigDecimal(dateBucket.getAggregations().get("totalSales").getValue()),
-                        productSaleTotal:new BigDecimal(prodAgg.getAggregations().get("productSaleTotal").getValue()),
-                        productIssuedTotal:new BigDecimal(prodAgg.getAggregations().get("productIssuedTotal").getValue()),
-                        productCostTotal:new BigDecimal(prodAgg.getAggregations().get("productCostTotal").getValue()),
+                        productSaleTotal:productSaleTotal, productIssuedTotal:productIssuedTotal, productCostTotal:productCostTotal,
                         productQuantityTotal:new BigDecimal(prodAgg.getAggregations().get("productQuantityTotal").getValue()),
-                        discountTotal:new BigDecimal(discAgg.getAggregations().get("discountTotal").getValue())]
-                if (invoiceTemp) result.putAll(invoiceTemp)
-                salesInvoiceSummaryList.add(result)
+                        discountTotal:discountTotal, netSales:(productSaleTotal + discountTotal),
+                        discountPercent:(productSaleTotal ? (-discountTotal/productSaleTotal)*100 : 0.0),
+                        costPercent:(productIssuedTotal ? (productCostTotal/productIssuedTotal)*100 : 0.0)]
+                if (invoiceTemp) curLine.putAll(invoiceTemp) else curLine.dateKey = dateBucket.getKeyAsString()
+                salesInvoiceSummaryList.add(curLine)
+                // don't include the first (most recent) period in the total and average
+                if (salesInvoiceSummaryList.size() > 1) addBigDecimalsInMap(totalLine, curLine)
             }
             ec.logger.warn("In SalesInvoiceSummary invoiceTempMap remaining: ${invoiceTempMap}")
+
+            BigDecimal avgCount = new BigDecimal(salesInvoiceSummaryList.size())
+            averageLine = new LinkedHashMap(totalLine)
+            averageLine.dateKey = "Prior Average"
+            divideBigDecimalsInMap(averageLine, avgCount)
+
+            totalLine.paidPercent = null
+            totalLine.discountPercent = null
+            totalLine.costPercent = null
+
+            salesInvoiceSummaryList.add(averageLine)
+            salesInvoiceSummaryList.add(totalLine)
         ]]></script></actions>
     </service>
 </services>
