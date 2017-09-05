@@ -15,6 +15,8 @@
 import org.moqui.Moqui
 import org.moqui.context.ExecutionContext
 import org.moqui.entity.EntityList
+import org.moqui.entity.EntityValue
+import org.moqui.util.ObjectUtilities
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import spock.lang.Shared
@@ -1046,7 +1048,13 @@ class OrderProcureToPayBasicFlow extends Specification {
         if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
         if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
 
+        EntityList resList = ec.entity.find("mantle.product.issuance.AssetReservation").condition("productId", "DEMO_1_1").list()
+        def totalNotAvailable = resList.sum { EntityValue res -> res.quantityNotAvailable }
+        logger.info("After Shrinkage DEMO_1_1 AssetReservation not available ${ObjectUtilities.toPlainString(totalNotAvailable)} ${resList.collect({[assetReservationId:it.assetReservationId, assetId:it.assetId, quantityNotAvailable:it.quantityNotAvailable]})}")
+
         then:
+        // not available reservations should now be moved to Asset with available currently in the DB (assetId=55400)
+        totalNotAvailable == 0.0
         dataCheckErrors.size() == 0
     }
     def "inventory Found"() {
@@ -1062,7 +1070,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     facilityId="ZIRET_WH" classEnumId="AsClsInventoryFin" ownerPartyId="ORG_ZIZI_RETAIL" hasQuantity="Y"/>
             <mantle.product.asset.PhysicalInventory physicalInventoryId="55401" physicalInventoryDate="${effectiveTime}"
                     comments="Test found 10 DEMO_1_1" partyId="EX_JOHN_DOE">
-                <mantle.product.asset.AssetDetail assetDetailId="55419" assetId="55406" productId="DEMO_1_1"
+                <mantle.product.asset.AssetDetail assetDetailId="55421" assetId="55406" productId="DEMO_1_1"
                         varianceReasonEnumId="InVrFound" availableToPromiseDiff="10" quantityOnHandDiff="10" effectiveDate="${effectiveTime}"/>
             </mantle.product.asset.PhysicalInventory>
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55417" postedDate="${effectiveTime}" amountUomId="USD"

@@ -474,13 +474,38 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="reReserve" noun="ProductAssets">
+        <description>Clear out all reservations for a Product and re-reserve</description>
         <in-parameters><parameter name="productId" required="true"/></in-parameters>
         <actions>
             <!-- TODO: implement this (and populate priority on order/item and on reservation) -->
         </actions>
     </service>
+    <service verb="checkReserve" noun="ProductAssets">
+        <description>For a given productId see if there are AssetReservation.quantityNotAvailable and Asset.availableToPromiseTotal, if so update reservations</description>
+        <in-parameters><parameter name="productId" required="true"/></in-parameters>
+        <actions>
+            <entity-find-count entity-name="mantle.product.issuance.AssetReservation" count-field="notAvailResCount">
+                <econdition field-name="productId"/><econdition field-name="quantityNotAvailable" operator="greater" from="0.0"/></entity-find-count>
+            <if condition="notAvailResCount == 0"><return/></if>
+
+            <while condition="notAvailResCount &gt; 0">
+                <entity-find entity-name="mantle.product.asset.Asset" list="availAssetList" limit="1">
+                    <econdition field-name="productId"/>
+                    <econdition field-name="availableToPromiseTotal" operator="greater" from="0.0"/>
+                    <order-by field-name="receivedDate"/><!-- get oldest first for filling quantityNotAvailable -->
+                </entity-find>
+                <if condition="availAssetList.size() == 0"><break/></if>
+                <!-- move reservation(s) to this asset -->
+                <service-call name="mantle.product.AssetServices.reserve#IncreasedAsset" in-map="[assetId:availAssetList[0].assetId]"/>
+                <!-- see if we have any more not available reservations -->
+                <entity-find-count entity-name="mantle.product.issuance.AssetReservation" count-field="notAvailResCount">
+                    <econdition field-name="productId"/><econdition field-name="quantityNotAvailable" operator="greater" from="0.0"/></entity-find-count>
+            </while>
+        </actions>
+    </service>
 
     <service verb="reserve" noun="IncreasedAsset" no-tx-cache="true">
+        <description>For Asset with availableToPromiseTotal > 0 find AssetReservation with quantityNotAvailable and reserve against it</description>
         <in-parameters><parameter name="assetId" required="true"/></in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true"/>
@@ -679,18 +704,19 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true">
                 <field-map field-name="assetId"/></entity-find-one>
-            <!-- TODO (future): also use on physical inventory decrease -->
 
             <service-call name="create#mantle.product.asset.AssetDetail" in-map="context +
                     [quantityOnHandDiff:quantityDiff, availableToPromiseDiff:quantityDiff]"/>
 
             <!-- reserve the newly available Asset, if needed -->
-            <if condition="quantityDiff &gt; 0">
+            <if condition="quantityDiff &gt; 0.0 &amp;&amp; asset.productId">
                 <service-call name="mantle.product.AssetServices.reserve#IncreasedAsset" in-map="[assetId:assetId]"/></if>
 
             <!-- on decrease adjust reservations down (increase quantityNotAvailable); -->
-            <if condition="quantityDiff &lt; 0">
-                <if condition="asset.availableToPromiseTotal &lt; 0">
+            <if condition="quantityDiff &lt; 0.0 &amp;&amp; asset.productId">
+                <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true">
+                    <field-map field-name="assetId"/></entity-find-one>
+                <if condition="asset.availableToPromiseTotal &lt; 0.0">
                     <set field="negativeAvailable" from="-asset.availableToPromiseTotal"/>
                     <set field="reduceQuantityRemaining" from="-quantityDiff"/>
                     <if condition="reduceQuantityRemaining &gt; negativeAvailable">
@@ -710,6 +736,8 @@ along with this software (see the LICENSE.md file). If not, see
                         <set field="reduceQuantityRemaining" from="reduceQuantityRemaining - quantityToReduce"/>
                         <if condition="reduceQuantityRemaining == 0"><break/></if>
                     </iterate>
+                    <!-- now that quantityNotAvailable is updated see if we can reserve those on other assets -->
+                    <service-call name="mantle.product.AssetServices.checkReserve#ProductAssets" in-map="[productId:asset.productId]"/>
                 </if>
             </if>
         </actions>
@@ -1530,7 +1558,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="assetIdList" from="[]"/>
 
             <!-- <log level="warn" message="======= Changing product [${productId}] in facility [${facilityId}:${locationSeqId}] by ${quantityChange}; assetList: ${assetList}"/> -->
-            <if condition="quantityChange &gt; 0"><then>
+            <if condition="quantityChange &gt; 0.0"><then>
                 <if condition="assetList"><then>
                     <set field="quantityRemaining" from="quantityChange"/>
                     <iterate list="assetList" entry="asset">
@@ -1543,7 +1571,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <if condition="quantityRemaining == 0"><break/></if>
                     </iterate>
                 </then><else>
-                    <set field="quantityRemaining" from="0"/>
+                    <set field="quantityRemaining" from="0.0"/>
                     <!-- no passed assetList and quantityChange > 0, create new Asset -->
                     <service-call name="mantle.product.AssetServices.create#ProductAssetAdHoc" out-map="context"
                             in-map="context + [createdDate:physicalInventoryDate]"/>
@@ -1556,7 +1584,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <service-call name="mantle.product.AssetServices.reserve#IncreasedAsset" in-map="[assetId:assetId]"/>
                     <script>assetIdList.add(assetId)</script>
                 </else></if>
-            </then><else-if condition="quantityChange &lt; 0">
+            </then><else-if condition="quantityChange &lt; 0.0">
                 <if condition="!assetList">
                     <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
                         <econdition field-name="productId"/><econdition field-name="facilityId"/>
@@ -1575,24 +1603,24 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="lockedAssetList" from="[]"/>
                 <iterate list="assetList" entry="asset">
                     <set field="quantityDiff" from="quantityRemaining &gt; asset.quantityOnHandTotal ? asset.quantityOnHandTotal : quantityRemaining"/>
-                    <if condition="quantityDiff != 0">
+                    <if condition="quantityDiff != 0.0">
                         <!-- get a locked record -->
                         <entity-find-one entity-name="mantle.product.asset.Asset" value-field="lockedAsset" for-update="true">
                             <field-map field-name="assetId" from="asset.assetId"/></entity-find-one>
                         <set field="quantityDiff" from="quantityRemaining &gt; lockedAsset.quantityOnHandTotal ? lockedAsset.quantityOnHandTotal : quantityRemaining"/>
-                        <if condition="quantityDiff != 0">
+                        <if condition="quantityDiff != 0.0">
                             <script>lockedAssetList.add(lockedAsset)</script>
                             <set field="quantityRemaining" from="quantityRemaining - quantityDiff"/>
                         </if>
                     </if>
-                    <if condition="quantityRemaining == 0"><break/></if>
+                    <if condition="quantityRemaining == 0.0"><break/></if>
                 </iterate>
 
                 <!-- do the actual quantity changes -->
                 <set field="quantityRemaining" from="-quantityChange"/>
                 <iterate list="lockedAssetList" entry="asset">
                     <set field="quantityDiff" from="quantityRemaining &gt; asset.quantityOnHandTotal ? asset.quantityOnHandTotal : quantityRemaining"/>
-                    <if condition="quantityDiff != 0">
+                    <if condition="quantityDiff != 0.0">
                         <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="context +
                                 [assetId:asset.assetId, quantityDiff:-quantityDiff]"/></if>
                     <set field="quantityRemaining" from="quantityRemaining - quantityDiff"/>

@@ -182,7 +182,7 @@ class OrderToCashBasicFlow extends Specification {
 
             <mantle.product.asset.Asset assetId="55400" acquireCost="8" acquireCostUomId="USD" productId="DEMO_1_1"
                 statusId="AstAvailable" assetTypeEnumId="AstTpInventory" originalQuantity="400" quantityOnHandTotal="400"
-                availableToPromiseTotal="199" facilityId="ZIRET_WH" ownerPartyId="ORG_ZIZI_RETAIL"
+                availableToPromiseTotal="189" facilityId="ZIRET_WH" ownerPartyId="ORG_ZIZI_RETAIL"
                 hasQuantity="Y" assetName="Demo Product One-One"/>
             <mantle.product.issuance.AssetReservation assetReservationId="55500" assetId="55400" orderId="${cartOrderId}"
                 orderItemSeqId="01" reservedDate="${effectiveTime}" quantity="1" productId="DEMO_1_1" sequenceNum="0"
@@ -282,7 +282,7 @@ class OrderToCashBasicFlow extends Specification {
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <!-- Asset created, issued, change recorded in detail -->
 
-            <mantle.product.asset.Asset assetId="55400" quantityOnHandTotal="399" availableToPromiseTotal="199"/>
+            <mantle.product.asset.Asset assetId="55400" quantityOnHandTotal="399" availableToPromiseTotal="189"/>
             <mantle.product.issuance.AssetIssuance assetIssuanceId="55500" assetId="55400" orderId="${cartOrderId}"
                 orderItemSeqId="01" issuedDate="${effectiveTime}" quantity="1" productId="DEMO_1_1"
                 assetReservationId="55500" shipmentId="${shipResult.shipmentId}"/>

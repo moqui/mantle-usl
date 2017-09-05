@@ -47,13 +47,13 @@ class AssetReservationMultipleThreads extends Specification {
 
         gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Asset", 55300, 20)
         gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetDetail", 55300, 20)
-        gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetReservation", 55300, 20)
+        gec.entity.tempSetSequencedIdPrimary("mantle.product.issuance.AssetReservation", 55300, 20)
     }
 
     def cleanupSpec() {
         gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.Asset")
         gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetDetail")
-        gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetReservation")
+        gec.entity.tempResetSequencedIdPrimary("mantle.product.issuance.AssetReservation")
         gec.destroy()
 
         gec.factory.waitWorkerPoolEmpty(50) // up to 5 seconds
@@ -87,12 +87,11 @@ class AssetReservationMultipleThreads extends Specification {
         latch.await(30, TimeUnit.SECONDS)
         assetList = gec.entity.find("mantle.product.asset.Asset").condition("productId", "DEMO_1_1").list()
         def afterAtp = assetList.sum { EntityValue asset -> asset.availableToPromiseTotal }
-        logger.info("After ATP of DEMO_1_1 is " + ObjectUtilities.toPlainString(afterAtp))
+        logger.info("After ATP of DEMO_1_1 is ${ObjectUtilities.toPlainString(afterAtp)} ${assetList.collect({[assetId:it.assetId, availableToPromiseTotal:it.availableToPromiseTotal]})}")
 
         EntityList resList = gec.entity.find("mantle.product.issuance.AssetReservation").condition("productId", "DEMO_1_1").list()
         def totalNotAvailable = resList.sum { EntityValue res -> res.quantityNotAvailable }
-        logger.info("All DEMO_1_1 AssetReservations: ${resList}")
-        logger.info("Total not available of DEMO_1_1 in AssetReservations is " + ObjectUtilities.toPlainString(totalNotAvailable))
+        logger.info("After DEMO_1_1 AssetReservation not available ${ObjectUtilities.toPlainString(totalNotAvailable)} ${resList.collect({[assetReservationId:it.assetReservationId, assetId:it.assetId, quantityNotAvailable:it.quantityNotAvailable]})}")
 
         then:
         afterAtp == -totalNotAvailable
