@@ -35,7 +35,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice" for-update="true"/>
-            <if condition="!invoice"><return error="true" message="Could not find Invoice with ID [${invoiceId}]"/></if>
+            <if condition="invoice == null"><return error="true" message="Could not find Invoice with ID ${invoiceId}"/></if>
 
             <!-- get all InvoiceItems, including sub-items and all types as we'll post them flat -->
             <entity-find entity-name="mantle.account.invoice.InvoiceItem" list="invoiceItemList">
@@ -104,7 +104,11 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="invoiceTotal" from="0.0"/>
             <iterate list="invoiceItemList" entry="invoiceItem">
+                <!-- skip adjustment items, handle later -->
+                <if condition="invoiceItem.isAdjustment == 'Y'"><continue/></if>
+                <!-- calc and check item total -->
                 <set field="itemTotal" from="(invoiceItem.quantity != null ? invoiceItem.quantity : 1.0) * (invoiceItem.amount ?: 0.0)"/>
+                <if condition="itemTotal == 0.0"><continue/></if>
                 <set field="invoiceTotal" from="invoiceTotal + itemTotal"/>
 
                 <set field="entryCommonMap" from="[invoiceItemSeqId:invoiceItem.invoiceItemSeqId,
@@ -371,6 +375,14 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="fromAcctgTransId" from="fromAcctgTrans?.acctgTransId"/>
             <set field="toAcctgTransId" from="toAcctgTrans?.acctgTransId"/>
+
+            <!-- main invoice post done, now check for adjustment items that need to be posted -->
+            <iterate list="invoiceItemList" entry="invoiceItem">
+                <if condition="invoiceItem.isAdjustment == 'Y'">
+                    <service-call name="mantle.ledger.InvoiceAutoPostServices.post#InvoiceAdjustment"
+                            in-map="[invoiceId:invoiceItem.invoiceId, invoiceItemSeqId:invoiceItem.invoiceItemSeqId]"/>
+                </if>
+            </iterate>
         </actions>
     </service>
     <service verb="post" noun="InvoiceAdjustment">
@@ -431,9 +443,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="useErrorJournal" from="false"/>
 
             <!-- ==== create the main tx record(s) ==== -->
-            <!-- TODO: better handling of invoice adjust TX date, should probably be: invoiceItem.itemDate ?: invoice.invoiceDate -->
             <!-- TODO: don't allow date change for invoice adjust items, or update tx date (unpost, update, post) automatically? would be the first/only like that... -->
-            <set field="transactionDate" from="invoice.invoiceDate"/>
+            <set field="transactionDate" from="invoiceItem.itemDate ?: invoice.invoiceDate"/>
             <if condition="fromPartyAcctgPreference">
                 <service-call name="mantle.ledger.InvoiceAutoPostServices.get#InvoiceTypeTransType" out-map="fromInvoiceTypeTransTypeOut"
                         in-map="[invoiceTypeEnumId:invoice.invoiceTypeEnumId, organizationPartyId:invoice.fromPartyId, isPayable:'N']"/>
@@ -619,7 +630,6 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
         </actions>
     </service>
-
     <service verb="get" noun="InvoiceItemGlAccount">
         <in-parameters>
             <parameter name="acctgTransTypeEnumId"/>
@@ -675,6 +685,34 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="repost" noun="Invoice">
+        <description>For use when Invoice and its Accounting Transactions get out of whack.
+            Delete existing and post a new one (possibly multiple if it has adjustment items).</description>
+        <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice" for-update="true"/>
+            <if condition="invoice == null"><return error="true" message="Could not find Invoice with ID ${invoiceId}"/></if>
+
+            <!-- find existing AcctgTrans for this invoiceId -->
+            <set field="allInvoiceTxTypes" from="['AttSalesInvoice', 'AttVendRtnInvoice', 'AttPurchaseInvoice', 'AttCustRtnInvoice',
+                    'AttPayrollInvoice', 'AttTaxInvoice', 'AttGarnishmentInvoice', 'AttCommissionInvoice', 'AttInvoiceAdjust']"/>
+            <!-- NOTE: including 'AttInvoiceAdjust' to remove and repost those as well -->
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
+                <econdition field-name="invoiceId"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" from="allInvoiceTxTypes"/>
+                <econdition field-name="reversedByAcctgTransId" from="null"/>
+                <econdition field-name="reverseOfAcctgTransId" from="null"/>
+            </entity-find>
+            <!-- unpost and delete existing -->
+            <iterate list="existingTransList" entry="acctgTrans">
+                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+            </iterate>
+
+            <!-- now post the Invoice again -->
+            <service-call name="mantle.ledger.InvoiceAutoPostServices.post#Invoice" in-map="[invoiceId:invoiceId]"/>
+        </actions>
+    </service>
     <service verb="revert" noun="InvoicePost">
         <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
         <actions>
