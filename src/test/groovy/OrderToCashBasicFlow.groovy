@@ -14,6 +14,7 @@
 
 import org.moqui.Moqui
 import org.moqui.context.ExecutionContext
+import org.moqui.entity.EntityList
 import org.moqui.entity.EntityValue
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -454,5 +455,31 @@ class OrderToCashBasicFlow extends Specification {
 
         then:
         dataCheckErrors.size() == 0
+    }
+
+    def "reserve Asset With Displace Reservation"() {
+        when:
+        // NOTE: orders used here are from AssetReservationMultipleThreads (base id 53000)
+        // use asset DEMO_1_1A with 0 ATP at this point (90 QOH, 2 reservations for orders)
+        // use orders with 60 currently reserved against asset 55400
+
+        EntityList beforeResList = ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("assetId", "55400").list()
+        // for (EntityValue res in beforeResList) logger.warn("Res before: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
+        EntityValue beforeRes = beforeResList[0]
+        String orderId = beforeRes.orderId
+
+        ec.service.sync().name("mantle.product.AssetServices.reserve#AssetForOrderItem")
+                .parameters([orderId:orderId, orderItemSeqId:"01", assetId:"DEMO_1_1A", resetReservations:true]).call()
+
+        EntityList afterResList = ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("orderId", orderId).list()
+        // should all be on DEMO_1_1A now
+        // for (EntityValue res in afterResList) logger.warn("Res after: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
+
+        then:
+        afterResList.size() == 1
+        afterResList[0].assetId == "DEMO_1_1A"
+        afterResList[0].quantity == 60.0
     }
 }

@@ -45,12 +45,14 @@ class AssetReservationMultipleThreads extends Specification {
         gec.user.setEffectiveTime(new Timestamp(effectiveTime))
         gec.user.loginUser("john.doe", "moqui")
 
+        gec.entity.tempSetSequencedIdPrimary("mantle.order.OrderHeader", 55300, 20)
         gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Asset", 55300, 20)
         gec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetDetail", 55300, 20)
         gec.entity.tempSetSequencedIdPrimary("mantle.product.issuance.AssetReservation", 55300, 20)
     }
 
     def cleanupSpec() {
+        gec.entity.tempResetSequencedIdPrimary("mantle.order.OrderHeader")
         gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.Asset")
         gec.entity.tempResetSequencedIdPrimary("mantle.product.asset.AssetDetail")
         gec.entity.tempResetSequencedIdPrimary("mantle.product.issuance.AssetReservation")
