@@ -36,6 +36,8 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice" for-update="true"/>
             <if condition="invoice == null"><return error="true" message="Could not find Invoice with ID ${invoiceId}"/></if>
+            <if condition="invoice.statusId in ['InvoiceInProcess', 'InvoiceWriteOff', 'InvoiceIncoming', 'InvoiceReceived', 'InvoiceCancelled']">
+                <return message="Invoice ${invoiceId} cannot be posted in status ${invoice.statusId}"/></if>
 
             <!-- get all InvoiceItems, including sub-items and all types as we'll post them flat -->
             <entity-find entity-name="mantle.account.invoice.InvoiceItem" list="invoiceItemList">
@@ -692,6 +694,8 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice" for-update="true"/>
             <if condition="invoice == null"><return error="true" message="Could not find Invoice with ID ${invoiceId}"/></if>
+            <if condition="invoice.statusId in ['InvoiceInProcess', 'InvoiceWriteOff', 'InvoiceIncoming', 'InvoiceReceived', 'InvoiceCancelled']">
+                <return error="true" message="Invoice ${invoiceId} cannot be posted in status ${invoice.statusId}"/></if>
 
             <!-- find existing AcctgTrans for this invoiceId -->
             <set field="allInvoiceTxTypes" from="['AttSalesInvoice', 'AttVendRtnInvoice', 'AttPurchaseInvoice', 'AttCustRtnInvoice',
@@ -700,9 +704,12 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
                 <econdition field-name="invoiceId"/>
                 <econdition field-name="acctgTransTypeEnumId" operator="in" from="allInvoiceTxTypes"/>
+                <!-- since we're resetting state might as clear out reversed/reverser as well:
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
+                -->
             </entity-find>
+            <if condition="!existingTransList"><log level="warn" message="In repost#Invoice ${invoiceId} no existing AcctgTrans records found"/></if>
             <!-- unpost and delete existing -->
             <iterate list="existingTransList" entry="acctgTrans">
                 <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
@@ -711,6 +718,23 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- now post the Invoice again -->
             <service-call name="mantle.ledger.InvoiceAutoPostServices.post#Invoice" in-map="[invoiceId:invoiceId]"/>
+        </actions>
+    </service>
+    <service verb="repost" noun="AllInvoices" transaction-timeout="1800">
+        <description>This is for testing and perhaps maintenance purposes only.
+            Reposting all invoices will destroy any manual changes to the related accounting transactions.</description>
+        <in-parameters><parameter name="fromDate" type="Timestamp" required="true"/></in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceList">
+                <econdition field-name="statusId" operator="not-in"
+                        from="['InvoiceInProcess', 'InvoiceWriteOff', 'InvoiceIncoming', 'InvoiceReceived', 'InvoiceCancelled']"/>
+                <econdition field-name="invoiceDate" operator="greater-equals" from="fromDate"/>
+                <order-by field-name="invoiceDate"/>
+            </entity-find>
+            <log message="Reposting ${invoiceList.size()} invoices from ${fromDate}"/>
+            <iterate list="invoiceList" entry="invoice">
+                <service-call name="mantle.ledger.InvoiceAutoPostServices.repost#Invoice" in-map="[invoiceId:invoice.invoiceId]"/>
+            </iterate>
         </actions>
     </service>
     <service verb="revert" noun="InvoicePost">

@@ -625,7 +625,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         when:
         // create expense invoices and add items
         expInvResult = ec.service.sync().name("mantle.account.InvoiceServices.create#ProjectExpenseInvoice")
-                .parameters([workEffortId:'TEST', fromPartyId:workerResult.partyId]).call()
+                .parameters([workEffortId:'TEST', fromPartyId:workerResult.partyId, invoiceDate:startYear + '-11-08']).call()
         ec.service.sync().name("create#mantle.account.invoice.InvoiceItem")
                 .parameters([invoiceId:expInvResult.invoiceId, itemTypeEnumId:'ItemExpTravAir',
                     description:'United SFO-LAX', itemDate:startYear + '-11-02', quantity:1, amount:345.67]).call()
@@ -649,7 +649,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         // NOTE: this has sequenced IDs so is sensitive to run order!
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.account.invoice.Invoice invoiceId="${expInvResult.invoiceId}" invoiceTypeEnumId="InvoiceSales" fromPartyId="${workerResult.partyId}"
-                toPartyId="${vendorResult.partyId}" statusId="InvoicePmtSent" invoiceDate="${effectiveTime}" currencyUomId="USD"/>
+                toPartyId="${vendorResult.partyId}" statusId="InvoicePmtSent" invoiceDate="${startYear + '-11-08'}" currencyUomId="USD"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="01" itemTypeEnumId="ItemExpTravAir"
                 quantity="1" amount="345.67" description="United SFO-LAX"/>
             <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="02" itemTypeEnumId="ItemExpTravLodging"
@@ -669,7 +669,7 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.work.time.TimeEntry timeEntryId="55903" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="06"/>
 
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55900" acctgTransTypeEnumId="AttPurchaseInvoice"
-                organizationPartyId="${vendorResult.partyId}" transactionDate="${effectiveTime}" isPosted="Y" postedDate="${effectiveTime}"
+                organizationPartyId="${vendorResult.partyId}" transactionDate="${startYear + '-11-08'}" isPosted="Y" postedDate="${effectiveTime}"
                 glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" otherPartyId="${workerResult.partyId}" invoiceId="${expInvResult.invoiceId}"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="01" debitCreditFlag="D"
                 amount="345.67" glAccountId="681100000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="01"/>
@@ -703,7 +703,7 @@ class WorkPlanToCashBasicFlow extends Specification {
 
             <mantle.account.payment.PaymentApplication paymentApplicationId="${expPmtResult.paymentApplicationId}"
                 paymentId="${expPmtResult.paymentId}" invoiceId="${expInvResult.invoiceId}" amountApplied="1009.12"
-                appliedDate="${effectiveTime}"/>
+                appliedDate="${startYear + '-11-10 12:00:00'}"/>
 
             <moqui.entity.EntityAuditLog auditHistorySeqId="55959" changedEntityName="mantle.account.invoice.Invoice"
                 changedFieldName="statusId" pkPrimaryValue="${expInvResult.invoiceId}" newValueText="InvoiceIncoming"
@@ -745,7 +745,7 @@ class WorkPlanToCashBasicFlow extends Specification {
     def "create Client Time and Expense Invoice and Finalize"() {
         when:
         clientInvResult = ec.service.sync().name("mantle.account.InvoiceServices.create#ProjectInvoiceItems")
-                .parameters([ratePurposeEnumId:'RaprClient', workEffortId:'TEST', thruDate:new Timestamp(effectiveTime + 1)]).call()
+                .parameters([ratePurposeEnumId:'RaprClient', workEffortId:'TEST', thruDate:new Timestamp(effectiveTime + 1), invoiceDate:startYear + '-11-08']).call()
         // this will trigger the GL posting
         ec.service.sync().name("update#mantle.account.invoice.Invoice")
                 .parameters([invoiceId:clientInvResult.invoiceId, statusId:'InvoiceFinalized']).call()
@@ -753,7 +753,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         // NOTE: this has sequenced IDs so is sensitive to run order!
         List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.account.invoice.Invoice invoiceId="${clientInvResult.invoiceId}" invoiceTypeEnumId="InvoiceSales"
-                fromPartyId="${vendorResult.partyId}" toPartyId="${clientResult.partyId}" statusId="InvoiceFinalized" invoiceDate="${effectiveTime}"
+                fromPartyId="${vendorResult.partyId}" toPartyId="${clientResult.partyId}" statusId="InvoiceFinalized" invoiceDate="${startYear + '-11-08'}"
                 currencyUomId="USD"/><!-- varies based on settings: description="Invoice for project Test Project [TEST]" -->
             <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="01"
                 itemTypeEnumId="ItemTimeEntry" quantity="6" amount="60" itemDate="${effectiveThruDate.time}"/>
@@ -778,7 +778,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 toInvoiceId="${clientInvResult.invoiceId}" toInvoiceItemSeqId="06" invoiceItemAssocTypeEnumId="IiatBillThrough" quantity="1" amount="123.45"/>
 
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55902" acctgTransTypeEnumId="AttSalesInvoice"
-                organizationPartyId="${vendorResult.partyId}" transactionDate="${effectiveTime}" isPosted="Y" postedDate="${effectiveTime}"
+                organizationPartyId="${vendorResult.partyId}" transactionDate="${startYear + '-11-08'}" isPosted="Y" postedDate="${effectiveTime}"
                 glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" otherPartyId="${clientResult.partyId}" invoiceId="${clientInvResult.invoiceId}"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55902" acctgTransEntrySeqId="01" debitCreditFlag="C"
                 amount="360" glAccountId="412000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="01"/>
@@ -832,7 +832,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 statusId="PmntDelivered" paymentRefNum="54321" amount="1,039.12" amountUomId="USD" effectiveDate="${startYear + '-11-12 12:00:00'}"/>
             <mantle.account.payment.PaymentApplication paymentApplicationId="${clientPmtResult.paymentApplicationId}"
                 paymentId="${clientPmtResult.paymentId}" invoiceId="${clientInvResult.invoiceId}"
-                amountApplied="1,039.12" appliedDate="${effectiveTime}"/>
+                amountApplied="1,039.12" appliedDate="${startYear + '-11-12 12:00:00'}"/>
 
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55903" acctgTransTypeEnumId="AttIncomingPayment"
                 organizationPartyId="${vendorResult.partyId}" transactionDate="${startYear + '-11-12 12:00:00'}" isPosted="Y" postedDate="${effectiveTime}"

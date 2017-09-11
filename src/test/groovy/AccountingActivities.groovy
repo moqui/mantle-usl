@@ -83,6 +83,7 @@ class AccountingActivities extends Specification {
         Map transOut = ec.service.sync().name("mantle.ledger.LedgerServices.create#AcctgTrans")
                 .parameters([acctgTransTypeEnumId:'AttCapitalization', organizationPartyId:organizationPartyId, amountUomId:currencyUomId]).call()
         String acctgTransId = transOut.acctgTransId
+        String firstAcctgTransId = transOut.acctgTransId
         ec.service.sync().name("mantle.ledger.LedgerServices.create#AcctgTransEntry")
                 .parameters([acctgTransId:acctgTransId, glAccountId:'111100000', debitCreditFlag:'D', amount:100000]).call()
         ec.service.sync().name("mantle.ledger.LedgerServices.create#AcctgTransEntry")
@@ -109,17 +110,17 @@ class AccountingActivities extends Specification {
                 .parameters([acctgTransId:acctgTransId, glAccountId:'331100000', debitCreditFlag:'C', amount:150000]).call()
         ec.service.sync().name("mantle.ledger.LedgerServices.post#AcctgTrans").parameters([acctgTransId:acctgTransId]).call()
 
-        // recalculate summaries, create GlAccountOrgTimePeriod records
-        ec.service.sync().name("mantle.ledger.LedgerServices.recalculate#GlAccountOrgSummaries").call()
+        // commented to test real time summary updates: recalculate summaries, create GlAccountOrgTimePeriod records
+        // ec.service.sync().name("mantle.ledger.LedgerServices.recalculate#GlAccountOrgSummaries").call()
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
-            <acctgTrans acctgTransId="55100" organizationPartyId="ORG_ZIZI_RETAIL" amountUomId="USD" isPosted="Y" 
+            <acctgTrans acctgTransId="55100" organizationPartyId="${organizationPartyId}" amountUomId="USD" isPosted="Y" 
                     acctgTransTypeEnumId="AttCapitalization" glFiscalTypeEnumId="GLFT_ACTUAL" postedDate="${effectiveTime}" transactionDate="${effectiveTime}">
                 <entries acctgTransEntrySeqId="01" amount="100000" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
                 <entries acctgTransEntrySeqId="02" amount="100000" glAccountId="331100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
             </acctgTrans>
-            <acctgTrans acctgTransId="55101" organizationPartyId="ORG_ZIZI_RETAIL" amountUomId="USD" isPosted="Y" 
+            <acctgTrans acctgTransId="55101" organizationPartyId="${organizationPartyId}" amountUomId="USD" isPosted="Y" 
                     acctgTransTypeEnumId="AttCapitalization" glFiscalTypeEnumId="GLFT_ACTUAL" postedDate="${effectiveTime}" transactionDate="${effectiveTime}">
                 <entries acctgTransEntrySeqId="01" amount="125000" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
                 <entries acctgTransEntrySeqId="02" amount="100000" glAccountId="331100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
@@ -144,7 +145,49 @@ class AccountingActivities extends Specification {
                     postedCredits="150000" postedDebits="0" endingBalance="150000" organizationPartyId="${organizationPartyId2}"/>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
-        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
+        then:
+        dataCheckErrors.size() == 0
+        firstAcctgTransId == "55100"
+    }
+
+    def "unpost and Check GlAccountOrgTimePeriod"() {
+        when:
+        ec.service.sync().name("mantle.ledger.LedgerServices.unpost#AcctgTrans").parameters([acctgTransId:'55100']).call()
+
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <acctgTrans acctgTransId="55100" organizationPartyId="${organizationPartyId}" amountUomId="USD" isPosted="N"/> 
+            
+            <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="111100000" timePeriodId="${timePeriodId}"
+                    postedCredits="0" postedDebits="125000" endingBalance="125000" organizationPartyId="${organizationPartyId}"/>
+            <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="331100000" timePeriodId="${timePeriodId}"
+                    postedCredits="100000" postedDebits="0" endingBalance="100000" organizationPartyId="${organizationPartyId}"/>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
+        then:
+        dataCheckErrors.size() == 0
+    }
+
+    def "repost and Check GlAccountOrgTimePeriod"() {
+        when:
+        ec.service.sync().name("mantle.ledger.LedgerServices.post#AcctgTrans").parameters([acctgTransId:'55100']).call()
+
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <acctgTrans acctgTransId="55100" organizationPartyId="${organizationPartyId}" amountUomId="USD" isPosted="Y"/> 
+            
+            <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="111100000" timePeriodId="${timePeriodId}"
+                    postedCredits="0" postedDebits="225000" endingBalance="225000" organizationPartyId="${organizationPartyId}"/>
+            <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="331100000" timePeriodId="${timePeriodId}"
+                    postedCredits="200000" postedDebits="0" endingBalance="200000" organizationPartyId="${organizationPartyId}"/>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
         if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
         if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
 
@@ -188,7 +231,6 @@ class AccountingActivities extends Specification {
             </acctgTrans>            
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
-        logger.info("Checked ${fieldsChecked} fields")
         if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
         if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
 
@@ -227,7 +269,6 @@ class AccountingActivities extends Specification {
         </acctgTrans>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
-        logger.info("Checked ${fieldsChecked} fields")
         if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
         if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
 
@@ -341,7 +382,6 @@ class AccountingActivities extends Specification {
             </mantle.ledger.transaction.AcctgTrans>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
-        logger.info("Checked ${fieldsChecked} fields")
         if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
         if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
 
