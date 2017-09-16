@@ -318,9 +318,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="performedByUserId" from="ec.user.userId"/>
 
             <!-- do a for-update query to lock the FinancialAccount record -->
-            <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount"
-                    for-update="true"/>
-            <set field="preBalance" from="financialAccount.actualBalance ?: 0"/>
+            <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount" for-update="true"/>
+            <set field="preBalance" from="financialAccount.actualBalance ?: 0.0"/>
 
             <!-- check actual balance for sufficient amount -->
             <set field="balancePlusCredit" from="preBalance + (financialAccount.negativeBalanceLimit ?: 0)"/>
@@ -358,6 +357,47 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="responseCode" value="success"/>
             <set field="responseMessage" value="Withdrew ${ec.l10n.format(amount, '0.00')} from account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)}"/>
+        </actions>
+    </service>
+    <service verb="reverse" noun="FinancialAccountTrans">
+        <in-parameters><parameter name="finAccountTransId"/></in-parameters>
+        <out-parameters><parameter name="finAccountTransId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.financial.FinancialAccountTrans" value-field="faTrans" for-update="true"/>
+            <if condition="faTrans.reversedByTransId">
+                <return error="true" message="Not reversing transaction ${finAccountTransId}, already reversed by transaction ${faTrans.reversedByTransId}"/></if>
+
+            <!-- do a for-update query to lock the FinancialAccount record -->
+            <set field="finAccountId" from="faTrans.finAccountId"/>
+            <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount" for-update="true"/>
+            <set field="preBalance" from="financialAccount.actualBalance ?: 0.0"/>
+
+            <!-- set reverse fields -->
+            <set field="reverseMap" from="[finAccountId:faTrans.finAccountId, reasonEnumId:faTrans.reasonEnumId,
+                    toPartyId:faTrans.fromPartyId, fromPartyId:faTrans.toPartyId, transactionDate:faTrans.transactionDate,
+                    entryDate:ec.user.nowTimestamp, amount:(-faTrans.amount),
+                    paymentId:faTrans.paymentId, invoiceId:faTrans.invoiceId, orderId:faTrans.orderId, orderItemSeqId:faTrans.orderItemSeqId,
+                    performedByUserId:ec.user.userId]"/>
+            <set field="reverseMap.reverseOfTransId" from="finAccountTransId"/>
+            <set field="reverseMap.finAccountTransTypeEnumId" from="faTrans.finAccountTransTypeEnumId == 'FattDeposit' ? 'FattWithdraw' :
+                    (faTrans.finAccountTransTypeEnumId == 'FattWithdraw' ? 'FattDeposit' : faTrans.finAccountTransTypeEnumId)"/>
+
+            <!-- create the new transaction -->
+            <service-call name="create#mantle.account.financial.FinancialAccountTrans" in-map="reverseMap" out-map="revOut"/>
+
+            <set field="reverseTransId" from="revOut.finAccountTransId"/>
+            <set field="faTrans.reversedByTransId" from="reverseTransId"/>
+            <entity-update value-field="faTrans"/>
+
+            <service-call name="mantle.account.FinancialAccountServices.calculate#FinancialAccountTotals"
+                    in-map="[finAccountId:finAccountId]" out-map="totalsOut"/>
+            <set field="postBalance" from="totalsOut.actualBalance"/>
+            <set field="differAmount" from="postBalance - preBalance"/>
+            <if condition="differAmount != reverseMap.amount">
+                <return error="true" message="Error withdrawing from financial account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)}, pre balance ${preBalance} and post balance ${postBalance} differ by ${differAmount} and not by transaction amount ${reverseMap.amount}"/></if>
+
+            <!-- set the out value -->
+            <set field="finAccountTransId" from="reverseTransId"/>
         </actions>
     </service>
 
@@ -420,6 +460,10 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <!-- ======================================== -->
+    <!-- Payment and Invoice Transaction Services -->
+    <!-- ======================================== -->
+
     <service verb="disburse" noun="FinancialAccount">
         <description>Disburse funds from a FinancialAccount through a Payment which will be in the Promised status
             (will need to be Authorized, then Delivered to post).</description>
@@ -453,15 +497,26 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="checkCreate" noun="InvoiceTransactions">
+        <description>Called by SECA rule on Invoice statusId change to InvoiceFinalized (receivable) or  InvoiceApproved (payable).
+            Calls checkCreate#InvoiceItemTrans for each InvoiceItem with finAccountId populated.</description>
+        <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.account.invoice.InvoiceItem" list="faItemList">
+                <econdition field-name="invoiceId"/><econdition field-name="finAccountId" operator="is-not-null"/></entity-find>
+            <iterate list="faItemList" entry="faItem">
+                <service-call name="mantle.account.FinancialAccountServices.checkCreate#InvoiceItemTrans"
+                        in-map="[finAccountId:faItem.finAccountId]"/>
+            </iterate>
+        </actions>
+    </service>
     <service verb="checkCreate" noun="InvoiceItemTrans">
         <description>If the InvoiceItem has a finAccountId but no finAccountTransId create a deposit or withdrawal and populate InvoiceItem.finAccountTransId</description>
         <in-parameters>
             <parameter name="invoiceId" required="true"/>
             <parameter name="invoiceItemSeqId" required="true"/>
         </in-parameters>
-        <out-parameters>
-            <parameter name="finAccountTransId"/>
-        </out-parameters>
+        <out-parameters><parameter name="finAccountTransId"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.invoice.InvoiceItem" value-field="invoiceItem" for-update="true"/>
             <set field="finAccountId" from="invoiceItem.finAccountId"/>
@@ -509,14 +564,24 @@ along with this software (see the LICENSE.md file). If not, see
                 make sure this runs before the GL posting? -->
         </actions>
     </service>
+    <service verb="reverse" noun="InvoiceTransactions">
+        <description>Called by SECA rule on Invoice statusId change to cancel or resume changes.
+            Calls reverse#FinancialAccountTrans for each InvoiceItem with finAccountTransId populated.</description>
+        <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.account.invoice.InvoiceItem" list="faItemList">
+                <econdition field-name="invoiceId"/><econdition field-name="finAccountTransId" operator="is-not-null"/></entity-find>
+            <iterate list="faItemList" entry="faItem">
+                <service-call name="mantle.account.FinancialAccountServices.reverse#FinancialAccountTrans"
+                        in-map="[finAccountTransId:faItem.finAccountTransId]"/>
+            </iterate>
+        </actions>
+    </service>
+
     <service verb="checkCreate" noun="PaymentTrans">
         <description>If the Payment has a finAccountId but no finAccountTransId create a deposit or withdrawal and populate Payment.finAccountTransId</description>
-        <in-parameters>
-            <parameter name="paymentId" required="true"/>
-        </in-parameters>
-        <out-parameters>
-            <parameter name="finAccountTransId"/>
-        </out-parameters>
+        <in-parameters><parameter name="paymentId" required="true"/></in-parameters>
+        <out-parameters><parameter name="finAccountTransId"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment" for-update="true"/>
             <set field="finAccountId" from="payment.finAccountId"/>
@@ -561,6 +626,17 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- TODO: adjust InvoiceItem GL posting to post to Financial Account In Transit account (deposit or withdraw)
                 instead of to account configured for item type, maybe do here with InvoiceItem.overrideGlAccountId and then
                 make sure this runs before the GL posting? -->
+        </actions>
+    </service>
+    <service verb="reverse" noun="PaymentTrans">
+        <description>If the Payment has a finAccountId but no finAccountTransId create a deposit or withdrawal and populate Payment.finAccountTransId</description>
+        <in-parameters><parameter name="paymentId" required="true"/></in-parameters>
+        <out-parameters><parameter name="finAccountTransId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment" for-update="true"/>
+            <if condition="!payment.finAccountTransId"><return/></if>
+            <service-call name="mantle.account.FinancialAccountServices.reverse#FinancialAccountTrans"
+                    in-map="[finAccountTransId:payment.finAccountTransId]"/>
         </actions>
     </service>
 
