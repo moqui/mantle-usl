@@ -14,7 +14,7 @@ along with this software (see the LICENSE.md file). If not, see
 -->
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.1.xsd">
 
-    <!-- ========== Asset Receipt and Issuance Postings Services ========== -->
+    <!-- ========== Asset Receipt Posting Services ========== -->
 
     <service verb="post" noun="AssetReceipt">
         <description>This is for posting Inventory/COGS transaction and runs when assetTypeEnumId == AstTpInventory only.</description>
@@ -44,6 +44,17 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-update value-field="assetReceipt"/>
                 <return message="Not posting Asset Receipt ${assetReceiptId}, Asset has no acquireCost"/>
             </if>
+
+            <!-- make sure there is no existing transaction -->
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
+                <econdition field-name="assetReceiptId"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" from="['AttInventoryReceipt', 'AttAssetReceipt']"/>
+                <!-- best to leave reversed/reverse tx in place; on a side note to delete them must to reverse before reversed -->
+                <econdition field-name="reversedByAcctgTransId" from="null"/>
+                <econdition field-name="reverseOfAcctgTransId" from="null"/>
+            </entity-find>
+            <if condition="existingTransList">
+                <return message="Asset Receipt ${assetReceiptId} has already been posted in accounting transaction ${existingTransList*.acctgTransId}"/></if>
 
             <!-- get assetTypeGlAccount -->
             <service-call name="mantle.ledger.AssetAutoPostServices.get#AssetTypeGlAccount" out-map="context"
@@ -150,6 +161,35 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-update value-field="assetReceipt"/>
         </actions>
     </service>
+    <service verb="repost" noun="AssetReceipt">
+        <in-parameters><parameter name="assetReceiptId" required="true"/></in-parameters>
+        <out-parameters><parameter name="acctgTransId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.product.receipt.AssetReceipt" value-field="assetReceipt" for-update="true"/>
+            <if condition="assetReceipt == null"><return error="true" message="Could not find Asset Receipt with ID ${assetReceiptId}"/></if>
+            <if condition="!assetReceipt.quantityAccepted"><return message="No quantity accepted on receipt, not posting inventory transaction to GL for receipt ${assetReceiptId}"/></if>
+
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
+                <econdition field-name="assetReceiptId"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" from="['AttInventoryReceipt', 'AttAssetReceipt']"/>
+                <!-- best to leave reversed/reverse tx in place; on a side note to delete them must to reverse before reversed -->
+                <econdition field-name="reversedByAcctgTransId" from="null"/>
+                <econdition field-name="reverseOfAcctgTransId" from="null"/>
+            </entity-find>
+            <if condition="!existingTransList"><log level="warn" message="In repost#AssetReceipt ${assetReceiptId} no existing AcctgTrans records found"/></if>
+            <!-- unpost and delete existing -->
+            <iterate list="existingTransList" entry="acctgTrans">
+                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+            </iterate>
+
+            <!-- now post the AssetReceipt again -->
+            <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetReceipt" in-map="[assetReceiptId:assetReceiptId]"/>
+        </actions>
+    </service>
+
+    <!-- ========== Asset Issuance and Issuance Posting Services ========== -->
+
     <service verb="post" noun="AssetIssuance">
         <in-parameters><parameter name="assetIssuanceId" required="true"/></in-parameters>
         <out-parameters><parameter name="acctgTransId"/></out-parameters>
@@ -177,6 +217,17 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-update value-field="assetIssuance"/>
                 <return message="Not posting Asset Issuance ${assetIssuanceId}, Asset has no acquireCost"/>
             </if>
+
+            <!-- make sure there is no existing transaction -->
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
+                <econdition field-name="assetIssuanceId"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" from="['AttInventoryIssuance', 'AttAssetIssuance']"/>
+                <!-- best to leave reversed/reverse tx in place; on a side note to delete them must to reverse before reversed -->
+                <econdition field-name="reversedByAcctgTransId" from="null"/>
+                <econdition field-name="reverseOfAcctgTransId" from="null"/>
+            </entity-find>
+            <if condition="existingTransList">
+                <return message="Asset Issuance ${assetIssuanceId} has already been posted in accounting transaction ${existingTransList*.acctgTransId}"/></if>
 
             <!-- get assetTypeGlAccount -->
             <service-call name="mantle.ledger.AssetAutoPostServices.get#AssetTypeGlAccount" out-map="context"
@@ -306,6 +357,32 @@ along with this software (see the LICENSE.md file). If not, see
                 <log level="warn" message="No accounting transaction found for Asset Issuance ${assetIssuanceId}, not posting reverse transaction."/>
                 <return message="No accounting transaction found for Asset Issuance ${assetIssuanceId}, not posting reverse transaction."/>
             </else></if>
+        </actions>
+    </service>
+    <service verb="repost" noun="AssetIssuance">
+        <in-parameters><parameter name="assetIssuanceId" required="true"/></in-parameters>
+        <out-parameters><parameter name="acctgTransId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.product.issuance.AssetIssuance" value-field="assetIssuance" for-update="true"/>
+            <if condition="assetIssuance == null"><return error="true" message="Could not find Asset Issuance with ID ${assetIssuanceId}"/></if>
+            <if condition="!assetIssuance.quantity"><return message="No quantity issued, not posting inventory transaction to GL for issuance ${assetIssuanceId}"/></if>
+
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
+                <econdition field-name="assetIssuanceId"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" from="['AttInventoryIssuance', 'AttAssetIssuance']"/>
+                <!-- best to leave reversed/reverse tx in place; on a side note to delete them must to reverse before reversed -->
+                <econdition field-name="reversedByAcctgTransId" from="null"/>
+                <econdition field-name="reverseOfAcctgTransId" from="null"/>
+            </entity-find>
+            <if condition="!existingTransList"><log level="warn" message="In repost#AssetIssuance ${assetIssuanceId} no existing AcctgTrans records found"/></if>
+            <!-- unpost and delete existing -->
+            <iterate list="existingTransList" entry="acctgTrans">
+                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+            </iterate>
+
+            <!-- now post the AssetIssuance again -->
+            <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetIssuance" in-map="[assetIssuanceId:assetIssuanceId]"/>
         </actions>
     </service>
 
@@ -630,30 +707,6 @@ along with this software (see the LICENSE.md file). If not, see
 
     <!-- ========== Asset Adjustment Services ========== -->
 
-    <!-- These two are a mess, perhaps shouldn't be allowed... typically owner change happens through a series
-        of operations like a purchase and/or sales invoice, asset receipt/issuance, etc and cost change is a weird
-        scenario after a purchase (if the cost was wrong there would be various records to update including invoice,
-        payment, transaction entries, etc)
-    <service verb="post" noun="AssetCostChange">
-        <in-parameters>
-            <parameter name="assetId" required="true"/>
-            <parameter name="assetDetailSeqId" required="true"/>
-        </in-parameters>
-        <out-parameters><parameter name="acctgTransId"/></out-parameters>
-        <actions>
-        </actions>
-    </service>
-    <service verb="post" noun="AssetOwnerChange">
-        <in-parameters>
-            <parameter name="assetId" required="true"/>
-            <parameter name="oldOwnerPartyId" required="true"/>
-        </in-parameters>
-        <out-parameters><parameter name="acctgTransId"/></out-parameters>
-        <actions>
-        </actions>
-    </service>
-    -->
-
     <service verb="post" noun="PhysicalInventoryVariance">
         <in-parameters><parameter name="assetDetailId" required="true"/></in-parameters>
         <out-parameters><parameter name="acctgTransId"/></out-parameters>
@@ -673,6 +726,17 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-update value-field="assetDetail"/>
                 <return/>
             </if>
+
+            <!-- make sure there is no existing transaction -->
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
+                <econdition field-name="physicalInventoryId" from="assetDetail.physicalInventoryId"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" from="['AttInventoryVariance', 'AttAssetVariance']"/>
+                <!-- best to leave reversed/reverse tx in place; on a side note to delete them must to reverse before reversed -->
+                <econdition field-name="reversedByAcctgTransId" from="null"/>
+                <econdition field-name="reverseOfAcctgTransId" from="null"/>
+            </entity-find>
+            <if condition="existingTransList">
+                <return message="Physical Inventory change in asset detail ${assetDetailId}, physical inventory ${assetDetail.physicalInventoryId} has already been posted in accounting transaction ${existingTransList*.acctgTransId}"/></if>
 
             <set field="transactionDate" from="physicalInventory.physicalInventoryDate ?: assetDetail.effectiveDate"/>
             <set field="organizationPartyId" from="asset.ownerPartyId"/>
@@ -773,6 +837,32 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-update value-field="assetDetail"/>
         </actions>
     </service>
+    <service verb="repost" noun="PhysicalInventoryVariance">
+        <in-parameters><parameter name="assetDetailId" required="true"/></in-parameters>
+        <out-parameters><parameter name="acctgTransId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.product.asset.AssetDetail" value-field="assetDetail" for-update="true"/>
+            <if condition="!assetDetail.physicalInventoryId"><return/></if>
+            <if condition="!assetDetail.quantityOnHandDiff"><return/></if>
+
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
+                <econdition field-name="physicalInventoryId" from="assetDetail.physicalInventoryId"/>
+                <econdition field-name="acctgTransTypeEnumId" operator="in" from="['AttInventoryVariance', 'AttAssetVariance']"/>
+                <!-- best to leave reversed/reverse tx in place; on a side note to delete them must to reverse before reversed -->
+                <econdition field-name="reversedByAcctgTransId" from="null"/>
+                <econdition field-name="reverseOfAcctgTransId" from="null"/>
+            </entity-find>
+            <if condition="!existingTransList"><log level="warn" message="In repost#PhysicalInventoryVariance ${assetDetailId} no existing AcctgTrans records found"/></if>
+            <!-- unpost and delete existing -->
+            <iterate list="existingTransList" entry="acctgTrans">
+                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+            </iterate>
+
+            <!-- now post the PhysicalInventoryVariance again -->
+            <service-call name="mantle.ledger.AssetAutoPostServices.post#PhysicalInventoryVariance" in-map="[assetDetailId:assetDetailId]"/>
+        </actions>
+    </service>
 
     <!-- ========== Config/Misc Services ========== -->
 
@@ -825,6 +915,36 @@ along with this software (see the LICENSE.md file). If not, see
                                 assetTypeEnumId:assetTypeEnumId, classEnumId:classEnumId, assetId:assetId]"/>
                 </if>
             </if>
+        </actions>
+    </service>
+
+    <!-- ========== Asset Re-Post Service ========== -->
+
+    <service verb="repost" noun="Asset">
+        <description>Re-post all Asset GL transactions: receipt, issuance, and physical inventory changes.</description>
+        <in-parameters><parameter name="assetId" required="true"/></in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList" for-update="true">
+                <econdition field-name="assetId"/></entity-find>
+            <iterate list="assetReceiptList" entry="assetReceipt">
+                <service-call name="mantle.ledger.AssetAutoPostServices.repost#AssetReceipt"
+                        in-map="[assetReceiptId:assetReceipt.assetReceiptId]"/>
+            </iterate>
+
+            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList" for-update="true">
+                <econdition field-name="assetId"/></entity-find>
+            <iterate list="assetIssuanceList" entry="assetIssuance">
+                <service-call name="mantle.ledger.AssetAutoPostServices.repost#AssetIssuance"
+                        in-map="[assetIssuanceId:assetIssuance.assetIssuanceId]"/>
+            </iterate>
+
+            <entity-find entity-name="mantle.product.asset.AssetDetail" list="assetDetailList" for-update="true">
+                <econdition field-name="physicalInventoryId" operator="is-not-null"/>
+                <econdition field-name="assetId"/></entity-find>
+            <iterate list="assetDetailList" entry="assetDetail">
+                <service-call name="mantle.ledger.AssetAutoPostServices.repost#PhysicalInventoryVariance"
+                        in-map="[assetDetailId:assetDetail.assetDetailId]"/>
+            </iterate>
         </actions>
     </service>
 </services>
