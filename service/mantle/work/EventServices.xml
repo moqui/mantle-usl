@@ -74,40 +74,79 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- for events look for start date within the range -->
                 <econditions combine="or">
                     <econditions combine="and">
-                        <econdition field-name="estimatedStartDate" operator="greater-equals" from="startTs"/>
+                        <econditions combine="or">
+                            <econdition field-name="estimatedStartDate" operator="greater-equals" from="startTs"/>
+                            <econdition field-name="cronExpression" operator="is-not-null"/>
+                        </econditions>
                         <econdition field-name="estimatedStartDate" operator="less-equals" from="endTs"/>
                     </econditions>
                     <econditions combine="and">
-                        <econdition field-name="actualStartDate" operator="greater-equals" from="startTs"/>
+                        <econditions combine="or">
+                            <econdition field-name="actualStartDate" operator="greater-equals" from="startTs"/>
+                            <econdition field-name="cronExpression" operator="is-not-null"/>
+                        </econditions>
                         <econdition field-name="actualStartDate" operator="less-equals" from="endTs"/>
                     </econditions>
                     <econditions combine="and">
-                        <econdition field-name="allDayStart" operator="greater-equals" from="startDate"/>
+                        <econditions combine="or">
+                            <econdition field-name="allDayStart" operator="greater-equals" from="startDate"/>
+                            <econdition field-name="cronExpression" operator="is-not-null"/>
+                        </econditions>
                         <econdition field-name="allDayStart" operator="less-equals" from="endDate"/>
                     </econditions>
                 </econditions>
                 <select-field field-name="workEffortId,purposeEnumId,workEffortName,description,location,timeUomId,allDayStart,allDayEnd"/>
                 <select-field field-name="actualStartDate,actualCompletionDate,actualWorkTime,actualWorkDuration"/>
-                <select-field field-name="estimatedStartDate,estimatedCompletionDate,estimatedWorkTime,estimatedWorkDuration"/>
+                <select-field field-name="estimatedStartDate,estimatedCompletionDate,estimatedWorkTime,estimatedWorkDuration,cronExpression"/>
             </entity-find>
 
-            <iterate list="workEffortList" entry="workEffortDef">
-                <set field="workEffort" from="workEffortDef"/><!-- put it in the context -->
+            <iterate list="workEffortList" entry="workEffort">
+
                 <set field="title" from="ec.resource.expand(titleGString, '')"/>
 
                 <service-call name="mantle.work.WorkEffortServices.get#WorkEffortStartEnd" out-map="startEndOut"
                         in-map="[workEffortId:workEffort.workEffortId, workEffort:workEffort]"/>
-                <if condition="startEndOut.allDay"><then>
-                    <set field="start" from="ec.l10n.format(startEndOut.startDate, 'yyyy-MM-dd')"/>
-                    <set field="end" from="ec.l10n.format(startEndOut.endDate, 'yyyy-MM-dd')"/>
-                </then><else>
-                    <set field="start" from="ec.l10n.format(startEndOut.startDate, 'yyyy-MM-dd\'T\'HH:mm:ss')"/>
-                    <set field="end" from="ec.l10n.format(startEndOut.endDate, 'yyyy-MM-dd\'T\'HH:mm:ss')"/>
-                </else></if>
 
-                <if condition="urlGString"><then><set field="url" from="ec.resource.expand(urlGString, '')"/></then>
-                    <else><set field="url" value=""/></else></if>
-                <script>eventList.add([id:workEffort.workEffortId, title:title, start:start, end:end, url:url, allDay:startEndOut.allDay])</script>
+
+                <if condition="workEffort.cronExpression != null">
+                    <script><![CDATA[
+                    parser = new com.cronutils.parser.CronParser(com.cronutils.model.definition.CronDefinitionBuilder.instanceDefinitionFor(com.cronutils.model.CronType.QUARTZ))
+                    quartzCron = parser.parse(workEffort.cronExpression)
+                    now = java.time.ZonedDateTime.now()
+                    startZdt = java.time.ZonedDateTime.ofInstant(startDate.toLocalDate().atStartOfDay(java.time.ZoneOffset.UTC).toInstant(), java.time.ZoneId.systemDefault());
+                    endZdt = java.time.ZonedDateTime.ofInstant(endDate.toLocalDate().atStartOfDay(java.time.ZoneOffset.UTC).toInstant(), java.time.ZoneId.systemDefault());
+                    startEndDiff = 0
+                    if(startEndOut.endDate != null) {
+                        startEndDiff = startEndOut.endDate.getTime() - startEndOut.startDate.getTime() 
+                    }
+                
+                    executionTime = com.cronutils.model.time.ExecutionTime.forCron(quartzCron)
+                    nextExecution = startZdt;
+                    while(nextExecution.isBefore(endZdt)) {
+                        nextExecution = executionTime.nextExecution(nextExecution)
+                        endExecution = nextExecution.plus(startEndDiff, java.time.temporal.ChronoUnit.MILLIS);
+                        dateFormat = 'yyyy-MM-dd\'T\'HH:mm:ss'
+                        if (startEndOut.allDay) {
+                            dateFormat = 'yyyy-MM-dd'
+                        }    
+                        start = ec.l10n.format(Date.from(nextExecution.toInstant()), dateFormat)
+                        end = ec.l10n.format(Date.from(endExecution.toInstant()), dateFormat)
+                        eventList.add([id:workEffort.workEffortId, title:title, start:start, end:end, url:url, allDay:startEndOut.allDay])
+                    }
+                    ]]></script>
+                <else>
+                    <if condition="startEndOut.allDay"><then>
+                        <set field="start" from="ec.l10n.format(startEndOut.startDate, 'yyyy-MM-dd')"/>
+                        <set field="end" from="ec.l10n.format(startEndOut.endDate, 'yyyy-MM-dd')"/>
+                    </then><else>
+                        <set field="start" from="ec.l10n.format(startEndOut.startDate, 'yyyy-MM-dd\'T\'HH:mm:ss')"/>
+                        <set field="end" from="ec.l10n.format(startEndOut.endDate, 'yyyy-MM-dd\'T\'HH:mm:ss')"/>
+                    </else></if>
+                    <if condition="urlGString"><then><set field="url" from="ec.resource.expand(urlGString, '')"/></then>
+                        <else><set field="url" value=""/></else></if>
+                    <script>eventList.add([id:workEffort.workEffortId, title:title, start:start, end:end, url:url, allDay:startEndOut.allDay])</script>
+                </else>
+                </if>
             </iterate>
         </actions>
     </service>
