@@ -540,27 +540,36 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.LedgerServices.get#OrganizationFiscalTimePeriods" out-map="context"
                     in-map="[organizationPartyId:acctgTrans.organizationPartyId, filterDate:acctgTrans.transactionDate]"/>
             <if condition="!timePeriodList">
-                <message error="true">Not posting transaction ${acctgTransId}, could not find time period for organization ${acctgTrans.organizationPartyId} at ${ec.l10n.format(acctgTrans.transactionDate, null)}.</message></if>
+                <message>Not posting transaction ${acctgTransId}, could not find time period for organization ${acctgTrans.organizationPartyId} at ${ec.l10n.format(acctgTrans.transactionDate, null)}.</message>
+                <set field="useErrorJournal" from="true"/>
+            </if>
             <iterate entry="timePeriod" list="timePeriodList">
                 <!-- make sure the TimePeriod isn't closed -->
                 <if condition="timePeriod.isClosed == 'Y' &amp;&amp; !(acctgTrans.acctgTransTypeEnumId in ['AttPeriodClosing', 'AttNetIncomeClosing'])">
-                    <message error="true">Not posting transaction ${acctgTransId}, time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message></if>
+                    <message>Not posting transaction ${acctgTransId}, time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message>
+                    <set field="useErrorJournal" from="true"/>
+                </if>
             </iterate>
 
             <!-- make sure the glAccountId and amount fields are set -->
             <iterate entry="acctgTransEntry" list="acctgTransEntryList">
                 <if condition="!acctgTransEntry.glAccountId">
-                    <message error="true">Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no glAccountId.</message></if>
+                    <message>Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no glAccountId.</message>
+                    <set field="useErrorJournal" from="true"/>
+                </if>
                 <if condition="acctgTransEntry.amount == null">
-                    <message error="true">Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no amount.</message></if>
+                    <message>Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no amount.</message>
+                    <set field="useErrorJournal" from="true"/>
+                </if>
             </iterate>
 
             <if condition="verifyOnly">
-                <if condition="!ec.message.hasError()"><message>Accounting transaction ${acctgTransId} is verified for posting.</message></if>
+                <if condition="useErrorJournal || ec.message.hasError()">
+                    <message>Accounting transaction ${acctgTransId} is verified for posting.</message></if>
                 <return/>
             </if>
 
-            <if condition="ec.message.hasError()">
+            <if condition="useErrorJournal || ec.message.hasError()">
                 <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
                         in-map="[organizationPartyId:acctgTrans.organizationPartyId]"/>
                 <if condition="partyAcctgPreference?.errorGlJournalId"><then>
@@ -570,16 +579,9 @@ along with this software (see the LICENSE.md file). If not, see
                     <script>ec.message.clearErrors()</script>
                     <return/>
                 </then><else>
-                    <!-- if not errorGlJournalId return errors -->
-                    <check-errors/>
+                    <!-- if no errorGlJournalId return with messages/errors -->
+                    <return/>
                 </else></if>
-            </if>
-
-            <!-- only update GlAccountOrganization and GlAccountOrgTimePeriod if realTimeGlSummary == Y; there is now a job that
-                periodically updates these records to simplify GL posting and avoid lock contention and conflicts -->
-            <if condition="doRealTimeGlSummary">
-                <service-call name="mantle.ledger.LedgerServices.update#GlAccountOrgSummariesForTx"
-                        in-map="[acctgTransId:acctgTransId, timePeriodList:timePeriodList, isUnpost:false]"/>
             </if>
 
             <check-errors/>
@@ -588,6 +590,13 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="acctgTrans.isPosted" value="Y"/>
             <set field="acctgTrans.postedDate" from="ec.user.nowTimestamp"/>
             <entity-update value-field="acctgTrans"/>
+
+            <!-- only update GlAccountOrganization and GlAccountOrgTimePeriod if realTimeGlSummary == Y; there is now a job that
+                periodically updates these records to simplify GL posting and avoid lock contention and conflicts -->
+            <if condition="doRealTimeGlSummary">
+                <service-call name="mantle.ledger.LedgerServices.update#GlAccountOrgSummariesForTx"
+                        in-map="[acctgTransId:acctgTransId, timePeriodList:timePeriodList, isUnpost:false]"/>
+            </if>
         </actions>
     </service>
 
