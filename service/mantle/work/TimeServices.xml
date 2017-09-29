@@ -40,6 +40,8 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </if>
 
+            <!-- TODO Should we allow negative numbers? -->
+
             <!-- calculate thruDate based from fromDate/hours/breakHours -->
             <if condition="hours &amp;&amp; fromDate &amp;&amp; !thruDate">
                 <set field="thruDate" from="new Timestamp((Long) (fromDate.time + (hours*60*60*1000) + (breakHours ? (breakHours*60*60*1000) : 0)))"/>
@@ -52,7 +54,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="fromDate" from="new Timestamp((Long) (thruDate.time - (hours*60*60*1000) - (breakHours ? (breakHours*60*60*1000) : 0)))"/>
             </if>
             <!-- calculate hours using fromDate/thruDate/breakHours -->
-            <if condition="!hours &amp;&amp; fromDate &amp;&amp; thruDate">
+            <if condition="!hours &amp;&amp; hours != 0 &amp;&amp; fromDate &amp;&amp; thruDate">
                 <set field="hours" from="((thruDate.time - fromDate.time)/(60*60*1000)) - (breakHours ?: 0)"/>
             </if>
 
@@ -203,19 +205,45 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="delete" noun="TimeEntry">
-        <in-parameters><parameter name="timeEntryId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="timeEntryId" required="true"/>
+            <parameter name="deleteChildTimeEntries" type="Boolean" default="false"/>
+        </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="timeEntry"/>
+            <if condition="!timeEntry"><return/></if>
+
             <if condition="timeEntry.invoiceId || timeEntry.vendorInvoiceId">
-                <return error="true" message="Cannot delete time entry ${timeEntryId}, has already been invoiced"/></if>
+                <return error="true" message="Cannot delete time entry ${timeEntryId}. It has already been invoiced."/></if>
+
             <entity-find entity-name="mantle.work.time.TimeEntry" list="childTimeEntries">
-                <econdition field-name="parentEntryId" from="timeEntryId"/></entity-find>
+                <econdition field-name="parentEntryId" from="timeEntry.timeEntryId"/></entity-find>
             <iterate list="childTimeEntries" entry="childTimeEntry">
-                <!-- TODO: It would be safer to iterate the children and their children to make sure all of them are also
-                           uninvoiced before allowing any to be deleted. -->
-                <service-call name="mantle.work.TimeServices.delete#TimeEntry" in-map="[timeEntryId:childTimeEntry.timeEntryId]"/>
+                <if condition="deleteChildTimeEntries">
+                    <then>
+                        <service-call name="mantle.work.TimeServices.delete#TimeEntry"
+                                        in-map="context + [timeEntryId:childTimeEntry.timeEntryId]"/></then>
+                    <else>
+                        <return error="true" message="Cannot delete time entry ${timeEntryId}. Found child Time Entry."/></else></if>
             </iterate>
             <service-call name="delete#mantle.work.time.TimeEntry" in-map="context"/>
+        </actions>
+    </service>
+    <service verb="delete" noun="TimeEntries">
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="deleteChildTimeEntries" type="Boolean" default="false"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList">
+                <econdition field-name="workEffortId"/>
+            </entity-find>
+            <if condition="!timeEntryList"><return/></if>
+
+            <iterate list="timeEntryList" entry="timeEntry">
+                <service-call name="mantle.work.TimeServices.delete#TimeEntry"
+                              in-map="context + [timeEntryId:timeEntry.timeEntryId]"/>
+            </iterate>
         </actions>
     </service>
 
@@ -237,6 +265,17 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="workEffortId"/></out-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="rootWorkEffort">
+                <field-map field-name="workEffortId" from="rootWorkEffortId"/>
+            </entity-find-one>
+            <if condition="rootWorkEffort">
+                <if condition="rootWorkEffort.estimatedStartDate &gt; actualStartDate">
+                    <return error="true" message="Task start date outside of project's start date."/>
+                </if>
+                <if condition="rootWorkEffort.estimatedCompletionDate &amp;&amp; actualStartDate &amp;&amp; rootWorkEffort.estimatedCompletionDate &lt; actualStartDate">
+                    <return error="true" message="Task end date out side of project's end date."/>
+                </if>
+            </if>
             <service-call name="store#mantle.work.effort.WorkEffort" in-map="context" out-map="context"/>
             <service-call name="mantle.work.WorkEffortServices.replace#WorkEffortParty"
                           in-map="[workEffortId:workEffortId, roleTypeId:'Customer', newPartyId:clientPartyId]"/>
@@ -264,10 +303,18 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <if condition="!partyId"><return/></if>
 
+            <!-- TODO Should we allow negative numbers? -->
             <entity-find-one entity-name="mantle.party.Party" value-field="party"/>
             <if condition="party.disabled == 'Y'"><return error="true" message="Time Entry not created, ${party.pseudoId} is not active."/></if>
 
             <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort"/>
+
+            <if condition="workEffort.estimatedStartDate &gt; fromDate">
+                <return error="true" message="Task start date outside of project's start date."/>
+            </if>
+            <if condition="workEffort.estimatedCompletionDate &amp;&amp; fromDate &amp;&amp; workEffort.estimatedCompletionDate &lt; fromDate">
+                <return error="true" message="Task end date out side of project's end date."/>
+            </if>
 
             <if condition="workEffort.workEffortTypeEnumId != 'WetProject'">
                 <set field="facilityId" from="null"/>
@@ -282,8 +329,8 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!workTypeEnumId">
                 <set field="workTypeEnumId" from="workEffortParty?.workTypeEnumId ?: workEffort.workTypeEnumId"/></if>
             <if condition="!fromDate"><set field="fromDate" from="workEffort.actualStartDate ?: workEffort.estimatedStartDate"/></if>
-            <if condition="!hours"><set field="hours" from="workEffort.actualWorkDuration"/></if>
-            <if condition="!breakHours"><set field="breakHours" from="workEffort.actualBreakDuration"/></if>
+            <if condition="!hours &amp;&amp; hours != 0"><set field="hours" from="workEffort.actualWorkDuration"/></if>
+            <if condition="!breakHours &amp;&amp; hours != 0"><set field="breakHours" from="workEffort.actualBreakDuration"/></if>
             <if condition="!clientPartyId">
                 <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="clientWepList">
                     <econdition field-name="workEffortId"/>
