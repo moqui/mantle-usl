@@ -83,7 +83,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         // vendor payment/ar rep
         Map vendorRepResult = ec.service.sync().name("mantle.party.PartyServices.create#Account")
                 .parameters([firstName:'Vendor', lastName:'TestRep', emailAddress:'vendor.rep@test.com',
-                    username:'vendor.rep', newPassword:'moqui1!', newPasswordVerify:'moqui1!', loginAfterCreate:'false']).call()
+                    username:'vendor.rep', newPassword:'moqui1!!', newPasswordVerify:'moqui1!!', loginAfterCreate:'false']).call()
         Map repRelResult = ec.service.sync().name("create#mantle.party.PartyRelationship")
                 .parameters([relationshipTypeEnumId:'PrtRepresentative', fromPartyId:vendorRepResult.partyId,
                     fromRoleTypeId:'Manager', toPartyId:vendorResult.partyId, toRoleTypeId:'Vendor',
@@ -171,7 +171,7 @@ class WorkPlanToCashBasicFlow extends Specification {
         // worker
         workerResult = ec.service.sync().name("mantle.party.PartyServices.create#Account")
                 .parameters([firstName:'Test', lastName:'Worker', emailAddress:'worker@test.com',
-                    username:'worker', newPassword:'moqui1!', newPasswordVerify:'moqui1!', loginAfterCreate:'false']).call()
+                    username:'worker', newPassword:'moqui1!!', newPasswordVerify:'moqui1!!', loginAfterCreate:'false']).call()
         Map workerRelResult = ec.service.sync().name("create#mantle.party.PartyRelationship")
                 .parameters([relationshipTypeEnumId:'PrtAgent', fromPartyId:workerResult.partyId,
                     fromRoleTypeId:'Worker', toPartyId:vendorResult.partyId, toRoleTypeId:'Vendor',
@@ -243,7 +243,7 @@ class WorkPlanToCashBasicFlow extends Specification {
 
         Map clientRepResult = ec.service.sync().name("mantle.party.PartyServices.create#Account")
                 .parameters([firstName:'Client', lastName:'TestRep', emailAddress:'client.rep@test.com',
-                    username:'client.rep', newPassword:'moqui1!', newPasswordVerify:'moqui1!', loginAfterCreate:'false']).call()
+                    username:'client.rep', newPassword:'moqui1!!', newPasswordVerify:'moqui1!!', loginAfterCreate:'false']).call()
         Map repRelResult = ec.service.sync().name("create#mantle.party.PartyRelationship")
                 .parameters([relationshipTypeEnumId:'PrtRepresentative', fromPartyId:clientRepResult.partyId,
                     fromRoleTypeId:'ClientBilling', toPartyId:clientResult.partyId, toRoleTypeId:'Customer',

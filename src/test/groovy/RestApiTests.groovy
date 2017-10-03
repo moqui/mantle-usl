@@ -121,19 +121,19 @@ class RestApiTests extends Specification {
         "put" | "s1/mantle/orders/55800/shippingBilling" | [paymentMethodId:'CustJqpCc',
                 shippingPostalContactMechId:'CustJqpAddr', shippingTelecomContactMechId:'CustJqpTeln',
                 carrierPartyId:'_NA_', shipmentMethodEnumId:'ShMthGround', moquiSessionToken:token] | ['paymentId', '55800']
-        "post" | "s1/mantle/orders/55800/place" | [moquiSessionToken:token] | ['"statusChanged": true']
-        "post" | "s1/mantle/orders/55800/approve" | [moquiSessionToken:token] | ['"statusChanged": true']
+        "post" | "s1/mantle/orders/55800/place" | [moquiSessionToken:token] | ['"statusChanged" : true']
+        "post" | "s1/mantle/orders/55800/approve" | [moquiSessionToken:token] | ['"statusChanged" : true']
         "get" | "s1/mantle/payments/55800" | null | ['CustJqpCc', 'PiCreditCard', 'PmntAuthorized', 'ORG_ZIZI_RETAIL']
         "get" | "s1/mantle/orders/55800/items/01/reservations" | null |
-                ['"assetReservationId": "55800"', '"orderId": "55800"', '"productId": "DEMO_1_1"']
+                ['"assetReservationId" : "55800"', '"orderId" : "55800"', '"productId" : "DEMO_1_1"']
 
-        "post" | "s1/mantle/orders/55800/parts/01/shipments" | [moquiSessionToken:token] | ['"shipmentId": "55800"']
-        "get" | "s1/mantle/orders/55800/items/01/billings" | null | ['"orderItemBillingId": "55800"', '"orderId": "55800"',
-                '"orderItemSeqId": "01"', '"invoiceId": "55800"', '"assetIssuanceId": "55800"', '"shipmentId": "55800"']
-        "get" | "s1/mantle/orders/55800/items/01/shipments" | null | ['"shipmentItemSourceId": "55800"',
-                '"shipmentId": "55800"', '"productId": "DEMO_1_1"', '"orderId": "55800"', '"orderItemSeqId": "01"',
-                '"invoiceId": "55800"']
-        "get" | "s1/mantle/orders/55800/items/01/issuances" | null | ['"assetIssuanceId": "55800"', '"orderId": "55800"',
-                '"orderItemSeqId": "01"', '"shipmentId": "55800"']
+        "post" | "s1/mantle/orders/55800/parts/01/shipments" | [moquiSessionToken:token] | ['"shipmentId" : "55800"']
+        "get" | "s1/mantle/orders/55800/items/01/billings" | null | ['"orderItemBillingId" : "55800"', '"orderId" : "55800"',
+                '"orderItemSeqId" : "01"', '"invoiceId" : "55800"', '"assetIssuanceId" : "55800"', '"shipmentId" : "55800"']
+        "get" | "s1/mantle/orders/55800/items/01/shipments" | null | ['"shipmentItemSourceId" : "55800"',
+                '"shipmentId" : "55800"', '"productId" : "DEMO_1_1"', '"orderId" : "55800"', '"orderItemSeqId" : "01"',
+                '"invoiceId" : "55800"']
+        "get" | "s1/mantle/orders/55800/items/01/issuances" | null | ['"assetIssuanceId" : "55800"', '"orderId" : "55800"',
+                '"orderItemSeqId" : "01"', '"shipmentId" : "55800"']
     }
 }
