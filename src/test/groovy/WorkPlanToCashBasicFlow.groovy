@@ -520,7 +520,7 @@ class WorkPlanToCashBasicFlow extends Specification {
                 newValueText="WeInProgress" changedDate="${effectiveTime}" changedByUserId="EX_JOHN_DOE"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55936" changedEntityName="mantle.work.effort.WorkEffort"
                 changedByUserId="EX_JOHN_DOE" pkPrimaryValue="TEST-001" changedFieldName="remainingWorkTime"
-                oldValueText="1E+1" newValueText="3"/>
+                oldValueText="10" newValueText="3"/>
             <moqui.entity.EntityAuditLog auditHistorySeqId="55937" changedEntityName="mantle.work.effort.WorkEffort"
                 changedByUserId="EX_JOHN_DOE" pkPrimaryValue="TEST" changedFieldName="remainingWorkTime"
                 oldValueText="14" newValueText="7"/>
