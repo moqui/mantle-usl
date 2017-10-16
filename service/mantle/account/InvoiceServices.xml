@@ -561,7 +561,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.account.invoice.SettlementTerm" value-field="settlementTerm">
                     <field-map field-name="settlementTermId" from="invoice.settlementTermId"/></entity-find-one>
                 <script><![CDATA[
-                    def dueDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(invoiceDate.time), ec.entity.databaseTimeZone.toZoneId())
+                    def dueDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(invoiceDate.time), java.time.ZoneId.systemDefault())
 
                     switch (settlementTerm.termTypeEnumId) {
                         case 'TtFinPaymentDayNextMonth':
@@ -797,7 +797,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shipmentId" required="true"/>
             <parameter name="statusId"><description>If specified after create set to this statusId (always created
                 initially in InvoiceInProcess, so there must be a transition to specified status).</description></parameter>
-            <parameter name="invoiceDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="invoiceDate" type="Timestamp"><description>Defaults to Shipment packedDate, estimatedShipDate, or now.</description></parameter>
 
             <!-- for reuse for purchase orders, represent the differences between sales and purchase order shipments -->
             <parameter name="handleIssuances" type="Boolean" default="true"/>
@@ -806,7 +806,11 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="invoiceIdByOrderPartIdMap" type="Map"/></out-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipment == null"><return error="true" message="Shipment not found with ID ${shipmentId}"/></if>
+
             <set field="invoiceIdByOrderPartIdMap" from="[:]"/>
+            <set field="invoiceDate" from="invoiceDate ?: shipment.packedDate ?: shipment.estimatedShipDate ?: ec.user.nowTimestamp"/>
 
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" for-update="true">
                 <econdition field-name="shipmentId"/>
@@ -880,8 +884,9 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- first do AssetIssuance -->
                     <if condition="handleIssuances">
                         <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList" for-update="true">
-                            <econdition-object field="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
-                                shipmentId:shipmentId]"/>
+                            <econdition field-name="orderId" from="orderItem.orderId"/>
+                            <econdition field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
+                            <econdition field-name="shipmentId"/>
                             <order-by field-name="orderItemSeqId"/>
                         </entity-find>
                         <iterate list="assetIssuanceList" entry="assetIssuance">
@@ -902,10 +907,26 @@ along with this software (see the LICENSE.md file). If not, see
                                         invoiceId:invoiceId, invoiceItemSeqId:iiOut.invoiceItemSeqId,
                                         assetIssuanceId:assetIssuance.assetIssuanceId, shipmentId:shipmentId,
                                         amount:orderItem.unitAmount, quantity:issuanceQuantityToBill]"/>
+
+                            <!-- if invoiceDate not on same day (in Java default time zone) as issuedDate items were packed/issued
+                                and then shipment packed much later so set issuedDate to invoiceDate so that COGS/etc are on same
+                                day as receivable invoice -->
+                            <set field="changedIssuedDate" from="false"/>
+                            <if condition="invoiceDate.toString().substring(0, 10) != assetIssuance.issuedDate.toString().substring(0, 10)">
+                                <log message="AssetIssuance ${assetIssuance.assetIssuanceId} issuedDate ${assetIssuance.issuedDate.toString().substring(0, 10)} on different day from invoiceDate ${invoiceDate.toString().substring(0, 10)}, updating to invoiceDate"/>
+                                <set field="changedIssuedDate" from="true"/>
+                                <set field="assetIssuance.issuedDate" from="invoiceDate"/>
+                            </if>
                             <!-- set invoiceId and invoiceItemSeqId on AssetIssuance -->
                             <set field="assetIssuance.invoiceId" from="invoiceId"/>
                             <set field="assetIssuance.invoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
                             <entity-update value-field="assetIssuance"/>
+                            <if condition="changedIssuedDate">
+                                <!-- if issuedDate was changed then after updating the AssetIssuance record repost the GL TX -->
+                                <service-call name="mantle.ledger.AssetAutoPostServices.repost#AssetIssuance"
+                                        in-map="[assetIssuanceId:assetIssuance.assetIssuanceId]"/>
+                            </if>
+
                             <!-- update ShipmentItemSource -->
                             <if condition="shipmentItemSource.invoiceItemSeqId"><then>
                                 <!-- will have to split the ShipmentItemSource -->
