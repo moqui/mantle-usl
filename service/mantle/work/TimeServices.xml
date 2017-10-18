@@ -724,10 +724,10 @@ along with this software (see the LICENSE.md file). If not, see
             Internal service used by get#TimeEntryRate. Find a RateAmount record based on fields.
 
             If there are rates associated with the workEffortId (generally task), or its corresponding rootWorkEffortId
-            (generally project) or partyId then only consider those rates.
+            (generally project) consider those rates.
 
-            With the remaining list match on as many as possible of: emplPositionClassId, workTypeEnumId,
-            payGradeId (from Employment if there is one for the partyId).
+            If a partyId is passed, take the greater of the rates with and without the party to match on as many as
+            possible of: emplPositionClassId, workTypeEnumId, payGradeId (from Employment if there is one for the partyId).
         </description>
         <in-parameters>
             <parameter name="fromDate" type="Timestamp"/>
@@ -741,7 +741,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="workEffortId"/>
             <parameter name="partyId"/>
             <!-- check for relevant employments -->
-            <parameter name="partyRelationshipId"/>
+            <!--<parameter name="partyRelationshipId"/>--> <!-- Future TODO: add this as an option for looking up the employment -->
             <parameter name="employerPartyId"/>
             <!-- must match or null; match as many as possible (to allow for nulls) with this priority if more than one match with same number of fields -->
             <parameter name="workTypeEnumId"/>
@@ -788,68 +788,67 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="rootWeRaList"><set field="rateAmountList" from="rootWeRaList"/></if>
                 </else-if></if>
             </if>
+            <set field="workTypeEnumId" from="workTypeEnumId ?: taskWorkEffort?.workTypeEnumId"/>
 
-            <!-- if there are rates associated with the party only use those -->
-            <set field="partyRaList" from="rateAmountList.findAll({ it.partyId == partyId })"/>
-            <if condition="partyRaList"><set field="rateAmountList" from="partyRaList"/></if>
+            <!-- If there is a party, determine the employment and attempt to define the payGrade and positionClass.
+                 If there are any party specific rates, do a maximal match against them. -->
+            <if condition="partyId">
+                <!-- find relevant Employment record -->
+                <if condition="partyId &amp;&amp; employerPartyId">
+                    <entity-find entity-name="mantle.humanres.employment.EmploymentAndRelationship" list="employmentList">
+                        <date-filter valid-date="thruDate"/>
+                        <econdition field-name="fromPartyId" from="partyId"/>
+                        <econdition field-name="toPartyId" from="employerPartyId"/>
+                    </entity-find>
+                </if>
+                <set field="employment" from="employmentList ? employmentList[0] : null"/>
+                <if condition="employment?.emplPositionId">
+                    <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
+                        <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+                </if>
 
-            <!-- find relevant Employment record -->
-            <if condition="employmentId"><then>
-                <entity-find entity-name="mantle.humanres.employment.EmploymentAndRelationship" list="employmentList">
-                    <date-filter valid-date="thruDate"/>
-                    <econdition field-name="partyRelationshipId"/>
-                </entity-find>
-            </then><else-if condition="partyId &amp;&amp; employerPartyId">
-                <entity-find entity-name="mantle.humanres.employment.EmploymentAndRelationship" list="employmentList">
-                    <date-filter valid-date="thruDate"/>
-                    <econdition field-name="fromPartyId" from="partyId"/>
-                    <econdition field-name="toPartyId" from="employerPartyId"/>
-                </entity-find>
-            </else-if></if>
-            <set field="employment" from="employmentList ? employmentList[0] : null"/>
-            <if condition="employment?.emplPositionId">
-                <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
-                    <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
+                <set field="payGradeId" from="payGradeId ?: emplPosition?.payGradeId"/>
+                <set field="emplPositionClassId" from="emplPositionClassId ?: emplPosition?.emplPositionClassId"/>
+
+                <set field="partyRaList" from="rateAmountList.findAll({ it.partyId == partyId })"/>
+                <if condition="partyRaList">
+                    <set field="partyRateAmountToUse" from="findMaximalMatch(partyRaList,
+                        [workTypeEnumId:workTypeEnumId, payGradeId:payGradeId, emplPositionClassId:emplPositionClassId])"/>
+
+                </if>
             </if>
 
-            <!--<if condition="partyId &amp;&amp; employerPartyId">-->
-                <!--<entity-find entity-name="mantle.humanres.employment.EmploymentAndRelationship" list="employmentList">-->
-                    <!--<date-filter valid-date="thruDate"/>-->
-                    <!--<econdition field-name="fromPartyId" from="partyId"/>-->
-                    <!--<econdition field-name="toPartyId" from="employerPartyId"/>-->
-                <!--</entity-find>-->
-                <!--<set field="employment" from="employmentList ? employmentList[0] : null"/>-->
-                <!--<if condition="employment?.emplPositionId">-->
-                    <!--<entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">-->
-                        <!--<field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>-->
-                <!--</if>-->
-            <!--</if>-->
-
-            <!-- find maximal match of workTypeEnumId, payGradeId, and emplPositionClassId -->
-            <set field="workTypeEnumId" from="workTypeEnumId ?: taskWorkEffort?.workTypeEnumId"/>
-            <set field="payGradeId" from="payGradeId ?: emplPosition?.payGradeId"/>
-            <set field="emplPositionClassId" from="emplPositionClassId ?: emplPosition?.emplPositionClassId"/>
-            <!--<log level="warn" message="=============== ratePurposeEnumId=${ratePurposeEnumId}, rateTypeEnumId=${rateTypeEnumId}\nrateAmountList=${rateAmountList}"/>-->
-
-            <set field="rateAmountToUse" from="findMaximalMatch(rateAmountList,
+            <!-- Do a maximal match on the rates that do not have a partyId. -->
+            <set field="nonPartyRaList" from="rateAmountList.findAll({ it.partyId != partyId })"/>
+            <set field="nonPartyRateAmountToUse" from="findMaximalMatch(nonPartyRaList,
                     [workTypeEnumId:workTypeEnumId, payGradeId:payGradeId, emplPositionClassId:emplPositionClassId])"/>
 
-            <set field="rateAmountId" from="rateAmountToUse?.rateAmountId"/>
-            <set field="rateAmount" from="rateAmountToUse?.rateAmount"/>
-            <!--<log level="warn" message="=============== ratePurposeEnumId=${ratePurposeEnumId}, rateTypeEnumId=${rateTypeEnumId}, rateAmountId=${rateAmountId}, rateAmount=${rateAmount}"/>-->
+            <!-- Take the greater of the matched rates. This allows one to set a base rate for an employee, but allow
+                 specific rates to exceed the employee rate.  This does preclude paying less than the employee rate. -->
+            <if condition="partyRateAmountToUse"><then>
+                <log level="warn" message="Yep, used party"/>
+                <if condition="nonPartyRateAmountToUse &amp;&amp;
+                               (nonPartyRateAmountToUse.rateAmount &gt; partyRateAmountToUse.rateAmount)"><then>
+                    <log level="warn" message="np > pt"/>
+                    <set field="rateAmountId" from="nonPartyRateAmountToUse.rateAmountId"/>
+                    <set field="rateAmount" from="nonPartyRateAmountToUse.rateAmount"/>
+                </then><else>
+                    <log level="warn" message="np &lt;= pt"/>
+                    <set field="rateAmountId" from="partyRateAmountToUse.rateAmountId"/>
+                    <set field="rateAmount" from="partyRateAmountToUse.rateAmount"/>
+                </else></if>
+            </then><else>
+                <log level="warn" message="No party here"/>
+                <set field="rateAmountId" from="nonPartyRateAmountToUse?.rateAmountId"/>
+                <set field="rateAmount" from="nonPartyRateAmountToUse?.rateAmount"/>
+            </else></if>
+
         </actions>
     </service>
 
     <service verb="find" noun="TimeEntryRateAmount">
         <description>
-            Internal service used by get#TimeEntryRate. Find a RateAmount record based on fields populated in TimeEntry
-            and fields populated in applicable RateAmount records, finding a match on as many fields as possible.
-
-            If there are rates associated with the workEffortId (generally task), or its corresponding rootWorkEffortId
-            (generally project) or partyId then only consider those rates.
-
-            With the remaining list match on as many as possible of: emplPositionClassId, workTypeEnumId,
-            payGradeId (from Employment if there is one for the partyId).
+            Internal service used by get#TimeEntryRate. Find a RateAmount record based on fields populated in TimeEntry.
         </description>
         <in-parameters>
             <parameter name="timeEntry" type="EntityValue" required="true"/>
