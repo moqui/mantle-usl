@@ -513,13 +513,14 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <!-- TODO: implement this (and populate priority on order/item and on reservation)
     <service verb="reReserve" noun="ProductAssets">
         <description>Clear out all reservations for a Product and re-reserve</description>
         <in-parameters><parameter name="productId" required="true"/></in-parameters>
         <actions>
-            <!-- TODO: implement this (and populate priority on order/item and on reservation) -->
         </actions>
     </service>
+    -->
     <service verb="checkReserve" noun="ProductAssets">
         <description>For a given productId see if there are AssetReservation.quantityNotAvailable and Asset.availableToPromiseTotal, if so update reservations</description>
         <in-parameters><parameter name="productId" required="true"/></in-parameters>
@@ -1274,7 +1275,7 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="context + [quantityOnHandTotal:0, availableToPromiseTotal:0,
                             acquiredDate:(orderHeader?.placedDate ?: ec.user.nowTimestamp),
                             acquireOrderId:orderId, acquireOrderItemSeqId:orderItemSeqId,
-                            acquireShipmentId:shipmentId, acquireCost:(acquireCost ?: orderItem?.unitAmount),
+                            acquireShipmentId:shipmentId, acquireCost:(acquireCost ?: orderItem?.standardCost ?: orderItem?.unitAmount),
                             acquireCostUomId:orderHeader?.currencyUomId, acquireWorkEffortId:workEffortId]"/>
             </then><else>
                 <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset"/>
@@ -1285,7 +1286,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="asset.acquireOrderId" from="asset.acquireOrderId ?: orderId"/>
                 <set field="asset.acquireOrderItemSeqId" from="asset.acquireOrderItemSeqId ?: orderItemSeqId"/>
                 <set field="asset.acquireShipmentId" from="asset.acquireShipmentId ?: shipmentId"/>
-                <set field="asset.acquireCost" from="asset.acquireCost ?: orderItem?.unitAmount"/>
+                <set field="asset.acquireCost" from="asset.acquireCost ?: orderItem?.standardCost ?: orderItem?.unitAmount"/>
                 <set field="asset.acquireCostUomId" from="asset.acquireCostUomId ?: orderHeader?.currencyUomId"/>
                 <entity-update value-field="asset"/>
             </else></if>
@@ -1343,10 +1344,6 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <!-- ==================================== -->
-    <!-- ========== Other Services ========== -->
-    <!-- ==================================== -->
-
     <service verb="update" noun="AssetAndReceipt" no-tx-cache="true">
         <in-parameters>
             <parameter name="assetId" required="true"/>
@@ -1375,6 +1372,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="oldStatusId" from="asset.statusId"/>
             <set field="oldAtp" from="asset.availableToPromiseTotal"/>
             <set field="oldQoh" from="asset.quantityOnHandTotal"/>
+            <set field="oldAcquireCost" from="asset.acquireCost"/>
 
             <!-- update the AssetReceipt -->
             <if condition="!assetReceiptId"><then>
@@ -1427,14 +1425,12 @@ along with this software (see the LICENSE.md file). If not, see
             </else-if></if>
 
             <!-- update AssetReceipt -->
-            <!-- TODO: if quantityAccepted is updated and GL entry exists adjust the GL! -->
             <service-call name="update#mantle.product.receipt.AssetReceipt" in-map="context" out-map="context"/>
 
             <if condition="!receivedDate &amp;&amp; statusId &amp;&amp; statusId != 'AstIncoming'">
                 <set field="receivedDate" from="ec.user.nowTimestamp"/></if>
 
             <!-- update the Asset record -->
-            <!-- TODO: if acquireCost is updated adjust the GL, if set from null do GL posting! -->
             <service-call name="update#mantle.product.asset.Asset" in-map="context" out-map="context"/>
 
             <!-- before adjusting new quantity see if we just changed status to Available and if so set ATP to QOH -->
@@ -1449,8 +1445,20 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <if condition="quantityDiff != 0"><service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="context"/></if>
+
+            <!-- if acquireCost is updated adjust the GL, if set from null do GL posting -->
+            <!-- if quantityAccepted is updated and GL entry exists adjust the GL! -->
+            <if condition="(acquireCost != null &amp;&amp; acquireCost != oldAcquireCost) ||
+                    (quantityAccepted != null &amp;&amp; quantityAccepted != originalAssetReceipt.quantityAccepted)">
+                <service-call name="mantle.ledger.AssetAutoPostServices.repost#Asset" in-map="[assetId:assetId]"/>
+            </if>
         </actions>
     </service>
+
+    <!-- ==================================== -->
+    <!-- ========== Other Services ========== -->
+    <!-- ==================================== -->
+
     <service verb="replace" noun="AssetPartyAssignment">
         <in-parameters>
             <parameter name="assetId" required="true"/>
