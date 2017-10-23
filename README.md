@@ -4,8 +4,7 @@
 [![license](http://img.shields.io/badge/license-CC0%201.0%20Universal-blue.svg)](https://github.com/moqui/mantle-usl/blob/master/LICENSE.md)
 [![build](https://travis-ci.org/moqui/mantle-usl.svg)](https://travis-ci.org/moqui/mantle-usl)
 [![release](http://img.shields.io/github/release/moqui/mantle-usl.svg)](https://github.com/moqui/mantle-usl/releases)
-[![commits since release](http://img.shields.io/github/commits-since/moqui/mantle-usl/v1.1.0.svg)](https://github.com/moqui/mantle-usl/commits/master)
-[![downloads](http://img.shields.io/github/downloads/moqui/mantle-usl/total.svg)](https://github.com/moqui/mantle-usl/releases)
+[![commits since release](http://img.shields.io/github/commits-since/moqui/mantle-usl/v2.0.0.svg)](https://github.com/moqui/mantle-usl/commits/master)
 
 [![LinkedIn Group](https://img.shields.io/badge/linked%20in%20group-moqui-blue.svg)](https://www.linkedin.com/groups/4640689)
 [![Google Group](https://img.shields.io/badge/google%20group-mantleba-blue.svg)](https://groups.google.com/d/forum/mantleba)
