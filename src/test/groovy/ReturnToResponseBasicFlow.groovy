@@ -474,7 +474,7 @@ class ReturnToResponseBasicFlow extends Specification {
                         amountUomId="USD" paymentTypeEnumId="PtInvoicePayment" finAccountTransId="55701" amount="${kieEnabled ? '13.77' : '7.77'}"
                         reconcileStatusId="PmtrNot" acctgTransResultEnumId="AtrSuccess" finAccountAuthId="55700" statusId="PmntDelivered"
                         paymentInstrumentEnumId="PiFinancialAccount" toPartyId="ORG_ZIZI_RETAIL" orderId="55701" orderPartSeqId="01">
-                    <mantle.ledger.transaction.AcctgTrans acctgTransId="55705" otherPartyId="CustJqp" postedDate="${effectiveTime}"
+                    <mantle.ledger.transaction.AcctgTrans acctgTransId="55706" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                             amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttIncomingPayment" glFiscalTypeEnumId="GLFT_ACTUAL"
                             transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                         <entries acctgTransEntrySeqId="01" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="121000000" reconcileStatusId="AterNot"
@@ -484,7 +484,7 @@ class ReturnToResponseBasicFlow extends Specification {
                     </mantle.ledger.transaction.AcctgTrans>
                     <!-- NOTE: not checking acctgTransResultEnumId, could be success or payment not posted depending on if payment or application posts first -->
                     <applications amountApplied="${kieEnabled ? '13.77' : '7.77'}" appliedDate="${effectiveTime}"
-                            paymentApplicationId="55700" invoiceId="55700"/>
+                            paymentApplicationId="55700" invoiceId="55701"/>
                 </mantle.account.payment.Payment>
             </financialAccounts>
         </entity-facade-xml>""").check(dataCheckErrors)
