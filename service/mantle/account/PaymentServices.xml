@@ -915,7 +915,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <service-call name="mantle.order.OrderServices.update#OrderStatus" in-map="[orderId:orderId, statusId:'OrderApproved']"/>
                 </then><else>
                     <iterate list="checkOut.approveWarnings" entry="approveWarning">
-                        <log level="info" message="Order ${orderId} approve warning: ${approveWarning}"/></iterate>
+                        <log message="Order ${orderId} approve warning: ${approveWarning}"/></iterate>
                 </else></if>
             </if>
         </actions>
@@ -933,14 +933,26 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <if condition="payment == null"><entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/></if>
-            <entity-find-one entity-name="mantle.product.store.ProductStorePaymentGateway"
-                    value-field="productStorePaymentGateway" cache="true">
-                <field-map field-name="productStoreId" from="productStoreId"/>
-                <field-map field-name="paymentInstrumentEnumId" from="payment.paymentInstrumentEnumId"/>
-            </entity-find-one>
+
+            <!-- use paymentGatewayConfigId from Payment if present -->
+            <set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/>
+            <!-- see if associated PaymentMethod has a paymentGatewayConfigId first -->
+            <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentMethodId">
+                <set field="paymentMethod" from="payment.method"/>
+                <set field="paymentGatewayConfigId" from="paymentMethod?.paymentGatewayConfigId"/>
+            </if>
+            <!-- finally get default for store -->
+            <if condition="!paymentGatewayConfigId">
+                <entity-find-one entity-name="mantle.product.store.ProductStorePaymentGateway"
+                        value-field="productStorePaymentGateway" cache="true">
+                    <field-map field-name="productStoreId" from="productStoreId"/>
+                    <field-map field-name="paymentInstrumentEnumId" from="payment.paymentInstrumentEnumId"/>
+                </entity-find-one>
+                <set field="paymentGatewayConfigId" from="productStorePaymentGateway?.paymentGatewayConfigId"/>
+            </if>
             <service-call name="mantle.account.PaymentServices.authorize#SinglePayment" out-map="context"
                     in-map="[paymentId:payment.paymentId, cardSecurityCode:cardSecurityCode, payment:payment,
-                        paymentGatewayConfigId:productStorePaymentGateway?.paymentGatewayConfigId]"/>
+                        paymentGatewayConfigId:paymentGatewayConfigId]"/>
         </actions>
     </service>
     <service verb="authorize" noun="SinglePayment">
@@ -968,15 +980,31 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- use paymentGatewayConfigId from Payment if present -->
             <if condition="!paymentGatewayConfigId"><set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/></if>
-
+            <!-- see if associated PaymentMethod has a paymentGatewayConfigId -->
+            <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentMethodId">
+                <set field="paymentMethod" from="payment.method"/>
+                <set field="paymentGatewayConfigId" from="paymentMethod?.paymentGatewayConfigId"/>
+            </if>
             <!-- if no paymentGatewayConfigId and this is a Financial Account payment, default to local gateway -->
             <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentInstrumentEnumId == 'PiFinancialAccount'">
                 <set field="paymentGatewayConfigId" value="FinancialAccountLocal"/></if>
-
+            <!-- look up the gateway and make sure we found one -->
             <entity-find-one entity-name="mantle.account.method.PaymentGatewayConfig" value-field="paymentGatewayConfig" cache="true"/>
             <if condition="paymentGatewayConfig == null">
                 <return message="Not authorizing Payment ${paymentId}, could not find Payment Gateway Config"/></if>
 
+            <if condition="!paymentGatewayConfig.authorizeServiceName">
+                <log message="Not capturing Payment ${paymentId}, no authorizeServiceName in PaymentGatewayConfig [${paymentGatewayConfigId}]"/>
+                <return/>
+            </if>
+
+            <!-- make sure paymentGatewayConfigId set on Payment -->
+            <if condition="!payment.paymentGatewayConfigId">
+                <set field="payment.paymentGatewayConfigId" from="paymentGatewayConfigId"/>
+                <entity-update value-field="payment"/>
+            </if>
+
+            <!-- call the configured service -->
             <service-call name="${paymentGatewayConfig.authorizeServiceName}" out-map="authOut"
                     in-map="[paymentId:payment.paymentId, cardSecurityCode:cardSecurityCode,
                     paymentGatewayConfigId:paymentGatewayConfig.paymentGatewayConfigId]"/>
@@ -1047,7 +1075,6 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <!-- TODO: transaction="force-new" on this is blowing up, debug it -->
     <service verb="capture" noun="SinglePayment">
         <in-parameters>
             <parameter name="paymentId" required="true"/>
@@ -1073,13 +1100,11 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if the Payment.statusId is already PmntDelivered don't try again -->
             <!-- NOTE: also handle other statuses, ie anything other than PmntAuthorized? might be too inflexible... -->
             <if condition="payment.statusId != 'PmntAuthorized'">
-                <log level="info" message="Not capturing Payment ${paymentId}, is in ${payment.statusId} and not the Authorized status"/>
                 <return message="Not capturing Payment ${paymentId}, is in ${payment.statusId} and not the Authorized status"/>
             </if>
 
             <!-- use paymentGatewayConfigId from Payment if present -->
             <set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/>
-
             <!-- lookup auth PaymentGatewayResponse and use the PaymentGatewayConfig on it -->
             <if condition="!paymentGatewayConfigId">
                 <service-call name="mantle.account.PaymentServices.get#AuthorizePaymentGatewayResponse" out-map="authRespOut"
@@ -1087,7 +1112,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="authRespOut.paymentGatewayResponse">
                     <set field="paymentGatewayConfigId" from="authRespOut.paymentGatewayResponse.paymentGatewayConfigId"/></if>
             </if>
-
+            <!-- see if associated PaymentMethod has a paymentGatewayConfigId -->
+            <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentMethodId">
+                <set field="paymentMethod" from="payment.method"/>
+                <set field="paymentGatewayConfigId" from="paymentMethod?.paymentGatewayConfigId"/>
+            </if>
             <!-- if still no paymentGatewayConfigId and this is a Financial Account payment, default to local gateway -->
             <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentInstrumentEnumId == 'PiFinancialAccount'">
                 <set field="paymentGatewayConfigId" value="FinancialAccountLocal"/></if>
@@ -1095,18 +1124,24 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if no auth and no payment.paymentGatewayConfigId then this shouldn't be captured (probably a payment method type with no gateway) -->
             <!-- TODO: this may need more intelligence to determine if a Payment needs to be captured, such as config by paymentInstrumentEnumId -->
             <if condition="!paymentGatewayConfigId">
-                <log level="info" message="Not capturing Payment ${paymentId}, no gateway config found"/>
+                <log message="Not capturing Payment ${paymentId}, no gateway config found"/>
                 <return/>
             </if>
-
+            <!-- look up the gateway and make sure we found one -->
             <entity-find-one entity-name="mantle.account.method.PaymentGatewayConfig" value-field="paymentGatewayConfig" cache="true"/>
             <if condition="paymentGatewayConfig == null">
                 <return error="true" message="Not capturing Payment ${paymentId}, could not find PaymentGatewayConfig"/></if>
 
             <if condition="!paymentGatewayConfig.captureServiceName">
                 <!-- don't blow up on this, we allow no capture service if intentionally configured that way -->
-                <log level="info" message="Not capturing Payment ${paymentId}, no captureServiceName in PaymentGatewayConfig [${paymentGatewayConfigId}]"/>
+                <log message="Not capturing Payment ${paymentId}, no captureServiceName in PaymentGatewayConfig [${paymentGatewayConfigId}]"/>
                 <return/>
+            </if>
+
+            <!-- make sure paymentGatewayConfigId set on Payment -->
+            <if condition="!payment.paymentGatewayConfigId">
+                <set field="payment.paymentGatewayConfigId" from="paymentGatewayConfigId"/>
+                <entity-update value-field="payment"/>
             </if>
 
             <!-- if auth expired do an auth now -->
@@ -1116,6 +1151,7 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[paymentId:payment.paymentId, payment:payment, paymentGatewayConfigId:paymentGatewayConfigId]"/>
             </if>
 
+            <!-- call the configured service -->
             <service-call name="${paymentGatewayConfig.captureServiceName}" out-map="captOut"
                     in-map="[paymentId:payment.paymentId, amount:amount, paymentGatewayConfigId:paymentGatewayConfig.paymentGatewayConfigId]"/>
 
@@ -1152,7 +1188,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="paymentGatewayConfigId" from="authRespOut.paymentGatewayResponse.paymentGatewayConfigId"/></if>
             <!-- if no auth PGR instead of ProductStorePaymentGateway lookup with paymentGatewayConfigId from Payment -->
             <if condition="!paymentGatewayConfigId"><set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/></if>
-
+            <!-- see if associated PaymentMethod has a paymentGatewayConfigId -->
+            <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentMethodId">
+                <set field="paymentMethod" from="payment.method"/>
+                <set field="paymentGatewayConfigId" from="paymentMethod?.paymentGatewayConfigId"/>
+            </if>
+            <!-- if still no paymentGatewayConfigId and this is a Financial Account payment, default to local gateway -->
+            <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentInstrumentEnumId == 'PiFinancialAccount'">
+                <set field="paymentGatewayConfigId" from="FinancialAccountLocal"/></if>
+            <!-- look up the gateway and make sure we found one -->
             <entity-find-one entity-name="mantle.account.method.PaymentGatewayConfig" value-field="paymentGatewayConfig" cache="true"/>
             <if condition="paymentGatewayConfig == null">
                 <return error="true" message="Not releasing (voiding) Payment ${paymentId}, could not find PaymentGatewayConfig"/></if>
@@ -1163,6 +1207,13 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/>
             </if>
 
+            <!-- make sure paymentGatewayConfigId set on Payment -->
+            <if condition="!payment.paymentGatewayConfigId">
+                <set field="payment.paymentGatewayConfigId" from="paymentGatewayConfigId"/>
+                <entity-update value-field="payment"/>
+            </if>
+
+            <!-- call the configured service -->
             <service-call name="${paymentGatewayConfig.releaseServiceName}" out-map="releaseOut"
                     in-map="[paymentId:payment.paymentId, paymentGatewayConfigId:paymentGatewayConfig.paymentGatewayConfigId]"/>
 
@@ -1201,11 +1252,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="paymentGatewayConfigId" from="authRespOut.paymentGatewayResponse.paymentGatewayConfigId"/></if>
             <!-- if no auth PGR instead of ProductStorePaymentGateway lookup with paymentGatewayConfigId from Payment -->
             <if condition="!paymentGatewayConfigId"><set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/></if>
-
+            <!-- see if associated PaymentMethod has a paymentGatewayConfigId -->
+            <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentMethodId">
+                <set field="paymentMethod" from="payment.method"/>
+                <set field="paymentGatewayConfigId" from="paymentMethod?.paymentGatewayConfigId"/>
+            </if>
             <!-- if still no paymentGatewayConfigId and this is a Financial Account payment, default to local gateway -->
             <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentInstrumentEnumId == 'PiFinancialAccount'">
                 <set field="paymentGatewayConfigId" from="FinancialAccountLocal"/></if>
-
+            <!-- look up the gateway and make sure we found one -->
             <entity-find-one entity-name="mantle.account.method.PaymentGatewayConfig" value-field="paymentGatewayConfig" cache="true"/>
             <if condition="paymentGatewayConfig == null">
                 <return error="true" message="Not refunding Payment ${paymentId}, could not find PaymentGatewayConfig"/></if>
@@ -1216,6 +1271,13 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/>
             </if>
 
+            <!-- make sure paymentGatewayConfigId set on Payment -->
+            <if condition="!payment.paymentGatewayConfigId">
+                <set field="payment.paymentGatewayConfigId" from="paymentGatewayConfigId"/>
+                <entity-update value-field="payment"/>
+            </if>
+
+            <!-- call the configured service -->
             <service-call name="${paymentGatewayConfig.refundServiceName}" out-map="refundOut"
                     in-map="[paymentId:payment.paymentId, amount:amount, paymentGatewayConfigId:paymentGatewayConfig.paymentGatewayConfigId]"/>
 
