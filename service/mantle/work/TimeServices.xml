@@ -755,6 +755,128 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="get" noun="TimeEntryFacility">
+        <in-parameters>
+            <parameter name="timeEntryId"/>
+            <parameter name="timeEntry" type="EntityValue"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="timeEntryId"/>
+            <parameter name="timeEntry" type="EntityValue"/>
+            <parameter name="facilityId"/>
+            <parameter name="facility" type="EntityValue"/>
+        </out-parameters>
+        <actions>
+            <if condition="timeEntry == null">
+                <if condition="!timeEntryId"><return error="true" message="Time Entry or ID required"/></if>
+                <entity-find-one entity-name="mantle.party.time.timeEntry" value-field="timeEntry"/>
+                <if condition="timeEntry == null"><return error="true" message="Time Entry ${timeEntryId} not found"/></if>
+            </if>
+            <set field="timeEntryId" from="timeEntry.timeEntryId"/>
+
+            <if condition="timeEntry.facilityId"><then>
+                <set field="facilityId" from="timeEntry.facilityId"/>
+                <set field="facility" from="timeEntry.facility"/>
+            </then><else-if condition="timeEntry.workEffortId">
+                <set field="facilityId"/>
+                <set field="facility" from="timeEntry.workEffort.facility"/>
+            </else-if></if>
+        </actions>
+    </service>
+
+    <service verb="get" noun="TimeEntryRiskClassInfo">
+        <in-parameters>
+            <parameter name="timeEntryId"/>                   <!-- timeEntryId or timeEntry is required -->
+            <parameter name="timeEntry" type="Map"/>
+            <parameter name="employment" type="Map"/> <!-- optional mantle.humanres.employment.EmploymentAndRelationship -->
+            <parameter name="employee" type="Map"/>   <!-- optional mantle.humanres.employment.Employee -->
+
+            <parameter name="dftRiskClassCode"/>
+            <parameter name="dftRiskClassOverride" type="Boolean"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="timeEntryId"/>
+            <parameter name="timeEntry" type="Map"/>
+            <parameter name="facilityId"/> <!-- facility on time entry or work effort -->
+            <parameter name="facility"/>
+            <parameter name="rateTypeEnumId"/>
+            <parameter name="workTypeEnumId"/> <!-- work type on time entry or work effort -->
+            <parameter name="riskClassCode"/>
+            <parameter name="stateGeoId"/>
+            <parameter name="dftRiskClassCode"/>
+            <parameter name="dftRiskClassOverride" type="Boolean"/>
+        </out-parameters>
+        <actions>
+            <!-- get time entry and facility -->
+            <service-call name="mantle.work.TimeServices.get#TimeEntryFacility" in-map="context" out-map="context"/>
+
+            <if condition="!dftRiskClassCode">
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollWcRiskClass',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="dftRiskClassCode" from="getPsvOut.settingValue"/>
+
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
+                              in-map="[partySettingTypeId:'PayrollWcDftOvrWrkTp',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                <set field="dftRiskClassOverride" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>
+            </if>
+
+            <set field="rateTypeEnumId" from="timeEntry.rateTypeEnumId?:'RatpStandard'"/>
+            <set field="workTypeEnumId" from="timeEntry.workTypeEnumId?:(timeEntry.workEffort?.workTypeEnumId)"/>
+
+            <!-- Make sure all rate types have been accounted for in case any need special treatment -->
+            <if condition="rateTypeEnumId in ['RatpVacation', 'RatpHoliday', 'RatpSick', 'RatpPtoOther']"><then>
+                <!-- TODO: Are there any circumstances where vacation/etc. are subject to workers' comp? -->
+                <return/>
+            </then><else-if condition="rateTypeEnumId in ['RatpPaidBreakStd', 'RatpPaidBreakRrp']">
+                <!-- For breaks, use the parent's work type if available -->
+                <if condition="timeEntry.parentEntryId">
+                    <set field="workTypeEnumId" from="timeEntry.parentEntry.workTypeEnumId?:workTypeEnumId"/>
+                </if>
+            </else-if><else-if condition="!(rateTypeEnumId in ['RatpStandard',
+                                                               'RatpPieceMinWageAdj',
+                                                               'RatpPaidNptStd',
+                                                               'RatpPaidNptRrp',
+                                                               'RatpEvening',
+                                                               'RatpNight',
+                                                               'RatpWeekend',
+                                                               'RatpShHoliday'])">
+                <log level="warn" message="Unhandled rate type '${rateTypeEnumId}' in get#TimeEntryInfo"/>
+                <return/>
+            </else-if></if>
+
+            <set field="stateGeoId" from="facility?.stateGeoId"/>
+            <if condition="!stateGeoId">
+                <if condition="employment?.taxWorkContactMechId">
+                    <entity-find-one entity-name="mantle.party.contact.PostalAddress" value-field="taxWorkContactMech">
+                        <field-map field-name="contactMechId" from="employment.taxWorkContactMechId"/>
+                    </entity-find-one>
+                    <set field="stateGeoId" from="taxWorkContactMech?.stateProvinceGeoId"/>
+                </if>
+
+                <if condition="!stateGeoId"> <!-- TODO: Does the relationship exist if employee is a map? -->
+                    <set field="stateGeoId" from="employee?:taxHomeContectMech?.stateProvinceGeoId"/>
+                </if>
+            </if>
+
+            <!-- Determine this workers' comp risk class and return -->
+            <if condition="!workTypeEnumId ||
+                           (dftRiskClassOverride &amp;&amp; dftRiskClassCode)">
+                <set field="riskClassCode" from="dftRiskClassCode"/>
+                <return/>
+            </if>
+
+            <entity-find-one entity-name="mantle.humanres.employment.WorkTypeRiskClass"
+                             value-field="riskClass">
+                <field-map field-name="stateGeoId"/>
+                <field-map field-name="workTypeEnumId"/>
+                <select-field field-name="riskClassCode"/>
+            </entity-find-one>
+
+            <set field="riskClassCode" from="riskClass?.riskClassCode"/>
+
+        </actions>
+    </service>
+
     <service verb="find" noun="RateAmount">
         <description>
             Internal service used by get#TimeEntryRate. Find a RateAmount record based on fields.
