@@ -488,7 +488,7 @@ class OrderProcureToPayBasicFlow extends Specification {
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <!-- Invoice created and received, not yet approved/etc -->
             <mantle.account.invoice.Invoice invoiceId="55400" invoiceTypeEnumId="InvoiceSales"
-                fromPartyId="ZiddlemanInc" toPartyId="ORG_ZIZI_RETAIL" statusId="InvoiceReceived"
+                fromPartyId="ZiddlemanInc" toPartyId="ORG_ZIZI_RETAIL" statusId="InvoiceIncoming"
                 invoiceDate="${effectiveTime}" description="For Order ${purchaseOrderId} part 01 and Shipment ${shipResult.shipmentId}"
                 currencyUomId="USD"/>
 
