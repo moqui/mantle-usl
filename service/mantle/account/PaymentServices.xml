@@ -147,8 +147,14 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
             <set field="paymentTotal" from="payment.amount ?: 0.0"/>
 
+            <!-- PaymentApplication by paymentId (expect either invoiceId to toPaymentId to be populated) -->
+            <!-- PaymentApplication by toPaymentId (expect paymentId to be populated) -->
             <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
-                <econdition field-name="paymentId"/></entity-find>
+                <econditions combine="or">
+                    <econdition field-name="paymentId"/>
+                    <econdition field-name="toPaymentId" from="paymentId"/>
+                </econditions>
+            </entity-find>
             <set field="appliedTotal" from="0.0"/>
             <iterate list="paymentApplicationList" entry="paymentApplication">
                 <set field="appliedTotal" from="appliedTotal + paymentApplication.amountApplied"/></iterate>
@@ -579,10 +585,10 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="paymentId" required="true"/>
             <parameter name="invoiceId" required="true"/>
-            <parameter name="billingAccountId"/>
-            <parameter name="overrideGlAccountId"/>
             <parameter name="amount" type="BigDecimal"><description>Default to Invoice unpaidTotal.
                 Actual amountApplied will never be greater than Invoice unpaidTotal or Payment unappliedTotal.</description></parameter>
+            <parameter name="billingAccountId"/>
+            <parameter name="overrideGlAccountId"/>
         </in-parameters>
         <out-parameters>
             <parameter name="paymentApplicationId"/>
@@ -607,22 +613,20 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <if condition="payment.amountUomId != invoice.currencyUomId">
-                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment has a different currency ${payment.amountUomId} than invoice ${invoice.currencyUomId}</message></if>
+                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment has a different currency (${payment.amountUomId}) than invoice (${invoice.currencyUomId})</message></if>
             <if condition="payment.fromPartyId != invoice.toPartyId">
-                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is from a different party ${payment.fromPartyId} than invoice is to ${invoice.toPartyId}</message></if>
+                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is from a different party (${payment.fromPartyId}) than invoice is to (${invoice.toPartyId})</message></if>
             <if condition="payment.toPartyId != invoice.fromPartyId">
-                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is to a different party ${payment.toPartyId} than invoice is from ${invoice.fromPartyId}</message></if>
+                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is to a different party (${payment.toPartyId}) than invoice is from (${invoice.fromPartyId})</message></if>
 
             <check-errors/>
 
             <if condition="!(payment.statusId in ['PmntDelivered', 'PmntConfirmed'])">
-                <log level="warn" message="Not applying payment ${paymentId} in status ${payment.statusId} to invoice ${invoiceId}, must be in Delivered or Confirmed status"/>
-                <return message="Not applying payment ${paymentId} to invoice ${invoiceId}, payment must be Delivered or Confirmed to be applied"/>
+                <return message="Not applying payment ${paymentId} in status ${payment.statusId} to invoice ${invoiceId}, payment must be Delivered or Confirmed to be applied"/>
             </if>
-            <if condition="!(invoice.statusId in ['InvoiceFinalized', 'InvoiceSent', 'InvoicePmtRecvd', 'InvoiceApproved', 'InvoicePmtSent'])">
-                <log level="warn" message="Not applying payment ${paymentId} to invoice ${invoiceId} in status ${invoice.statusId}, must be Finalized, Sent, or Payment Received for Receivable OR Approved or Payment Sent for Payable"/>
-                <log level="warn" message="Not applying stack: ${ec.artifactExecution.getStackNameString()}"/>
-                <return message="Not applying payment ${paymentId} to invoice ${invoiceId}, invoice must be Finalized, Sent, or Payment Received for Receivable OR Approved or Payment Sent for Payable"/>
+            <if condition="!(invoice.statusId in ['InvoiceFinalized', 'InvoiceSent', 'InvoiceAcked', 'InvoicePmtRecvd', 'InvoiceApproved', 'InvoicePmtSent'])">
+                <log level="warn" message="Not applying payment ${paymentId} to invoice ${invoiceId} in status ${invoice.statusId} stack: ${ec.artifactExecution.getStackNameString()}"/>
+                <return message="Not applying payment ${paymentId} to invoice ${invoiceId}, invoice must be Finalized, Sent, Acknowledged, or Payment Received for Receivable OR Approved or Payment Sent for Payable"/>
             </if>
 
             <service-call name="mantle.account.PaymentServices.check#InvoiceStatusForPayment" in-map="[invoiceId:invoiceId]"/>
@@ -638,14 +642,14 @@ along with this software (see the LICENSE.md file). If not, see
                         appliedDate:appliedDate]"/>
 
             <!-- Payment Applied, now update Invoice status -->
-            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" out-map="context" in-map="[invoiceId:invoiceId]"/>
+            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="context"/>
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
-            <if condition="unpaidTotal == 0"><then>
-                <if condition="invoice.statusId == 'InvoiceSent' || invoice.statusId == 'InvoiceFinalized'"><then>
+            <if condition="unpaidTotal == 0.0"><then>
+                <if condition="invoice.statusId in ['InvoiceFinalized', 'InvoiceSent', 'InvoiceAcked']"><then>
                     <service-call name="update#mantle.account.invoice.Invoice" in-map="[invoiceId:invoiceId, statusId:'InvoicePmtRecvd']"/>
-                </then><else>
+                </then><else-if condition="invoice.statusId == 'InvoiceApproved'">
                     <service-call name="update#mantle.account.invoice.Invoice" in-map="[invoiceId:invoiceId, statusId:'InvoicePmtSent']"/>
-                </else></if>
+                </else-if></if>
             </then><else>
                 <log message="After apply payment ${paymentId} to invoice ${invoiceId} not setting to Payment Sent/Received because unpaidTotal is ${unpaidTotal}"/>
             </else></if>
@@ -714,14 +718,150 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="paymentId" required="true"/>
             <parameter name="toPaymentId" required="true"/>
-            <parameter name="amount" type="BigDecimal"/>
+            <parameter name="amount" type="BigDecimal"><description>Defaults to the lesser of unappliedTotal on the two Payments.
+                Actual amountApplied will never be greater than unappliedTotal of either Payment.</description></parameter>
+            <parameter name="billingAccountId"/>
+            <parameter name="overrideGlAccountId"/>
         </in-parameters>
         <out-parameters>
-            <parameter name="paymentApplicationId" type="List"/>
+            <parameter name="paymentApplicationId"/>
             <parameter name="amountApplied" type="BigDecimal"/>
         </out-parameters>
         <actions>
-            <!-- TODO: implement this... -->
+            <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
+            <entity-find-one entity-name="mantle.account.payment.Payment" value-field="toPayment">
+                <field-map field-name="paymentId" from="toPaymentId"/></entity-find-one>
+            <set field="amountApplied" from="0.0"/>
+
+            <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:paymentId]" out-map="totalOut"/>
+            <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:toPaymentId]" out-map="toTotalOut"/>
+            <if condition="!amount || amount &gt; totalOut.unappliedTotal"><set field="amount" from="totalOut.unappliedTotal"/></if>
+            <if condition="amount &gt; toTotalOut.unappliedTotal"><set field="amount" from="toTotalOut.unappliedTotal"/></if>
+
+            <if condition="amount == 0.0">
+                <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
+                    <econdition field-name="paymentId"/><econdition field-name="toPaymentId"/></entity-find>
+                <if condition="paymentApplicationList?.size() == 1">
+                    <set field="paymentApplicationId" from="paymentApplicationList[0].paymentApplicationId"/></if>
+                <return/>
+            </if>
+
+            <if condition="payment.amountUomId != toPayment.amountUomId">
+                <message error="true">Cannot apply payment ${paymentId} to payment ${toPaymentId}, from payment has a different currency (${payment.amountUomId}) than to payment (${toPayment.amountUomId})</message></if>
+            <if condition="payment.fromPartyId != toPayment.toPartyId">
+                <message error="true">Cannot apply payment ${paymentId} to payment ${toPaymentId}, from payment is from a different party (${payment.fromPartyId}) than to payment is to (${toPayment.toPartyId})</message></if>
+            <if condition="payment.toPartyId != toPayment.fromPartyId">
+                <message error="true">Cannot apply payment ${paymentId} to payment ${toPaymentId}, from payment is to a different party (${payment.toPartyId}) than to payment is from (${toPayment.fromPartyId})</message></if>
+
+            <check-errors/>
+
+            <if condition="!(payment.statusId in ['PmntDelivered', 'PmntConfirmed'])">
+                <return message="Not applying payment ${paymentId} in status ${payment.statusId} to payment ${toPaymentId}, from payment must be in Delivered or Confirmed status"/>
+            </if>
+            <if condition="!(toPayment.statusId in ['PmntDelivered', 'PmntConfirmed'])">
+                <return message="Not applying payment ${toPaymentId} in status ${toPayment.statusId} from payment ${paymentId}, to payment must be in Delivered or Confirmed status"/>
+            </if>
+
+            <set field="amountApplied" from="amount"/>
+            <!-- for appliedDate get latest between effectiveDate and invoiceDate -->
+            <set field="appliedDate" from="payment.effectiveDate != null &amp;&amp; toPayment.effectiveDate != null ?
+                    (payment.effectiveDate &gt; toPayment.effectiveDate ? payment.effectiveDate : toPayment.effectiveDate) :
+                    (payment.effectiveDate ?: toPayment.effectiveDate ?: ec.user.nowTimestamp)"/>
+            <service-call name="create#mantle.account.payment.PaymentApplication" out-map="context"
+                    in-map="[paymentId:paymentId, toPaymentId:toPaymentId, billingAccountId:billingAccountId,
+                        overrideGlAccountId:overrideGlAccountId, amountApplied:amountApplied,
+                        appliedDate:appliedDate]"/>
+        </actions>
+    </service>
+    <service verb="apply" noun="InvoiceToInvoice">
+        <in-parameters>
+            <parameter name="invoiceId" required="true"/>
+            <parameter name="toInvoiceId" required="true"/>
+            <parameter name="amount" type="BigDecimal"><description>Defaults to the lesser of unpaidTotal on the two Invoices.
+                Actual amountApplied will never be greater than unpaidTotal of either Invoice.</description></parameter>
+            <parameter name="billingAccountId"/>
+            <parameter name="overrideGlAccountId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="paymentApplicationId"/>
+            <parameter name="amountApplied" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="toInvoice">
+                <field-map field-name="invoiceId" from="toInvoiceId"/></entity-find-one>
+            <set field="amountApplied" from="0.0"/>
+
+            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="totalOut"/>
+            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:toInvoiceId]" out-map="toTotalOut"/>
+            <if condition="!amount || amount &gt; totalOut.unpaidTotal"><set field="amount" from="totalOut.unpaidTotal"/></if>
+            <if condition="amount &gt; toTotalOut.unappliedTotal"><set field="amount" from="toTotalOut.unappliedTotal"/></if>
+
+            <if condition="amount == 0.0">
+                <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
+                    <econdition field-name="invoiceId"/><econdition field-name="toInvoiceId"/></entity-find>
+                <if condition="paymentApplicationList?.size() == 1">
+                    <set field="paymentApplicationId" from="paymentApplicationList[0].paymentApplicationId"/></if>
+                <return/>
+            </if>
+
+            <if condition="invoice.currencyUomId != toInvoice.currencyUomId">
+                <message error="true">Cannot apply invoice ${invoiceId} to invoice ${toInvoiceId}, from invoice has a different currency (${invoice.currencyUomId}) than to invoice (${toInvoice.currencyUomId})</message></if>
+            <if condition="invoice.fromPartyId != toInvoice.toPartyId">
+                <message error="true">Cannot apply invoice ${invoiceId} to invoice ${toInvoiceId}, from invoice is from a different party (${invoice.fromPartyId}) than to invoice is to (${toInvoice.toPartyId})</message></if>
+            <if condition="invoice.toPartyId != toInvoice.fromPartyId">
+                <message error="true">Cannot apply invoice ${invoiceId} to invoice ${toInvoiceId}, from invoice is to a different party (${invoice.toPartyId}) than to invoice is from (${toInvoice.fromPartyId})</message></if>
+
+            <check-errors/>
+
+            <if condition="!(invoice.statusId in ['InvoiceFinalized', 'InvoiceSent', 'InvoiceAcked', 'InvoicePmtRecvd', 'InvoiceApproved', 'InvoicePmtSent'])">
+                <log level="warn" message="Not applying invoice ${invoiceId} in status ${invoice.statusId} to invoice ${toInvoiceId} stack: ${ec.artifactExecution.getStackNameString()}"/>
+                <return message="Not applying invoice ${invoiceId} in status ${invoice.statusId} to invoice ${toInvoiceId}, from invoice must be Finalized, Sent, Acknowledged, or Payment Received for Receivable OR Approved or Payment Sent for Payable"/>
+            </if>
+            <if condition="!(toInvoice.statusId in ['InvoiceFinalized', 'InvoiceSent', 'InvoiceAcked', 'InvoicePmtRecvd', 'InvoiceApproved', 'InvoicePmtSent'])">
+                <log level="warn" message="Not applying invoice ${invoiceId} to invoice ${toInvoiceId} in status ${toInvoice.statusId} stack: ${ec.artifactExecution.getStackNameString()}"/>
+                <return message="Not applying invoice ${invoiceId} to invoice ${toInvoiceId} in status ${toInvoice.statusId}, to invoice must be Finalized, Sent, Acknowledged, or Payment Received for Receivable OR Approved or Payment Sent for Payable"/>
+            </if>
+
+            <service-call name="mantle.account.PaymentServices.check#InvoiceStatusForPayment" in-map="[invoiceId:invoiceId]"/>
+            <service-call name="mantle.account.PaymentServices.check#InvoiceStatusForPayment" in-map="[invoiceId:toInvoiceId]"/>
+
+            <set field="amountApplied" from="amount"/>
+            <!-- for appliedDate get latest between effectiveDate and invoiceDate -->
+            <set field="appliedDate" from="invoice.invoiceDate != null &amp;&amp; toInvoice.invoiceDate != null ?
+                    (invoice.invoiceDate &gt; toInvoice.invoiceDate ? invoice.invoiceDate : toInvoice.invoiceDate) :
+                    (invoice.invoiceDate ?: toInvoice.invoiceDate ?: ec.user.nowTimestamp)"/>
+            <service-call name="create#mantle.account.payment.PaymentApplication" out-map="context"
+                    in-map="[invoiceId:invoiceId, toInvoiceId:toInvoiceId, billingAccountId:billingAccountId,
+                        overrideGlAccountId:overrideGlAccountId, amountApplied:amountApplied,
+                        appliedDate:appliedDate]"/>
+
+            <!-- Payment Applied, now update from Invoice status -->
+            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="afterOut"/>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+            <if condition="afterOut.unpaidTotal == 0.0"><then>
+                <if condition="invoice.statusId in ['InvoiceFinalized', 'InvoiceSent', 'InvoiceAcked']"><then>
+                    <service-call name="update#mantle.account.invoice.Invoice" in-map="[invoiceId:invoiceId, statusId:'InvoicePmtRecvd']"/>
+                </then><else-if condition="invoice.statusId == 'InvoiceApproved'">
+                    <service-call name="update#mantle.account.invoice.Invoice" in-map="[invoiceId:invoiceId, statusId:'InvoicePmtSent']"/>
+                </else-if></if>
+            </then><else>
+                <log message="After apply invoice ${invoiceId} to invoice ${toInvoiceId} not setting to Payment Sent/Received because from invoice unpaidTotal is ${afterOut.unpaidTotal}"/>
+            </else></if>
+
+            <!-- Payment Applied, now update to Invoice status -->
+            <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:toInvoiceId]" out-map="toAfterOut"/>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="toInvoice">
+                <field-map field-name="invoiceId" from="toInvoiceId"/></entity-find-one>
+            <if condition="toAfterOut.unpaidTotal == 0.0"><then>
+                <if condition="toInvoice.statusId in ['InvoiceFinalized', 'InvoiceSent', 'InvoiceAcked']"><then>
+                    <service-call name="update#mantle.account.invoice.Invoice" in-map="[invoiceId:toInvoiceId, statusId:'InvoicePmtRecvd']"/>
+                </then><else-if condition="toInvoice.statusId == 'InvoiceApproved'">
+                    <service-call name="update#mantle.account.invoice.Invoice" in-map="[invoiceId:toInvoiceId, statusId:'InvoicePmtSent']"/>
+                </else-if></if>
+            </then><else>
+                <log message="After apply invoice ${invoiceId} to invoice ${toInvoiceId} not setting to Payment Sent/Received because to invoice unpaidTotal is ${toAfterOut.unpaidTotal}"/>
+            </else></if>
         </actions>
     </service>
 
