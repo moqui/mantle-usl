@@ -45,7 +45,7 @@ class OrderToCashBasicFlow extends Specification {
         kieEnabled = ec.factory.getToolFactory("KIE") != null
 
         ec.entity.tempSetSequencedIdPrimary("mantle.account.method.PaymentGatewayResponse", 55500, 10)
-        ec.entity.tempSetSequencedIdPrimary("mantle.ledger.transaction.AcctgTrans", 55500, 10)
+        ec.entity.tempSetSequencedIdPrimary("mantle.ledger.transaction.AcctgTrans", 55500, 50)
         ec.entity.tempSetSequencedIdPrimary("mantle.shipment.Shipment", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.shipment.ShipmentItemSource", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Asset", 55500, 10)
@@ -479,6 +479,8 @@ class OrderToCashBasicFlow extends Specification {
         afterResList[0].quantity == 60.0
     }
 
+    /* ========== Business Customer Order, Credit Memo, Overpay/Refund, etc ========== */
+
     def "create and Ship Business Customer Order"() {
         when:
         Map createOut = ec.service.sync().name("mantle.order.OrderServices.create#Order")
@@ -515,8 +517,19 @@ class OrderToCashBasicFlow extends Specification {
         ec.service.sync().name("mantle.shipment.ShipmentServices.pack#Shipment").parameters([shipmentId:b2bShipmentId]).call()
         ec.service.sync().name("mantle.shipment.ShipmentServices.ship#Shipment").parameters([shipmentId:b2bShipmentId]).call()
 
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.account.invoice.Invoice invoiceId="55501" invoiceTypeEnumId="InvoiceSales"
+                fromPartyId="ORG_ZIZI_RETAIL" toPartyId="JoeDist" statusId="InvoiceFinalized" invoiceDate="${effectiveTime}"
+                currencyUomId="USD" invoiceTotal="808.2" appliedPaymentsTotal="0" unpaidTotal="808.2"/>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
         then:
-        true
+        dataCheckErrors.size() == 0
     }
 
     def "create Customer Credit Memo Invoice"() {
@@ -592,19 +605,83 @@ class OrderToCashBasicFlow extends Specification {
         then:
         dataCheckErrors.size() == 0
     }
-    /*
-    def "receive Customer Overpayment"() {
+
+    def "receive and Apply Customer Overpayment"() {
         when:
+        BigDecimal overpayAmount = 1000.0 - 558.2
+        ec.service.sync().name("mantle.account.PaymentServices.update#Payment")
+                .parameters([paymentId:b2bPaymentId, amount:1000.0, effectiveDate:new Timestamp(effectiveTime)]).call()
+        ec.service.sync().name("mantle.account.PaymentServices.update#Payment")
+                .parameters([paymentId:b2bPaymentId, statusId:'PmntDelivered']).call()
+
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.account.payment.Payment paymentId="${b2bPaymentId}" statusId="PmntDelivered"
+                effectiveDate="${effectiveTime}" amount="1000" appliedTotal="558.2" unappliedTotal="${overpayAmount}"/>
+
+            <!-- TODO: AcctgTrans 55509 for incoming payment, 55510 for incoming payment appl -->
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
 
         then:
-        true
+        dataCheckErrors.size() == 0
     }
 
     def "refund Customer Overpayment"() {
         when:
+        BigDecimal overpayAmount = 1000.0 - 558.2
+        // record sent refund Payment
+        Map refundPmtResult = ec.service.sync().name("mantle.account.PaymentServices.create#Payment")
+                .parameters([paymentTypeEnumId:'PtRefund', statusId:'PmntDelivered', fromPartyId:'ORG_ZIZI_RETAIL',
+                             toPartyId:'JoeDist', effectiveDate:new Timestamp(effectiveTime),
+                             paymentInstrumentEnumId:'PiCompanyCheck', amount:overpayAmount]).call()
+        // apply refund Payment to overpay Payment
+        Map refundApplResult = ec.service.sync().name("mantle.account.PaymentServices.apply#PaymentToPayment")
+                .parameters([paymentId:refundPmtResult.paymentId, toPaymentId:b2bPaymentId]).call()
+
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.account.payment.PaymentApplication paymentApplicationId="${refundApplResult.paymentApplicationId}"
+                paymentId="${refundPmtResult.paymentId}" toPaymentId="${b2bPaymentId}" amountApplied="${overpayAmount}"
+                appliedDate="${effectiveTime}"/>
+            <mantle.account.payment.Payment paymentId="${refundPmtResult.paymentId}" statusId="PmntDelivered"
+                effectiveDate="${effectiveTime}" amount="${overpayAmount}" appliedTotal="${overpayAmount}" unappliedTotal="0"/>
+            <mantle.account.payment.Payment paymentId="${b2bPaymentId}" statusId="PmntDelivered"
+                effectiveDate="${effectiveTime}" amount="1000" appliedTotal="1000" unappliedTotal="0"/>
+
+            <!-- AcctgTrans created for Delivered refund Payment -->
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55511" acctgTransTypeEnumId="AttOutgoingPayment"
+                    organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
+                    postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
+                    otherPartyId="JoeDist" paymentId="${refundPmtResult.paymentId}">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" debitCreditFlag="D"
+                        amount="${overpayAmount}" glAccountId="216000000" reconcileStatusId="AterNot" isSummary="N"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" debitCreditFlag="C"
+                        amount="${overpayAmount}" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N"/>
+            </mantle.ledger.transaction.AcctgTrans>
+
+            <!-- AcctgTrans for payment to payment application -->
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55512" acctgTransTypeEnumId="AttPaymentInOutAppl"
+                    organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
+                    postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
+                    otherPartyId="JoeDist" paymentId="${refundPmtResult.paymentId}" toPaymentId="${b2bPaymentId}"
+                    paymentApplicationId="${refundApplResult.paymentApplicationId}">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" debitCreditFlag="C"
+                        amount="${overpayAmount}" glAccountId="216000000" reconcileStatusId="AterNot" isSummary="N"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" debitCreditFlag="D"
+                        amount="${overpayAmount}" glAccountId="126000000" reconcileStatusId="AterNot" isSummary="N"/>
+            </mantle.ledger.transaction.AcctgTrans>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
 
         then:
-        true
+        refundApplResult.amountApplied == overpayAmount
+        dataCheckErrors.size() == 0
     }
-    */
 }
