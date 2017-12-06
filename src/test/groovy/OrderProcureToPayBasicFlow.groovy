@@ -96,6 +96,8 @@ class OrderProcureToPayBasicFlow extends Specification {
         ec.artifactExecution.enableAuthz()
     }
 
+    // TODO: def "create Supplier Credit Memo Invoice"() { }
+
     def "create Purchase Order"() {
         when:
         Map priceMap = ec.service.sync().name("mantle.product.PriceServices.get#ProductPrice")

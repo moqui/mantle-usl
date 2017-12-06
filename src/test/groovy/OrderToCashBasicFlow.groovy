@@ -28,18 +28,14 @@ import java.sql.Timestamp
    Or to quick run with saved DB copy use "gradle loadSave" once then each time "gradle reloadSave runtime/mantle/mantle-usl:test"
  */
 class OrderToCashBasicFlow extends Specification {
-    @Shared
-    protected final static Logger logger = LoggerFactory.getLogger(OrderToCashBasicFlow.class)
-    @Shared
-    ExecutionContext ec
-    @Shared
-    String cartOrderId = null, orderPartSeqId
-    @Shared
-    Map setInfoOut, shipResult
-    @Shared
-    long effectiveTime = System.currentTimeMillis()
-    @Shared
-    boolean kieEnabled = false
+    @Shared protected final static Logger logger = LoggerFactory.getLogger(OrderToCashBasicFlow.class)
+    @Shared ExecutionContext ec
+    @Shared String cartOrderId = null, orderPartSeqId
+    @Shared Map setInfoOut, shipResult
+    @Shared String b2bPaymentId, b2bShipmentId, b2bCredMemoId
+    @Shared long effectiveTime = System.currentTimeMillis()
+    @Shared boolean kieEnabled = false
+    @Shared long totalFieldsChecked = 0
 
     def setupSpec() {
         // init the framework, get the ec
@@ -482,4 +478,133 @@ class OrderToCashBasicFlow extends Specification {
         afterResList[0].assetId == "DEMO_1_1A"
         afterResList[0].quantity == 60.0
     }
+
+    def "create and Ship Business Customer Order"() {
+        when:
+        Map createOut = ec.service.sync().name("mantle.order.OrderServices.create#Order")
+                .parameters([vendorPartyId:'ORG_ZIZI_RETAIL', customerPartyId:'JoeDist', facilityId:'ZIRET_WH']).call()
+
+        String b2bOrderId = createOut.orderId
+        String b2bOrderPartSeqId = createOut.orderPartSeqId
+
+        ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
+                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, productId:'DEMO_1_1', quantity:100]).call()
+        ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
+                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, productId:'DEMO_3_1', quantity:20]).call()
+
+        ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
+                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, shippingPostalContactMechId:'JoeDistAddr',
+                             carrierPartyId:'_NA_', shipmentMethodEnumId:'ShMthGround']).call()
+        Map b2bPaymentOut = ec.service.sync().name("mantle.order.OrderServices.add#OrderPartPayment")
+                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, paymentInstrumentEnumId:'PiCompanyCheck']).call()
+        b2bPaymentId = b2bPaymentOut.paymentId
+
+        ec.service.sync().name("mantle.order.OrderServices.place#Order").parameters([orderId:b2bOrderId]).call()
+        ec.service.sync().name("mantle.order.OrderServices.approve#Order").parameters([orderId:b2bOrderId]).call()
+
+        Map b2bShipmentOut = ec.service.sync().name("mantle.shipment.ShipmentServices.create#OrderPartShipment")
+                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, createPackage:true]).call()
+        b2bShipmentId = b2bShipmentOut.shipmentId
+        String b2bShipmentPackageSeqId = b2bShipmentOut.shipmentPackageSeqId
+
+        ec.service.sync().name("mantle.shipment.ShipmentServices.pack#ShipmentProduct")
+                .parameters([productId:'DEMO_1_1', quantity:100, shipmentId:b2bShipmentId, shipmentPackageSeqId:b2bShipmentPackageSeqId]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.pack#ShipmentProduct")
+                .parameters([productId:'DEMO_3_1', quantity:20, shipmentId:b2bShipmentId, shipmentPackageSeqId:b2bShipmentPackageSeqId]).call()
+
+        ec.service.sync().name("mantle.shipment.ShipmentServices.pack#Shipment").parameters([shipmentId:b2bShipmentId]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.ship#Shipment").parameters([shipmentId:b2bShipmentId]).call()
+
+        then:
+        true
+    }
+
+    def "create Customer Credit Memo Invoice"() {
+        when:
+        Map b2bCredMemoOut = ec.service.sync().name("mantle.account.InvoiceServices.create#Invoice")
+                .parameters([fromPartyId:'JoeDist', toPartyId:'ORG_ZIZI_RETAIL', invoiceTypeEnumId:'InvoiceCreditMemo', invoiceDate:new Timestamp(effectiveTime)]).call()
+        b2bCredMemoId = b2bCredMemoOut.invoiceId
+        // add single item for ItemChargebackAdjust
+        ec.service.sync().name("mantle.account.InvoiceServices.create#InvoiceItem").parameters([invoiceId:b2bCredMemoId,
+                itemTypeEnumId:'ItemChargebackAdjust', description:'Test Chargeback', quantity:1.0, amount:250.0]).call()
+        // approve invoice (posts to GL)
+        ec.service.sync().name("update#mantle.account.invoice.Invoice").parameters([invoiceId:b2bCredMemoId, statusId:'InvoiceApproved']).call()
+
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.account.invoice.Invoice invoiceId="${b2bCredMemoId}" invoiceTypeEnumId="InvoiceCreditMemo"
+                fromPartyId="JoeDist" toPartyId="ORG_ZIZI_RETAIL" statusId="InvoiceApproved" invoiceDate="${effectiveTime}"
+                currencyUomId="USD" invoiceTotal="250" appliedPaymentsTotal="0" unpaidTotal="250"/>
+
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55507" acctgTransTypeEnumId="AttCreditMemo"
+                    organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
+                    postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
+                    otherPartyId="JoeDist" invoiceId="${b2bCredMemoId}">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" debitCreditFlag="D"
+                        amount="250" glAccountId="522100000" reconcileStatusId="AterNot" isSummary="N"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" debitCreditFlag="C"
+                        amount="250" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
+            </mantle.ledger.transaction.AcctgTrans>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
+        then:
+        dataCheckErrors.size() == 0
+    }
+
+    def "apply Customer Credit Memo Invoice"() {
+        when:
+        String b2bInvoiceId = '55501'
+        Map credMemoApplResult = ec.service.sync().name("mantle.account.PaymentServices.apply#InvoiceToInvoice")
+                .parameters([invoiceId:b2bCredMemoId, toInvoiceId:b2bInvoiceId]).call()
+        String paymentApplicationId = credMemoApplResult.paymentApplicationId
+
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.account.payment.PaymentApplication paymentApplicationId="${paymentApplicationId}"
+                invoiceId="${b2bCredMemoId}" toInvoiceId="${b2bInvoiceId}" amountApplied="250" appliedDate="${effectiveTime}"/>
+            <mantle.account.invoice.Invoice invoiceId="${b2bCredMemoId}" invoiceTypeEnumId="InvoiceCreditMemo"
+                fromPartyId="JoeDist" toPartyId="ORG_ZIZI_RETAIL" statusId="InvoicePmtSent" invoiceDate="${effectiveTime}"
+                currencyUomId="USD" invoiceTotal="250" appliedPaymentsTotal="250" unpaidTotal="0"/>
+            <mantle.account.invoice.Invoice invoiceId="${b2bInvoiceId}" invoiceTypeEnumId="InvoiceSales"
+                fromPartyId="ORG_ZIZI_RETAIL" toPartyId="JoeDist" statusId="InvoiceFinalized" invoiceDate="${effectiveTime}"
+                currencyUomId="USD" invoiceTotal="808.2" appliedPaymentsTotal="250" unpaidTotal="558.2"/>
+
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55508" acctgTransTypeEnumId="AttInvoiceInOutAppl"
+                    organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
+                    postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
+                    otherPartyId="JoeDist" invoiceId="${b2bCredMemoId}" toInvoiceId="${b2bInvoiceId}"
+                    paymentApplicationId="${paymentApplicationId}">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" debitCreditFlag="D"
+                        amount="250" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" debitCreditFlag="C"
+                        amount="250" glAccountId="121000000" reconcileStatusId="AterNot" isSummary="N"/>
+            </mantle.ledger.transaction.AcctgTrans>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
+        then:
+        dataCheckErrors.size() == 0
+    }
+    /*
+    def "receive Customer Overpayment"() {
+        when:
+
+        then:
+        true
+    }
+
+    def "refund Customer Overpayment"() {
+        when:
+
+        then:
+        true
+    }
+    */
 }
