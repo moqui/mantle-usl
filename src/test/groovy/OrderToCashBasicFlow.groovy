@@ -490,9 +490,9 @@ class OrderToCashBasicFlow extends Specification {
         String b2bOrderPartSeqId = createOut.orderPartSeqId
 
         ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
-                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, productId:'DEMO_1_1', quantity:100]).call()
+                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, productId:'DEMO_1_1', quantity:100.0, unitAmount:15.0]).call()
         ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
-                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, productId:'DEMO_3_1', quantity:20]).call()
+                .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, productId:'DEMO_3_1', quantity:20.0, unitAmount:5.5]).call()
 
         ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
                 .parameters([orderId:b2bOrderId, orderPartSeqId:b2bOrderPartSeqId, shippingPostalContactMechId:'JoeDistAddr',
@@ -521,7 +521,7 @@ class OrderToCashBasicFlow extends Specification {
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.account.invoice.Invoice invoiceId="55501" invoiceTypeEnumId="InvoiceSales"
                 fromPartyId="ORG_ZIZI_RETAIL" toPartyId="JoeDist" statusId="InvoiceFinalized" invoiceDate="${effectiveTime}"
-                currencyUomId="USD" invoiceTotal="808.2" appliedPaymentsTotal="0" unpaidTotal="808.2"/>
+                currencyUomId="USD" invoiceTotal="1610.0" appliedPaymentsTotal="0" unpaidTotal="1610.0"/>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
@@ -584,7 +584,7 @@ class OrderToCashBasicFlow extends Specification {
                 currencyUomId="USD" invoiceTotal="250" appliedPaymentsTotal="250" unpaidTotal="0"/>
             <mantle.account.invoice.Invoice invoiceId="${b2bInvoiceId}" invoiceTypeEnumId="InvoiceSales"
                 fromPartyId="ORG_ZIZI_RETAIL" toPartyId="JoeDist" statusId="InvoiceFinalized" invoiceDate="${effectiveTime}"
-                currencyUomId="USD" invoiceTotal="808.2" appliedPaymentsTotal="250" unpaidTotal="558.2"/>
+                currencyUomId="USD" invoiceTotal="1610.0" appliedPaymentsTotal="250" unpaidTotal="1360.0"/>
 
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55508" acctgTransTypeEnumId="AttInvoiceInOutAppl"
                     organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
@@ -608,16 +608,16 @@ class OrderToCashBasicFlow extends Specification {
 
     def "receive and Apply Customer Overpayment"() {
         when:
-        BigDecimal overpayAmount = 1000.0 - 558.2
+        BigDecimal overpayAmount = 1500.0 - 1360.0
         ec.service.sync().name("mantle.account.PaymentServices.update#Payment")
-                .parameters([paymentId:b2bPaymentId, amount:1000.0, effectiveDate:new Timestamp(effectiveTime)]).call()
+                .parameters([paymentId:b2bPaymentId, amount:1500.0, effectiveDate:new Timestamp(effectiveTime)]).call()
         ec.service.sync().name("mantle.account.PaymentServices.update#Payment")
                 .parameters([paymentId:b2bPaymentId, statusId:'PmntDelivered']).call()
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.account.payment.Payment paymentId="${b2bPaymentId}" statusId="PmntDelivered"
-                effectiveDate="${effectiveTime}" amount="1000" appliedTotal="558.2" unappliedTotal="${overpayAmount}"/>
+                effectiveDate="${effectiveTime}" amount="1500" appliedTotal="1360.0" unappliedTotal="${overpayAmount}"/>
 
             <!-- TODO: AcctgTrans 55509 for incoming payment, 55510 for incoming payment appl -->
         </entity-facade-xml>""").check(dataCheckErrors)
@@ -632,7 +632,7 @@ class OrderToCashBasicFlow extends Specification {
 
     def "refund Customer Overpayment"() {
         when:
-        BigDecimal overpayAmount = 1000.0 - 558.2
+        BigDecimal overpayAmount = 1500.0 - 1360.0
         // record sent refund Payment
         Map refundPmtResult = ec.service.sync().name("mantle.account.PaymentServices.create#Payment")
                 .parameters([paymentTypeEnumId:'PtRefund', statusId:'PmntDelivered', fromPartyId:'ORG_ZIZI_RETAIL',
@@ -650,7 +650,7 @@ class OrderToCashBasicFlow extends Specification {
             <mantle.account.payment.Payment paymentId="${refundPmtResult.paymentId}" statusId="PmntDelivered"
                 effectiveDate="${effectiveTime}" amount="${overpayAmount}" appliedTotal="${overpayAmount}" unappliedTotal="0"/>
             <mantle.account.payment.Payment paymentId="${b2bPaymentId}" statusId="PmntDelivered"
-                effectiveDate="${effectiveTime}" amount="1000" appliedTotal="1000" unappliedTotal="0"/>
+                effectiveDate="${effectiveTime}" amount="1500" appliedTotal="1500" unappliedTotal="0"/>
 
             <!-- AcctgTrans created for Delivered refund Payment -->
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55511" acctgTransTypeEnumId="AttOutgoingPayment"
