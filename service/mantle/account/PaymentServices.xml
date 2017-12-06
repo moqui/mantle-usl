@@ -47,6 +47,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <parameter name="maxApplicableAmount" type="BigDecimal"/>
                 </parameter>
             </parameter>
+            <parameter name="unappliedPaymentInfoList" type="List"><parameter name="unappliedPaymentInfo" type="Map"/></parameter>
         </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
@@ -85,7 +86,12 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- get payment applications (to invoices, other payments) -->
             <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
-                <econdition field-name="paymentId"/><order-by field-name="appliedDate"/></entity-find>
+                <econditions combine="or">
+                    <econdition field-name="paymentId"/>
+                    <econdition field-name="toPaymentId" from="paymentId"/>
+                </econditions>
+                <order-by field-name="appliedDate"/>
+            </entity-find>
 
             <!-- if associated with an order (ie a promised/etc payment for an order) get invoices associated with the order -->
             <if condition="payment.orderId">
@@ -118,11 +124,30 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <set field="unpaidInvoiceInfoList" from="[]"/>
             <iterate list="unpaidInvoiceList" entry="unpaidInvoice">
-                <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:unpaidInvoice.invoiceId]" out-map="invTot"/>
+                <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:unpaidInvoice.invoiceId]"
+                        out-map="invTot" out-map-add-to-existing="false"/>
                 <set field="maxApplicableAmount" from="unappliedTotal"/>
                 <if condition="maxApplicableAmount > invTot.unpaidTotal"><set field="maxApplicableAmount" from="invTot.unpaidTotal"/></if>
                 <script>unpaidInvoiceInfoList.add(invTot + [invoice:unpaidInvoice, maxApplicableAmount:maxApplicableAmount,
                         allowApply:(maxApplicableAmount &amp;&amp; unpaidInvoice.statusId in ['InvoiceFinalized','InvoiceSent','InvoiceApproved'])])</script>
+            </iterate>
+
+            <!-- get payments with reverse from/to parties that might be applied to this payment -->
+            <entity-find entity-name="mantle.account.payment.Payment" list="unappliedPaymentList">
+                <econdition field-name="fromPartyId" from="payment.toPartyId"/>
+                <econdition field-name="toPartyId" from="payment.fromPartyId"/>
+                <econdition field-name="paymentTypeEnumId" operator="in" value="PtInvoicePayment,PtPrePayment,PtPrePaymentInventory,PtRefund"/>
+                <econdition field-name="statusId" operator="in" value="PmntPromised,PmntAuthorized,PmntDelivered,PmntConfirmed"/>
+                <econdition field-name="unappliedTotal" operator="greater" from="0.0"/>
+            </entity-find>
+            <set field="unappliedPaymentInfoList" from="[]"/>
+            <iterate list="unappliedPaymentList" entry="unappliedPayment">
+                <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:unappliedPayment.paymentId]"
+                        out-map="pmtTotal" out-map-add-to-existing="false"/>
+                <set field="maxApplicableAmount" from="unappliedTotal"/>
+                <if condition="maxApplicableAmount > pmtTotal.unappliedTotal"><set field="maxApplicableAmount" from="pmtTotal.unappliedTotal"/></if>
+                <script>unappliedPaymentInfoList.add(pmtTotal + [payment:unappliedPayment, maxApplicableAmount:maxApplicableAmount,
+                    allowApply:(maxApplicableAmount &amp;&amp; unappliedPayment.statusId in ['PmntDelivered','PmntConfirmed'])])</script>
             </iterate>
         </actions>
     </service>
@@ -389,7 +414,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <exclude field-name="acctgTransResultEnumId"/><exclude field-name="reconcileStatusId"/>
                 <exclude field-name="paymentMethodFileId"/></auto-parameters>
             <parameter name="paymentTypeEnumId" default-value="PtInvoicePayment"/>
-            <parameter name="statusId" default-value="PmntProposed"/>
+            <parameter name="statusId" default-value="PmntPromised"/>
             <parameter name="fromPartyId" required="true"/>
             <parameter name="toPartyId" required="true"/>
             <parameter name="amount" type="BigDecimal" default="0.0"/>
@@ -401,7 +426,12 @@ along with this software (see the LICENSE.md file). If not, see
         <out-parameters><parameter name="paymentId"/></out-parameters>
         <actions>
             <service-call name="mantle.account.PaymentServices.set#PaymentAutoInfo" in-map="context" out-map="context"/>
-            <service-call name="create#mantle.account.payment.Payment" in-map="context" out-map="context"/>
+            <set field="initialStatusId" from="statusId == 'PmntProposed' ? statusId : 'PmntPromised'"/>
+            <service-call name="create#mantle.account.payment.Payment" in-map="context + [statusId:initialStatusId]" out-map="context"/>
+            <!-- if target status is PmntConfirmed go to PmntDelivered first for GL posting, etc -->
+            <if condition="statusId == 'PmntConfirmed'">
+                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntDelivered']"/></if>
+            <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:statusId]"/>
         </actions>
     </service>
     <service verb="set" noun="PaymentAutoInfo">
@@ -810,7 +840,7 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:invoiceId]" out-map="totalOut"/>
             <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal" in-map="[invoiceId:toInvoiceId]" out-map="toTotalOut"/>
             <if condition="!amount || amount &gt; totalOut.unpaidTotal"><set field="amount" from="totalOut.unpaidTotal"/></if>
-            <if condition="amount &gt; toTotalOut.unappliedTotal"><set field="amount" from="toTotalOut.unappliedTotal"/></if>
+            <if condition="amount &gt; toTotalOut.unpaidTotal"><set field="amount" from="toTotalOut.unpaidTotal"/></if>
 
             <if condition="amount == 0.0">
                 <entity-find entity-name="mantle.account.payment.PaymentApplication" list="paymentApplicationList">
@@ -935,18 +965,34 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="update#mantle.account.payment.PaymentApplication"
                         in-map="[paymentApplicationId:paymentApplicationId, amountApplied:0.0,
                             amountOriginallyApplied:paymentApplication.amountApplied]"/>
-                <!-- if Invoice is in InvoicePmtSent or InvoicePmtRecvd, set status back to unpaid -->
-                <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice">
-                    <field-map field-name="invoiceId" from="paymentApplication.invoiceId"/></entity-find-one>
-                <if condition="invoice.statusId == 'InvoicePmtRecvd'">
-                    <set field="invoice.statusId" value="InvoiceFinalized"/>
-                    <!-- NOTE: update entity directly instead of calling update# auto service so that other payments won't be unapplied -->
-                    <entity-update value-field="invoice"/>
+
+                <if condition="paymentApplication.invoiceId">
+                    <!-- if Invoice is in InvoicePmtSent or InvoicePmtRecvd, set status back to unpaid -->
+                    <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice">
+                        <field-map field-name="invoiceId" from="paymentApplication.invoiceId"/></entity-find-one>
+                    <if condition="invoice.statusId == 'InvoicePmtRecvd'"><then>
+                        <set field="invoice.statusId" value="InvoiceFinalized"/>
+                        <!-- NOTE: update entity directly instead of calling update# auto service so that other payments won't be unapplied -->
+                        <entity-update value-field="invoice"/>
+                    </then><else-if condition="invoice.statusId == 'InvoicePmtSent'">
+                        <set field="invoice.statusId" value="InvoiceApproved"/>
+                        <!-- NOTE: update entity directly instead of calling update# auto service so that other payments won't be unapplied -->
+                        <entity-update value-field="invoice"/>
+                    </else-if></if>
                 </if>
-                <if condition="invoice.statusId == 'InvoicePmtSent'">
-                    <set field="invoice.statusId" value="InvoiceApproved"/>
-                    <!-- NOTE: update entity directly instead of calling update# auto service so that other payments won't be unapplied -->
-                    <entity-update value-field="invoice"/>
+                <if condition="paymentApplication.toInvoiceId">
+                    <!-- if Invoice is in InvoicePmtSent or InvoicePmtRecvd, set status back to unpaid -->
+                    <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="toInvoice">
+                        <field-map field-name="invoiceId" from="paymentApplication.toInvoiceId"/></entity-find-one>
+                    <if condition="toInvoice.statusId == 'InvoicePmtRecvd'"><then>
+                        <set field="toInvoice.statusId" value="InvoiceFinalized"/>
+                        <!-- NOTE: update entity directly instead of calling update# auto service so that other payments won't be unapplied -->
+                        <entity-update value-field="toInvoice"/>
+                    </then><else-if condition="toInvoice.statusId == 'InvoicePmtSent'">
+                        <set field="toInvoice.statusId" value="InvoiceApproved"/>
+                        <!-- NOTE: update entity directly instead of calling update# auto service so that other payments won't be unapplied -->
+                        <entity-update value-field="toInvoice"/>
+                    </else-if></if>
                 </if>
             </if>
         </actions>
