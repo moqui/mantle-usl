@@ -739,8 +739,24 @@ class OrderProcureToPayBasicFlow extends Specification {
         refundApplResult = ec.service.sync().name("mantle.account.PaymentServices.apply#PaymentToPayment")
                 .parameters([paymentId:refundPmtResult.paymentId, toPaymentId:setInfoOut.paymentId]).call()
 
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.account.payment.PaymentApplication paymentApplicationId="${refundApplResult.paymentApplicationId}"
+                paymentId="${refundPmtResult.paymentId}" toPaymentId="${setInfoOut.paymentId}" amountApplied="170"
+                appliedDate="${effectiveTime}"/>
+            <mantle.account.payment.Payment paymentId="${refundPmtResult.paymentId}" statusId="PmntDelivered"
+                effectiveDate="${effectiveTime}" amount="170" appliedTotal="170" unappliedTotal="0"/>
+            <mantle.account.payment.Payment paymentId="${setInfoOut.paymentId}" statusId="PmntDelivered"
+                effectiveDate="${effectiveTime}" amount="24000" appliedTotal="24000" unappliedTotal="0"/>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
         then:
         refundApplResult.amountApplied == 170.0
+        dataCheckErrors.size() == 0
     }
 
     def "validate Refund Payment Accounting Transaction"() {
