@@ -33,7 +33,7 @@ class OrderProcureToPayBasicFlow extends Specification {
     @Shared protected final static Logger logger = LoggerFactory.getLogger(OrderProcureToPayBasicFlow.class)
     @Shared ExecutionContext ec
     @Shared String purchaseOrderId = null, orderPartSeqId
-    @Shared Map setInfoOut, shipResult, sendPmtResult
+    @Shared Map setInfoOut, shipResult, sendPmtResult, refundPmtResult, refundApplResult
     @Shared String vendorPartyId = 'ZiddlemanInc', customerPartyId = 'ORG_ZIZI_RETAIL'
     @Shared String priceUomId = 'USD', currencyUomId = 'USD'
     @Shared String facilityId = 'ZIRET_WH'
@@ -654,8 +654,9 @@ class OrderProcureToPayBasicFlow extends Specification {
     def "send Purchase Invoice Payment"() {
         when:
         // record Payment for Invoice and apply to Invoice (will trigger GL posting for Payment and Payment Application)
+        // intentional overpay to test refund and payment to payment application; invoice amt is 23,830.00, pay 24,000.00 for 170.00 overpay
         sendPmtResult = ec.service.sync().name("mantle.account.PaymentServices.send#PromisedPayment")
-                .parameters([invoiceId:'55400', paymentId:setInfoOut.paymentId, amount:23830.00]).call()
+                .parameters([invoiceId:'55400', paymentId:setInfoOut.paymentId, amount:24000.00]).call()
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
@@ -664,11 +665,11 @@ class OrderProcureToPayBasicFlow extends Specification {
                 appliedDate="${effectiveTime}"/>
             <!-- Payment to Delivered status, set effectiveDate -->
             <mantle.account.payment.Payment paymentId="${setInfoOut.paymentId}" statusId="PmntDelivered"
-                effectiveDate="${effectiveTime}"/>
+                effectiveDate="${effectiveTime}" amount="24000" appliedTotal="23830" unappliedTotal="170"/>
             <!-- Invoice to Payment Sent status -->
             <mantle.account.invoice.Invoice invoiceId="55400" invoiceTypeEnumId="InvoiceSales"
                 fromPartyId="ZiddlemanInc" toPartyId="ORG_ZIZI_RETAIL" statusId="InvoicePmtSent" invoiceDate="${effectiveTime}"
-                currencyUomId="USD"/>
+                currencyUomId="USD" invoiceTotal="23830" appliedPaymentsTotal="23830" unpaidTotal="0"/>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
@@ -685,13 +686,14 @@ class OrderProcureToPayBasicFlow extends Specification {
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <!-- AcctgTrans created for Delivered Payment -->
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55407" acctgTransTypeEnumId="AttOutgoingPayment"
-                organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
-                postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
-                otherPartyId="ZiddlemanInc" paymentId="${setInfoOut.paymentId}"/>
-            <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55407" acctgTransEntrySeqId="01" debitCreditFlag="D"
-                amount="23830" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
-            <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55407" acctgTransEntrySeqId="02" debitCreditFlag="C"
-                amount="23830" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N"/>
+                    organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
+                    postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
+                    otherPartyId="ZiddlemanInc" paymentId="${setInfoOut.paymentId}">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" debitCreditFlag="D"
+                        amount="24000" glAccountId="216000000" reconcileStatusId="AterNot" isSummary="N"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" debitCreditFlag="C"
+                        amount="24000" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N"/>
+            </mantle.ledger.transaction.AcctgTrans>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
@@ -702,20 +704,20 @@ class OrderProcureToPayBasicFlow extends Specification {
         dataCheckErrors.size() == 0
     }
 
-    /* with auto-set Payment.forInvoiceId when creating Invoice from Shipment this is no longer done
     def "validate Purchase Payment Application Accounting Transaction"() {
         when:
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55408" acctgTransTypeEnumId="AttOutgoingPaymentAp"
-                organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
-                postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
-                otherPartyId="ZiddlemanInc" paymentId="${setInfoOut.paymentId}"
-                paymentApplicationId="${sendPmtResult.paymentApplicationId}"/>
-            <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55408" acctgTransEntrySeqId="01" debitCreditFlag="D"
-                amount="23830" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
-            <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55408" acctgTransEntrySeqId="02" debitCreditFlag="C"
-                amount="23830" glAccountId="216000000" reconcileStatusId="AterNot" isSummary="N"/>
+                    organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
+                    postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
+                    otherPartyId="ZiddlemanInc" paymentId="${setInfoOut.paymentId}"
+                    paymentApplicationId="${sendPmtResult.paymentApplicationId}">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" debitCreditFlag="C"
+                        amount="23830" glAccountId="216000000" reconcileStatusId="AterNot" isSummary="N"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" debitCreditFlag="D"
+                        amount="23830" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
+            </mantle.ledger.transaction.AcctgTrans>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
         logger.info("Checked ${fieldsChecked} fields")
@@ -725,7 +727,69 @@ class OrderProcureToPayBasicFlow extends Specification {
         then:
         dataCheckErrors.size() == 0
     }
-    */
+
+    def "receive Supplier Overpay Refund"() {
+        when:
+        // record received Payment
+        refundPmtResult = ec.service.sync().name("mantle.account.PaymentServices.create#Payment")
+                .parameters([paymentTypeEnumId:'PtRefund', statusId:'PmntDelivered', fromPartyId:vendorPartyId,
+                             toPartyId:customerPartyId, effectiveDate:new Timestamp(effectiveTime),
+                             paymentInstrumentEnumId:'PiCompanyCheck', amount:170.0]).call()
+        // apply refund Payment to overpay Payment
+        refundApplResult = ec.service.sync().name("mantle.account.PaymentServices.apply#PaymentToPayment")
+                .parameters([paymentId:refundPmtResult.paymentId, toPaymentId:setInfoOut.paymentId]).call()
+
+        then:
+        refundApplResult.amountApplied == 170.0
+    }
+
+    def "validate Refund Payment Accounting Transaction"() {
+        when:
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <!-- AcctgTrans created for Delivered Payment -->
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55409" acctgTransTypeEnumId="AttIncomingPayment"
+                    organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
+                    postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
+                    otherPartyId="ZiddlemanInc" paymentId="${refundPmtResult.paymentId}">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" debitCreditFlag="C"
+                        amount="170" glAccountId="126000000" reconcileStatusId="AterNot" isSummary="N"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" debitCreditFlag="D"
+                        amount="170" glAccountId="111100000" reconcileStatusId="AterNot" isSummary="N"/>
+            </mantle.ledger.transaction.AcctgTrans>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
+        then:
+        dataCheckErrors.size() == 0
+    }
+
+    def "validate Refund Payment Application Accounting Transaction"() {
+        when:
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55410" acctgTransTypeEnumId="AttPaymentInOutAppl"
+                    organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
+                    postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD"
+                    otherPartyId="ZiddlemanInc" paymentId="${refundPmtResult.paymentId}" toPaymentId="${setInfoOut.paymentId}"
+                    paymentApplicationId="${refundApplResult.paymentApplicationId}">
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" debitCreditFlag="D"
+                        amount="170" glAccountId="126000000" reconcileStatusId="AterNot" isSummary="N"/>
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" debitCreditFlag="C"
+                        amount="170" glAccountId="216000000" reconcileStatusId="AterNot" isSummary="N"/>
+            </mantle.ledger.transaction.AcctgTrans>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
+        then:
+        dataCheckErrors.size() == 0
+    }
 
     def "depreciate Fixed Assets"() {
         when:
@@ -743,8 +807,8 @@ class OrderProcureToPayBasicFlow extends Specification {
             <mantle.product.asset.Asset assetId="${equip1AssetId}" acquireCost="10000" salvageValue="1500" depreciation="283.33"/>
             <mantle.product.asset.AssetDepreciation assetId="${equip1AssetId}" timePeriodId="${currentFiscalMonthId}"
                     annualDepreciation="3400" yearsRemaining="5" isLastYearPeriod="N"
-                    monthlyDepreciation="283.33" acctgTransId="55408" usefulLifeYears="5"/>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55408" amountUomId="USD" isPosted="Y" postedDate="${effectiveTime}"
+                    monthlyDepreciation="283.33" acctgTransId="55411" usefulLifeYears="5"/>
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55411" amountUomId="USD" isPosted="Y" postedDate="${effectiveTime}"
                     acctgTransTypeEnumId="AttDepreciation" glFiscalTypeEnumId="GLFT_ACTUAL" organizationPartyId="ORG_ZIZI_RETAIL"
                     transactionDate="${deprOut.transactionDate.time}">
                 <mantle.ledger.transaction.AcctgTransEntry amount="283.33" productId="EQUIP_1" glAccountId="182000000"
@@ -756,8 +820,8 @@ class OrderProcureToPayBasicFlow extends Specification {
             </mantle.ledger.transaction.AcctgTrans>
 
             <mantle.product.asset.AssetDepreciation assetId="${equip2AssetId}" timePeriodId="${currentFiscalMonthId}" annualDepreciation="1700"
-                    yearsRemaining="5" isLastYearPeriod="N" monthlyDepreciation="141.67" usefulLifeYears="5" acctgTransId="55409"/>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55409" postedDate="${effectiveTime}" amountUomId="USD"
+                    yearsRemaining="5" isLastYearPeriod="N" monthlyDepreciation="141.67" usefulLifeYears="5" acctgTransId="55412"/>
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55412" postedDate="${effectiveTime}" amountUomId="USD"
                     isPosted="Y" assetId="${equip2AssetId}" acctgTransTypeEnumId="AttDepreciation" glFiscalTypeEnumId="GLFT_ACTUAL"
                     transactionDate="${deprOut.transactionDate.time}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry amount="141.67" productId="EQUIP_1" glAccountId="182000000"
@@ -841,7 +905,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 <mantle.product.asset.AssetDetail assetDetailId="55414" assetId="${equip1AssetId}" productId="EQUIP_1"
                         availableToPromiseDiff="-1" shipmentId="55401" effectiveDate="${effectiveTime}" quantityOnHandDiff="-1"/>
             </mantle.product.issuance.AssetIssuance>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55410" assetIssuanceId="55400" postedDate="${effectiveTime}"
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55413" assetIssuanceId="55400" postedDate="${effectiveTime}"
                     amountUomId="USD" isPosted="Y" assetId="${equip1AssetId}" acctgTransTypeEnumId="AttAssetIssuance"
                     glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry amount="10000" productId="EQUIP_1" glAccountId="131100000"
@@ -862,7 +926,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     <mantle.order.OrderItemBilling orderItemBillingId="55405" orderItemSeqId="01" amount="9000"
                             quantity="1" orderId="55401" shipmentId="55401" assetIssuanceId="55400"/>
                 </mantle.account.invoice.InvoiceItem>
-                <mantle.ledger.transaction.AcctgTrans acctgTransId="55411" otherPartyId="CustJqp" postedDate="${effectiveTime}"
+                <mantle.ledger.transaction.AcctgTrans acctgTransId="55414" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                         amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttSalesInvoice" glFiscalTypeEnumId="GLFT_ACTUAL"
                         transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                     <mantle.ledger.transaction.AcctgTransEntry amount="10000" productId="EQUIP_1" glAccountId="253100000"
@@ -878,8 +942,8 @@ class OrderProcureToPayBasicFlow extends Specification {
                             reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatAccountsReceivable"
                             debitCreditFlag="D" acctgTransEntrySeqId="04"/>
                 </mantle.ledger.transaction.AcctgTrans>
-                <mantle.account.payment.PaymentApplication paymentId="55401" amountApplied="9000"
-                        appliedDate="${effectiveTime}" paymentApplicationId="55401"/>
+                <mantle.account.payment.PaymentApplication paymentId="55402" amountApplied="9000"
+                        appliedDate="${effectiveTime}" paymentApplicationId="55402"/>
             </mantle.account.invoice.Invoice>
         </entity-facade-xml>""").check(dataCheckErrors)
         totalFieldsChecked += fieldsChecked
@@ -953,7 +1017,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 <mantle.product.asset.AssetDetail assetDetailId="55417" assetId="${equip2AssetId}" productId="EQUIP_1"
                         availableToPromiseDiff="-1" shipmentId="55402" effectiveDate="${effectiveTime}" quantityOnHandDiff="-1"/>
             </mantle.product.issuance.AssetIssuance>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55413" assetIssuanceId="55401" postedDate="${effectiveTime}"
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55416" assetIssuanceId="55401" postedDate="${effectiveTime}"
                     amountUomId="USD" isPosted="Y" assetId="${equip2AssetId}" acctgTransTypeEnumId="AttAssetIssuance"
                     glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry amount="10000" productId="EQUIP_1" glAccountId="131100000"
@@ -974,7 +1038,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     <mantle.order.OrderItemBilling orderItemBillingId="55406" orderItemSeqId="01" amount="11000"
                             quantity="1" orderId="55402" shipmentId="55402" assetIssuanceId="55401"/>
                 </mantle.account.invoice.InvoiceItem>
-                <mantle.ledger.transaction.AcctgTrans acctgTransId="55414" otherPartyId="CustJqp" postedDate="${effectiveTime}"
+                <mantle.ledger.transaction.AcctgTrans acctgTransId="55417" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                         amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttSalesInvoice" glFiscalTypeEnumId="GLFT_ACTUAL"
                         transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                     <mantle.ledger.transaction.AcctgTransEntry amount="10000" productId="EQUIP_1" glAccountId="253100000"
@@ -990,8 +1054,8 @@ class OrderProcureToPayBasicFlow extends Specification {
                             reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatAccountsReceivable"
                             debitCreditFlag="D" acctgTransEntrySeqId="04"/>
                 </mantle.ledger.transaction.AcctgTrans>
-                <mantle.account.payment.PaymentApplication paymentId="55402" amountApplied="11000"
-                        appliedDate="${effectiveTime}" paymentApplicationId="55402"/>
+                <mantle.account.payment.PaymentApplication paymentId="55403" amountApplied="11000"
+                        appliedDate="${effectiveTime}" paymentApplicationId="55403"/>
             </mantle.account.invoice.Invoice>
 
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="131100000" timePeriodId="${currentFiscalMonthId}"
@@ -1031,7 +1095,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     comments="Test lost 10 DEMO_1_1" partyId="EX_JOHN_DOE">
                 <mantle.product.asset.AssetDetail assetDetailId="55418" assetId="DEMO_1_1A" productId="DEMO_1_1"
                         varianceReasonEnumId="InVrLost" availableToPromiseDiff="-10" quantityOnHandDiff="-10" effectiveDate="${effectiveTime}"/>
-                <mantle.ledger.transaction.AcctgTrans acctgTransId="55416" postedDate="${effectiveTime}" amountUomId="USD"
+                <mantle.ledger.transaction.AcctgTrans acctgTransId="55419" postedDate="${effectiveTime}" amountUomId="USD"
                         isPosted="Y" assetId="DEMO_1_1A" acctgTransTypeEnumId="AttInventoryVariance"
                         glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                     <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="75" productId="DEMO_1_1"
@@ -1073,7 +1137,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 <mantle.product.asset.AssetDetail assetDetailId="55421" assetId="55406" productId="DEMO_1_1"
                         varianceReasonEnumId="InVrFound" availableToPromiseDiff="10" quantityOnHandDiff="10" effectiveDate="${effectiveTime}"/>
             </mantle.product.asset.PhysicalInventory>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55417" postedDate="${effectiveTime}" amountUomId="USD"
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55420" postedDate="${effectiveTime}" amountUomId="USD"
                     isPosted="Y" assetId="55406" acctgTransTypeEnumId="AttInventoryVariance" physicalInventoryId="55401"
                     glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="75" productId="DEMO_1_1"
