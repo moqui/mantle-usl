@@ -1059,16 +1059,20 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="authorize" noun="OrderPayments">
         <in-parameters>
             <parameter name="orderId" required="true"/>
-            <!-- any point in this? generally want to auth whole order and then update status <parameter name="orderPartSeqId"/> -->
+            <parameter name="cardSecurityCodeByPaymentId" type="Map"/>
         </in-parameters>
-        <out-parameters><parameter name="authFailed" type="Boolean"/></out-parameters>
+        <out-parameters>
+            <parameter name="authFailed" type="Boolean"/>
+            <parameter name="totalAuthorized" type="BigDecimal"/>
+        </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+            <if condition="orderHeader == null"><return error="true" message="Order ${orderId} not found"/></if>
             <!-- don't auto-authorize if there is no store for the order -->
             <if condition="!orderHeader.productStoreId"><return/></if>
 
             <set field="authFailed" from="false"/>
-            <set field="totalAuthorized" from="0"/>
+            <set field="totalAuthorized" from="0.0"/>
             <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
                 <econdition field-name="orderId"/></entity-find>
             <iterate list="paymentList" entry="payment">
@@ -1079,7 +1083,8 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
 
                 <service-call name="mantle.account.PaymentServices.authorize#StorePayment" out-map="authOut"
-                    in-map="[paymentId:payment.paymentId, payment:payment, productStoreId:orderHeader.productStoreId]"/>
+                    in-map="[paymentId:payment.paymentId, payment:payment, productStoreId:orderHeader.productStoreId,
+                        cardSecurityCode:cardSecurityCodeByPaymentId?.get(payment.paymentId)]"/>
 
                 <if condition="!authOut.paymentGatewayResponse">
                     <set field="authFailed" from="true"/>
@@ -1108,25 +1113,9 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </iterate>
 
-            <!-- if we authorized all set order to approved; don't use mantle.order.OrderServices.approve#Order service,
-                meant for manual approval and requires permission -->
-            <if condition="totalAuthorized &gt;= orderHeader.grandTotal">
-                <!-- run approval checks, don't approve if any warnings or if order has been previously approved -->
-                <service-call name="mantle.order.OrderInfoServices.check#OrderPreApprove" in-map="[orderId:orderId]" out-map="checkOut"/>
-                <entity-find entity-name="moqui.entity.EntityAuditLog" list="statusHistoryList">
-                    <econdition field-name="changedEntityName" value="mantle.order.OrderHeader"/>
-                    <econdition field-name="changedFieldName" value="statusId"/>
-                    <econdition field-name="pkPrimaryValue" from="orderId"/>
-                    <econdition field-name="newValueText" value="OrderApproved"/>
-                    <select-field field-name="auditHistorySeqId"/>
-                </entity-find>
-
-                <if condition="!checkOut.approveWarnings &amp;&amp; !statusHistoryList"><then>
-                    <service-call name="mantle.order.OrderServices.update#OrderStatus" in-map="[orderId:orderId, statusId:'OrderApproved']"/>
-                </then><else>
-                    <log message="Not auto-approving Order ${orderId} status history: ${statusHistoryList*.auditHistorySeqId}, warnings: ${checkOut.approveWarnings}"/>
-                </else></if>
-            </if>
+            <!-- try order auto-approve (called explicitly here is order is in Placed status, otherwise called by SECA on status change to OrderPlaced -->
+            <if condition="orderHeader.statusId == 'OrderPlaced' &amp;&amp; totalAuthorized &gt;= orderHeader.grandTotal">
+                <service-call name="mantle.order.OrderServices.autoApprove#Order" in-map="[orderId:orderId]"/></if>
         </actions>
     </service>
     <service verb="authorize" noun="StorePayment">

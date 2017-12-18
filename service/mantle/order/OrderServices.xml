@@ -731,6 +731,50 @@ General Order Placement and eCommerce Usage
         </actions>
     </service>
 
+    <service verb="autoApprove" noun="Order">
+        <description>
+            If order is in Placed status and has sufficient Authorized, Delivered, or Confirmed payments for the grandTotal
+            and hasn't been in Approved status before, and there are no pre-approve warnings from OrderInfoServices.check#OrderPreApprove
+            then change the order status to Approved.
+
+            This is called by SECA rule on OrderHeader change to OrderPlaced status, and directly in PaymentServices.authorize#OrderPayments.
+        </description>
+        <in-parameters><parameter name="orderId" required="true"/></in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+            <if condition="orderHeader == null"><return error="true" message="Order ${orderId} not found"/></if>
+            <if condition="orderHeader.statusId != 'OrderPlaced'"><return/></if>
+
+            <set field="totalAuthorized" from="0.0"/>
+            <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="statusId" operator="in" from="['PmntAuthorized', 'PmntDelivered', 'PmntConfirmed']"/>
+            </entity-find>
+            <set field="totalAuthorized" from="0.0"/>
+            <iterate list="paymentList" entry="payment"><set field="totalAuthorized" from="totalAuthorized + (payment.amount ?: 0.0)"/></iterate>
+
+            <!-- if we authorized all set order to approved; don't use mantle.order.OrderServices.approve#Order service,
+                meant for manual approval and requires permission -->
+            <if condition="totalAuthorized &gt;= orderHeader.grandTotal">
+                <!-- run approval checks, don't approve if any warnings or if order has been previously approved -->
+                <service-call name="mantle.order.OrderInfoServices.check#OrderPreApprove" in-map="[orderId:orderId]" out-map="checkOut"/>
+                <!-- if has been Approved before don't auto-approve -->
+                <entity-find entity-name="moqui.entity.EntityAuditLog" list="statusHistoryList">
+                    <econdition field-name="changedEntityName" value="mantle.order.OrderHeader"/>
+                    <econdition field-name="changedFieldName" value="statusId"/>
+                    <econdition field-name="pkPrimaryValue" from="orderId"/>
+                    <econdition field-name="newValueText" value="OrderApproved"/>
+                    <select-field field-name="auditHistorySeqId"/>
+                </entity-find>
+
+                <if condition="!checkOut.approveWarnings &amp;&amp; !statusHistoryList"><then>
+                    <service-call name="mantle.order.OrderServices.update#OrderStatus" in-map="[orderId:orderId, statusId:'OrderApproved']"/>
+                </then><else>
+                    <log message="Not auto-approving Order ${orderId} status history: ${statusHistoryList*.auditHistorySeqId}, warnings: ${checkOut.approveWarnings}"/>
+                </else></if>
+            </if>
+        </actions>
+    </service>
     <service verb="checkComplete" noun="OrderPart">
         <description>Checks to see if all items in the order part have been shipped and/or digitally (including
             subscription) fulfilled, and if so complete the order part. Also checks for receipt of purchase order items.</description>
