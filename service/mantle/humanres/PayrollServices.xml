@@ -407,6 +407,58 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="partyRelationshipId"/><econdition field-name="timePeriodId"/></entity-find>
             <if condition="existingPayHistoryList"><return message="Employment pay already processed for employment ${partyRelationshipId}, time period ${timePeriodId}"/></if>
 
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="[timePeriodId:timePeriodId]" out-map="periodInfo"/>
+            <set field="fromTimestamp" from="periodInfo.fromTimestamp"/>
+            <set field="thruTimestamp" from="periodInfo.thruTimestamp"/>
+
+            <!-- Gather uninvoiced time entries -->
+            <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
+                <econdition field-name="partyId" from="employment.fromPartyId"/>
+                <econdition field-name="clientPartyId" from="employment.toPartyId"/>
+                <econdition field-name="invoiceId" operator="is-null"/>
+                <econdition field-name="vendorInvoiceId" operator="is-null"/>
+                <!--<econdition field-name="fromDate" operator="greater-equals" from="fromTimestamp"/>-->
+                <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
+            </entity-find>
+
+            <iterate list="timeEntryList" entry="timeEntry">
+                <!-- If the rates are defined by a rate amount ID, but the rate is not set, set it on the time entry. -->
+                <set field="updated" from="false" type="Boolean"/>
+                <if condition="timeEntry.clientHourRate == null &amp;&amp; timeEntry.rateAmountId != null">
+                    <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="clientHourRateMap" cache="true">
+                        <field-map field-name="rateAmountId" from="timeEntry.rateAmountId"/>
+                    </entity-find-one>
+                    <set field="timeEntry.clientHourRate" from="clientHourRateMap?.rateAmount"/>
+                    <set field="updated" from="true" type="Boolean"/>
+                </if>
+                <if condition="timeEntry.clientPieceRate == null &amp;&amp; timeEntry.pieceRateAmountId != null">
+                    <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="clientPieceRateMap" cache="true">
+                        <field-map field-name="rateAmountId" from="timeEntry.pieceRateAmountId"/>
+                    </entity-find-one>
+                    <set field="timeEntry.clientPieceRate" from="clientPieceRateMap?.rateAmount"/>
+                    <set field="updated" from="true" type="Boolean"/>
+                </if>
+                <if condition="timeEntry.vendorHourRate == null &amp;&amp; timeEntry.vendorRateAmountId != null">
+                    <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="vendorHourRateMap" cache="true">
+                        <field-map field-name="rateAmountId" from="timeEntry.vendorRateAmountId"/>
+                    </entity-find-one>
+                    <set field="timeEntry.vendorHourRate" from="vendorHourRateMap?.rateAmount"/>
+                    <set field="updated" from="true" type="Boolean"/>
+                </if>
+                <if condition="timeEntry.vendorPieceRate == null &amp;&amp; timeEntry.vendorPieceRateAmountId != null">
+                    <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="vendorPieceRateMap" cache="true">
+                        <field-map field-name="rateAmountId" from="timeEntry.vendorPieceRateAmountId"/>
+                    </entity-find-one>
+                    <set field="timeEntry.vendorPieceRate" from="vendorPieceRateMap?.rateAmount"/>
+                    <set field="updated" from="true" type="Boolean"/>
+                </if>
+
+                <if condition="updated">
+                    <entity-update value-field="timeEntry"/><!-- do direct update, was selected with for-update -->
+                </if>
+            </iterate>
+
             <!-- get the pay detail data; note that this sets default payDate if not passed in -->
             <service-call name="mantle.humanres.PayrollServices.get#EmploymentPayDetail" in-map="context" out-map="context"/>
             <if condition="!payAmount"><return message="Employee has no pay for employment ${partyRelationshipId}, time period ${timePeriodId}"/></if>
@@ -467,6 +519,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- set TimeEntry.vendorInvoiceId on all in timeEntryList -->
             <iterate list="timeEntryList" entry="timeEntry">
                 <set field="timeEntry.vendorInvoiceId" from="invoiceId"/>
+
                 <entity-update value-field="timeEntry"/><!-- do direct update, was selected with for-update -->
             </iterate>
         </actions>
@@ -476,7 +529,8 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="get" noun="EmploymentPayAmount">
         <in-parameters>
-            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="partyRelationshipId"/> <!-- partyRelationshipId or employment is required -->
+            <parameter name="employment" type="Map"/>
             <parameter name="timePeriodId" required="true"/>
         </in-parameters>
         <out-parameters>
@@ -493,7 +547,15 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="thruTimestamp" type="Timestamp"/>
         </out-parameters>
         <actions>
-            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <if condition="!employment"><then>
+                <if condition="partyRelationshipId"><then>
+                    <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+                </then><else>
+                    <return error="true" message="partyRelationshipId or employment is required."/>
+                </else></if>
+            </then><else>
+                <set field="partyRelationshipId" from="employment.partyRelationshipId"/>
+            </else></if>
             <entity-find-one entity-name="mantle.humanres.employment.Employee" value-field="employee">
                 <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
             <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
@@ -594,7 +656,8 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="get" noun="EmploymentPayDetail">
         <in-parameters>
-            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="partyRelationshipId"/> <!-- partyRelationshipId or employment is required -->
+            <parameter name="employment" type="Map"/>
             <parameter name="timePeriodId" required="true"/>
             <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
         </in-parameters>
@@ -1164,7 +1227,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="amount" from="amount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                 <!-- <log message="=== pre-exemption amount=${amount}"/> -->
 
-                <set field="adjustmentApplies" from="true"/>
+                <if condition="amount != 0">
+                    <set field="adjustmentApplies" from="true"/>
+                </if>
             </if>
 
             <!-- Find applicable PayrollAllowance Exemptions, multiply by (taxFederalAllowances or taxStateAllowances)
