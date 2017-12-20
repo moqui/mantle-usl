@@ -1714,6 +1714,83 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <!-- ========== Invoice Notification Services ========== -->
+
+    <service verb="send" noun="InvoiceStoreEmail" authenticate="anonymous-view">
+        <description>
+            Send an email for Finalized receivable invoices.
+
+            Called by SECA rule in AccountingInvoice.secas.xml on tx-commit so always run async from triggering thread.
+        </description>
+        <in-parameters>
+            <parameter name="invoiceId" required="true"/>
+            <parameter name="emailTypeEnumId" required="true"/>
+            <parameter name="toAddresses"><text-email/></parameter>
+            <parameter name="usePrimaryIfNoBillingEmail" type="Boolean" default="false"/>
+            <parameter name="setFinalizedInvoiceSent" type="Boolean" default="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
+                <econdition field-name="invoiceId"/><order-by field-name="invoiceItemSeqId"/></entity-find>
+            <set field="orderIdSet" from="new TreeSet(orderItemBillingList*.orderId)"/>
+            <if condition="!orderIdSet"><return/></if>
+
+            <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList">
+                <econdition field-name="orderId" operator="in" from="orderIdSet"/></entity-find>
+            <set field="productStoreIdSet" from="new HashSet(orderHeaderList*.productStoreId)"/>
+            <script>productStoreIdSet.remove(null)</script>
+            <if condition="!productStoreIdSet"><return/></if>
+
+            <entity-find entity-name="mantle.product.store.ProductStoreEmail" list="storeEmailList">
+                <date-filter/><econdition field-name="productStoreId" operator="in" from="productStoreIdSet"/>
+                <econdition field-name="emailTypeEnumId"/>
+            </entity-find>
+            <if condition="storeEmailList">
+                <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+                <set field="toPartyId" from="invoice.toPartyId"/>
+
+                <!-- get to party email address -->
+                <if condition="!toAddresses">
+                    <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="emailInfo"
+                            in-map="[partyId:toPartyId, emailContactMechPurposeId:'EmailBilling', defaultToPrimaryPurpose:usePrimaryIfNoBillingEmail]"/>
+                    <set field="toAddresses" from="emailInfo.emailAddress"/>
+                    <!-- get to party userId for toUserId -->
+                    <entity-find entity-name="moqui.security.UserAccount" list="userAccountList" limit="1">
+                        <econdition field-name="partyId" from="toPartyId"/></entity-find>
+                    <if condition="userAccountList"><set field="toUserId" from="userAccountList[0].userId"/></if>
+                </if>
+                <if condition="!toAddresses"><return/></if>
+
+                <!-- send email for each configured -->
+                <iterate list="storeEmailList" entry="storeEmail">
+                    <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore">
+                        <field-map field-name="productStoreId" from="storeEmail.productStoreId"/></entity-find-one>
+                    <!-- simple bodyParameters, let the screen do data prep -->
+                    <set field="bodyParameters" from="[invoiceId:invoiceId, orderIdSet:orderIdSet,
+                        storeDomain:productStore.storeDomain, profileUrlPath:productStore.profileUrlPath,
+                        headerImagePath:storeEmail.headerImagePath, detailLinkPath:storeEmail.detailLinkPath]"/>
+
+                    <if condition="!storeEmail.emailTemplateId"><continue/></if>
+                    <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="false"
+                            in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId,
+                                toAddresses:toAddresses, bodyParameters:bodyParameters, toUserId:toUserId]"/>
+                    <if condition="sendOut.emailMessageId">
+                        <script><![CDATA[
+                            ec.service.sync().name("create#mantle.account.invoice.InvoiceEmailMessage")
+                                .parameter("invoiceId", invoiceId).parameter("emailMessageId", sendOut.emailMessageId).disableAuthz().call()
+                            if (setFinalizedInvoiceSent && invoice.statusId == 'InvoiceFinalized') {
+                                ec.service.sync().name("update#mantle.account.invoice.Invoice")
+                                    .parameter("invoiceId", invoiceId).parameter("statusId", "InvoiceSent").disableAuthz().call()
+                            }
+                        ]]></script>
+                    </if>
+                    <message>Email sent to ${toAddresses}${sendOut.emailMessageId ? ', message ID ' + sendOut.emailMessageId : ''}</message>
+                </iterate>
+            </if>
+        </actions>
+    </service>
+
+
     <!-- ============================================== -->
     <!-- ========== Invoice Content Services ========== -->
     <!-- ============================================== -->
