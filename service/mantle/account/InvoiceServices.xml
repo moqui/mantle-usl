@@ -263,6 +263,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="toParty" type="Map"/>
             <parameter name="toContactInfo" type="Map"><description>From the mantle.party.ContactServices.get#PartyContactInfo service.</description></parameter>
             <parameter name="toBillingRep" type="Map"/>
+
+            <parameter name="finalizedStatusHistoryList" type="List"><parameter name="entityAuditLog" type="Map"/></parameter>
         </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
@@ -353,6 +355,15 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toBillingRep">
                 <field-map field-name="partyId" from="toBillingRelList?.first?.fromPartyId"/></entity-find-one>
+
+            <!-- get Finalized status history -->
+            <entity-find entity-name="moqui.entity.EntityAuditLog" list="finalizedStatusHistoryList">
+                <econdition field-name="changedEntityName" value="mantle.account.invoice.Invoice"/>
+                <econdition field-name="changedFieldName" value="statusId"/>
+                <econdition field-name="pkPrimaryValue" from="invoiceId"/>
+                <econdition field-name="newValueText" value="InvoiceFinalized"/>
+                <order-by field-name="-changedDate"/>
+            </entity-find>
         </actions>
     </service>
     <service verb="get" noun="ReceivableStatementInfo">
@@ -1718,15 +1729,17 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="send" noun="InvoiceStoreEmail" authenticate="anonymous-view">
         <description>
-            Send an email for Finalized receivable invoices.
+            Send an email for Finalized receivable invoices. By default sends to all EmailBilling email addresses, if
+            alsoPrimaryEmails true also include EmailPrimary addresses.
 
-            Called by SECA rule in AccountingInvoice.secas.xml on tx-commit so always run async from triggering thread.
+            Called by SECA rule in AccountingInvoice.secas.xml on tx-commit so runs async from triggering thread.
+            May also be called directly with toAddresses specified to send to other email address.
         </description>
         <in-parameters>
             <parameter name="invoiceId" required="true"/>
             <parameter name="emailTypeEnumId" required="true"/>
             <parameter name="toAddresses"><text-email/></parameter>
-            <parameter name="usePrimaryIfNoBillingEmail" type="Boolean" default="false"/>
+            <parameter name="alsoPrimaryEmails" type="Boolean" default="false"/>
             <parameter name="setFinalizedInvoiceSent" type="Boolean" default="true"/>
         </in-parameters>
         <actions>
@@ -1749,17 +1762,18 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
                 <set field="toPartyId" from="invoice.toPartyId"/>
 
+                <if condition="toAddresses"><set field="toAddressesList" from="[toAddresses]"/></if>
                 <!-- get to party email address -->
-                <if condition="!toAddresses">
-                    <service-call name="mantle.party.ContactServices.get#PartyContactInfo" out-map="emailInfo"
-                            in-map="[partyId:toPartyId, emailContactMechPurposeId:'EmailBilling', defaultToPrimaryPurpose:usePrimaryIfNoBillingEmail]"/>
-                    <set field="toAddresses" from="emailInfo.emailAddress"/>
+                <if condition="!toAddressesList">
+                    <service-call name="mantle.party.ContactServices.get#PartyContactInfoList" out-map="emailInfo"
+                            in-map="[partyId:toPartyId, emailContactMechPurposeId:'EmailBilling', alsoIncludePrimaryPurpose:alsoPrimaryEmails]"/>
+                    <set field="toAddressesList" from="emailInfo.emailAddressList*.emailAddress"/>
                     <!-- get to party userId for toUserId -->
                     <entity-find entity-name="moqui.security.UserAccount" list="userAccountList" limit="1">
                         <econdition field-name="partyId" from="toPartyId"/></entity-find>
                     <if condition="userAccountList"><set field="toUserId" from="userAccountList[0].userId"/></if>
                 </if>
-                <if condition="!toAddresses"><return/></if>
+                <if condition="!toAddressesList"><return/></if>
 
                 <!-- send email for each configured -->
                 <iterate list="storeEmailList" entry="storeEmail">
@@ -1769,22 +1783,24 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="bodyParameters" from="[invoiceId:invoiceId, orderIdSet:orderIdSet,
                         storeDomain:productStore.storeDomain, profileUrlPath:productStore.profileUrlPath,
                         headerImagePath:storeEmail.headerImagePath, detailLinkPath:storeEmail.detailLinkPath]"/>
-
                     <if condition="!storeEmail.emailTemplateId"><continue/></if>
-                    <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="false"
-                            in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId,
-                                toAddresses:toAddresses, bodyParameters:bodyParameters, toUserId:toUserId]"/>
-                    <if condition="sendOut.emailMessageId">
-                        <script><![CDATA[
+
+                    <iterate list="toAddressesList" entry="toAddressesCur">
+                        <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="false"
+                                in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId,
+                                toAddresses:toAddressesCur, bodyParameters:bodyParameters, toUserId:toUserId]"/>
+                        <if condition="sendOut.emailMessageId"><script><![CDATA[
                             ec.service.sync().name("create#mantle.account.invoice.InvoiceEmailMessage")
                                 .parameter("invoiceId", invoiceId).parameter("emailMessageId", sendOut.emailMessageId).disableAuthz().call()
                             if (setFinalizedInvoiceSent && invoice.statusId == 'InvoiceFinalized') {
                                 ec.service.sync().name("update#mantle.account.invoice.Invoice")
                                     .parameter("invoiceId", invoiceId).parameter("statusId", "InvoiceSent").disableAuthz().call()
+                                // only try to change status once
+                                setFinalizedInvoiceSent = false
                             }
-                        ]]></script>
-                    </if>
-                    <message>Email sent to ${toAddresses}${sendOut.emailMessageId ? ', message ID ' + sendOut.emailMessageId : ''}</message>
+                        ]]></script></if>
+                        <message>Email sent to ${toAddressesCur}${sendOut.emailMessageId ? ', message ID ' + sendOut.emailMessageId : ''}</message>
+                    </iterate>
                 </iterate>
             </if>
         </actions>
