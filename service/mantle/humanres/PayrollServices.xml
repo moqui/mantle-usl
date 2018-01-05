@@ -57,6 +57,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <message error="true">Not processing pay for period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, already closed.</message></if>
             <if condition="ec.user.nowTimestamp.before(timePeriod.thruDate)">
                 <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, period has not ended (ends on ${timePeriod.thruDate}).</message></if>
+            <check-errors/>
+
+            <!-- TODO: make sure there are no earlier periods open (by partyId, timePeriodTypeId, isClosed != 'Y') -->
 
             <!-- get all relevant employments -->
             <service-call name="mantle.humanres.PayrollServices.get#TimePeriodEmployments" in-map="context" out-map="context"/>
@@ -68,7 +71,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="totalNetPayAmount" from="0"/>
             <set field="totalAmountByPayrollAdjustmentId" from="[:]"/>
             <set field="adjustmentsByTaxAuthorityId" from="[:]"/>
-            <set field="garnishAdjustmentListByPartyId" from="[:]"/>
+            <set field="payeeAdjustmentListByPartyId" from="[:]"/>
             <iterate list="employmentList" entry="employment">
                 <service-call name="mantle.humanres.PayrollServices.process#EmploymentPay" out-map="payOut" out-map-add-to-existing="false"
                         in-map="[partyRelationshipId:employment.partyRelationshipId, timePeriodId:timePeriodId]"/>
@@ -87,22 +90,21 @@ along with this software (see the LICENSE.md file). If not, see
                     <script>addToBigDecimalInMap(payrollAdjustmentId, adjAmount, totalAmountByPayrollAdjustmentId)</script>
                 </iterate>
                 <iterate list="payOut.adjustmentList" entry="adjustment">
-                    <!-- collect data about tax liability for invoice -->
-                    <if condition="adjustment.taxAuthorityId">
+                    <if condition="adjustment.taxAuthorityId"><then>
+                        <!-- collect data about tax liability for invoice -->
                         <script>addToListInMap(adjustment.taxAuthorityId, adjustment, adjustmentsByTaxAuthorityId)</script>
-                    </if>
-                    <!-- pull out adjustments with garnishPartyId, add to garnishAdjustmentListByPartyId -->
-                    <if condition="adjustment.garnishPartyId">
+                    </then><else-if condition="adjustment.payeePartyId">
+                        <!-- pull out adjustments with payeePartyId, add to payeeAdjustmentListByPartyId -->
                         <set field="adjustment.fromPartyId" from="employment.fromPartyId"/>
-                        <script>addToListInMap(adjustment.garnishPartyId, adjustment, garnishAdjustmentListByPartyId)</script>
-                    </if>
+                        <script>addToListInMap(adjustment.payeePartyId, adjustment, payeeAdjustmentListByPartyId)</script>
+                    </else-if></if>
                 </iterate>
             </iterate>
 
             <!-- create tax liability invoices (from tax authority to employer) as applicable -->
             <iterate list="adjustmentsByTaxAuthorityId" entry="adjustmentList" key="taxAuthorityId">
                 <entity-find-one entity-name="mantle.other.tax.TaxAuthority" value-field="taxAuthority">
-                    <field-map field-name="taxAuthorityId" from="adjustment.taxAuthorityId"/></entity-find-one>
+                    <field-map field-name="taxAuthorityId"/></entity-find-one>
 
                 <!-- create Invoice -->
                 <service-call name="create#mantle.account.invoice.Invoice" out-map="invoiceOut" out-map-add-to-existing="false"
@@ -141,44 +143,46 @@ along with this software (see the LICENSE.md file). If not, see
                 </iterate>
             </iterate>
 
-            <!-- create garnishment payable invoices -->
-            <iterate list="garnishAdjustmentListByPartyId" entry="garnishAdjustmentList" key="garnishPartyId">
-                <!-- calc dueDate with lowest garnishDueDays -->
-                <set field="garnishDueDays" from="14L"/>
-                <iterate list="garnishAdjustmentList" entry="garnishAdjustment">
-                    <if condition="garnishAdjustment.garnishDueDays">
-                        <if condition="garnishAdjustment.garnishDueDays &lt; garnishDueDays">
-                            <set field="garnishDueDays" from="garnishAdjustment.garnishDueDays"/></if>
+            <!-- create other payee payable invoices -->
+            <iterate list="payeeAdjustmentListByPartyId" entry="payeeAdjustmentList" key="payeePartyId">
+                <set field="isGarnish" from="false"/>
+                <set field="payeeDueDays" from="14L"/>
+                <iterate list="payeeAdjustmentList" entry="payeeAdjustment">
+                    <!-- calc dueDate with lowest payeeDueDays -->
+                    <if condition="payeeAdjustment.payeeDueDays">
+                        <if condition="payeeAdjustment.payeeDueDays &lt; payeeDueDays">
+                            <set field="payeeDueDays" from="payeeAdjustment.payeeDueDays"/></if>
                     </if>
+                    <if condition="payeeAdjustment.payrollPhaseEnumId == 'PrphGarnish'"><set field="isGarnish" from="true"/></if>
                 </iterate>
                 <script>
                     Calendar dueDateCal = ec.user.getCalendarSafe()
                     dueDateCal.setTime(payDate)
-                    dueDateCal.add(Calendar.DAY_OF_MONTH, garnishDueDays as int)
+                    dueDateCal.add(Calendar.DAY_OF_MONTH, payeeDueDays as int)
                     dueDate = new java.sql.Timestamp(dueDateCal.getTimeInMillis())
                 </script>
 
                 <!-- create the invoice -->
                 <service-call name="create#mantle.account.invoice.Invoice" out-map="invoiceOut" out-map-add-to-existing="false"
-                        in-map="[invoiceTypeEnumId:'InvoiceGarnishment', fromPartyId:garnishPartyId,
+                        in-map="[invoiceTypeEnumId:(isGarnish ? 'InvoiceGarnishment' : 'InvoicePayrollOther'), fromPartyId:payeePartyId,
                             toPartyId:timePeriod.partyId, statusId:'InvoiceReceived', invoiceDate:payDate, dueDate:dueDate,
                             currencyUomId:currencyUomId, timePeriodId:timePeriodId]"/>
-                <set field="garnishInvoiceId" from="invoiceOut.invoiceId"/>
-                <!-- create the invoice items, one for each garnishAdjustment -->
-                <iterate list="garnishAdjustmentList" entry="garnishAdjustment">
+                <set field="payeeInvoiceId" from="invoiceOut.invoiceId"/>
+                <!-- create the invoice items, one for each payeeAdjustment -->
+                <iterate list="payeeAdjustmentList" entry="payeeAdjustment">
                     <!-- make description, lookup PartyDetail, SSN PartyIdentification -->
                     <entity-find-one entity-name="mantle.party.PartyDetail" value-field="partyDetail">
-                        <field-map field-name="partyId" from="garnishAdjustment.fromPartyId"/></entity-find-one>
+                        <field-map field-name="partyId" from="payeeAdjustment.fromPartyId"/></entity-find-one>
                     <entity-find-one entity-name="mantle.party.PartyIdentification" value-field="partySsn">
-                        <field-map field-name="partyId" from="garnishAdjustment.fromPartyId"/>
+                        <field-map field-name="partyId" from="payeeAdjustment.fromPartyId"/>
                         <field-map field-name="partyIdTypeEnumId" value="PtidSsn"/>
                     </entity-find-one>
-                    <set field="description" value="${garnishAdjustment.description} for ${partyDetail.firstName?:''} ${partyDetail.lastName?:''}${partyDetail.organizationName?:''} SSN ${partySsn?.idValue ?: 'N/A'} Case ${garnishAdjustment.garnishCaseNumber ?: 'N/A'}"/>
+                    <set field="description" value="${payeeAdjustment.description} for ${partyDetail.firstName?:''} ${partyDetail.lastName?:''}${partyDetail.organizationName?:''} SSN ${partySsn?.idValue ?: 'N/A'} Ref ${payeeAdjustment.payeeReference ?: 'N/A'}"/>
 
                     <service-call name="create#mantle.account.invoice.InvoiceItem"
-                            in-map="[invoiceId:garnishInvoiceId, itemTypeEnumId:garnishAdjustment.itemTypeEnumId,
-                                amount:-garnishAdjustment.amount, quantity:garnishAdjustment.quantity, description:description,
-                                payrollAdjustmentId:garnishAdjustment.payrollAdjustmentId]"/>
+                            in-map="[invoiceId:payeeInvoiceId, itemTypeEnumId:payeeAdjustment.itemTypeEnumId,
+                                amount:-payeeAdjustment.amount, quantity:payeeAdjustment.quantity, description:description,
+                                payrollAdjustmentId:payeeAdjustment.payrollAdjustmentId]"/>
                 </iterate>
             </iterate>
 
@@ -189,6 +193,85 @@ along with this software (see the LICENSE.md file). If not, see
             <message>Processed pay for period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}: ${employmentList.size()} employees, gross pay total: ${totalPayAmount}, net pay total: ${totalNetPayAmount}</message>
         </actions>
     </service>
+    <service verb="reopen" noun="PayrollPeriod">
+        <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod" for-update="true"/>
+            <if condition="timePeriod.isClosed != 'Y'">
+                <return message="Period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)} is not closed"/></if>
+
+            <!-- make sure no invoices are Approved (or later status) -->
+            <entity-find-count entity-name="mantle.account.invoice.Invoice" count-field="approvedCount">
+                <econdition field-name="timePeriodId"/>
+                <econdition field-name="statusId" operator="in" value="InvoiceApproved,InvoicePmtSent,InvoiceBilledThrough"/>
+            </entity-find-count>
+            <if condition="approvedCount &gt; 0"><return error="true" message="Found ${approvedCount} invoices in Approved or later status, cannot re-open period"/></if>
+
+            <!-- delete all EmploymentPayHistory and EmploymentPayDetail records -->
+            <entity-find entity-name="mantle.humanres.employment.EmploymentPayHistory" list="payHistoryList">
+                <econdition field-name="timePeriodId"/></entity-find>
+            <iterate list="payHistoryList" entry="payHistory">
+                <entity-delete-by-condition entity-name="mantle.humanres.employment.EmploymentPayDetail">
+                    <econdition field-name="partyRelationshipId" from="payHistory.partyRelationshipId"/>
+                    <econdition field-name="payDate" from="payHistory.payDate"/>
+                </entity-delete-by-condition>
+                <entity-delete value-field="payHistory"/>
+            </iterate>
+
+            <!-- delete all periods invoices (paycheck, payee, etc), setting vendorInvoiceId to null on TimeEntry records -->
+            <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceList">
+                <econdition field-name="timePeriodId"/></entity-find>
+            <set field="invoiceCount" from="0"/>
+            <iterate list="invoiceList" entry="invoice">
+                <!-- clear out all non-modified rate amounts on TimeEntry records -->
+                <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList">
+                    <econdition field-name="invoiceId" from="invoice.invoiceId"/></entity-find>
+                <iterate list="timeEntryList" entry="timeEntry">
+                    <if condition="timeEntry.hasModifiedRates != 'Y'">
+                        <set field="timeEntry.clientHourRate" from="null"/>
+                        <set field="timeEntry.vendorHourRate" from="null"/>
+                        <set field="timeEntry.clientPieceRate" from="null"/>
+                        <set field="timeEntry.vendorPieceRate" from="null"/>
+                    </if>
+                    <set field="timeEntry.invoiceId" from="null"/>
+                    <entity-update value-field="timeEntry"/>
+                </iterate>
+                <entity-find entity-name="mantle.work.time.TimeEntry" list="vendorTimeEntryList">
+                    <econdition field-name="vendorInvoiceId" from="invoice.invoiceId"/></entity-find>
+                <iterate list="vendorTimeEntryList" entry="timeEntry">
+                    <if condition="timeEntry.hasModifiedRates != 'Y'">
+                        <set field="timeEntry.clientHourRate" from="null"/>
+                        <set field="timeEntry.vendorHourRate" from="null"/>
+                        <set field="timeEntry.clientPieceRate" from="null"/>
+                        <set field="timeEntry.vendorPieceRate" from="null"/>
+                    </if>
+                    <set field="timeEntry.invoiceId" from="null"/>
+                    <entity-update value-field="timeEntry"/>
+                </iterate>
+
+                <!-- cancel if not already cancelled, clean up references on related records (including TimeEntry, though those cleaned up above) -->
+                <service-call name="mantle.account.InvoiceServices.cancel#Invoice" in-map="[invoiceId:invoice.invoiceId]"/>
+
+                <!-- to clean up unwanted invoices (like in a payroll trial run or mistaken run) delete instead of just cancelling -->
+                <!-- NOTE: could also delete AcctgTrans, after unposting, unless something manually done with a payroll invoice shouldn't be needed -->
+                <entity-delete-by-condition entity-name="mantle.account.payment.PaymentApplication">
+                    <econdition field-name="invoiceId" from="invoice.invoiceId"/></entity-delete-by-condition>
+                <entity-delete-by-condition entity-name="mantle.account.invoice.InvoiceItem">
+                    <econdition field-name="invoiceId" from="invoice.invoiceId"/></entity-delete-by-condition>
+                <entity-delete-by-condition entity-name="mantle.account.invoice.Invoice">
+                    <econdition field-name="invoiceId" from="invoice.invoiceId"/></entity-delete-by-condition>
+
+                <set field="invoiceCount" from="invoiceCount + 1"/>
+            </iterate>
+
+            <!-- un-close the TimePeriod -->
+            <set field="timePeriod.isClosed" value="N"/>
+            <entity-update value-field="timePeriod"/>
+
+            <message>Re-opened period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, deleted ${invoiceCount} payroll invoices</message>
+        </actions>
+    </service>
+
     <service verb="approve" noun="PeriodInvoices">
         <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
         <actions>
@@ -206,10 +289,10 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="create" noun="PeriodPayments">
         <in-parameters>
             <parameter name="timePeriodId" required="true"/>
+            <parameter name="effectiveDate" type="Timestamp" required="true"/>
             <parameter name="statusId" default-value="PmntAuthorized"/>
             <parameter name="paymentInstrumentEnumId" default-value="PiCompanyCheck"/>
             <parameter name="paymentMethodId"/>
-            <parameter name="effectiveDate" type="Timestamp" default="ec.user.nowTimestamp"/>
         </in-parameters>
         <actions>
             <!-- find the PmpPayroll purpose PaymentMethod -->
@@ -265,6 +348,62 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="set" noun="PeriodPaymentDates">
+        <in-parameters>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="effectiveDate" type="Timestamp" required="true"/>
+            <parameter name="overrideDates" type="Boolean" default="false"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                <econdition field-name="timePeriodId"/>
+                <econdition field-name="effectiveDate" operator="is-null" ignore="overrideDates"/>
+                <econdition field-name="statusId" operator="not-in" value="PmntDelivered,PmntConfirmed"/>
+            </entity-find>
+            <iterate list="paymentList" entry="payment">
+                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:payment.paymentId, effectiveDate:effectiveDate]"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="set" noun="PeriodPaymentRefNums">
+        <in-parameters>
+            <parameter name="timePeriodId" required="true"/>
+            <parameter name="paymentMethodId"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                <econdition field-name="timePeriodId"/>
+                <econdition field-name="paymentMethodId" ignore-if-empty="true"/>
+                <!-- NOTE: if this is opened to Promised and such at least exclude Delivered and Confirmed -->
+                <econdition field-name="statusId" value="PmntAuthorized"/>
+                <order-by field-name="paymentId"/>
+            </entity-find>
+            <iterate list="paymentList" entry="payment">
+                <service-call name="mantle.account.PaymentServices.assign#BankAccountCheckNumber" in-map="[paymentId:payment.paymentId]"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="authorize" noun="PeriodPayments">
+        <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                <econdition field-name="timePeriodId"/><econdition field-name="statusId" value="PmntPromised"/></entity-find>
+            <iterate list="paymentList" entry="payment">
+                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:payment.paymentId, statusId:'PmntAuthorized']"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="deliver" noun="PeriodPayments">
+        <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                <econdition field-name="timePeriodId"/><econdition field-name="statusId" value="PmntAuthorized"/></entity-find>
+            <iterate list="paymentList" entry="payment">
+                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:payment.paymentId, statusId:'PmntDelivered']"/>
+            </iterate>
+        </actions>
+    </service>
+
     <service verb="process" noun="EmploymentPay">
         <in-parameters>
             <parameter name="partyRelationshipId" required="true"/>
@@ -287,6 +426,58 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.humanres.employment.EmploymentPayHistory" list="existingPayHistoryList">
                 <econdition field-name="partyRelationshipId"/><econdition field-name="timePeriodId"/></entity-find>
             <if condition="existingPayHistoryList"><return message="Employment pay already processed for employment ${partyRelationshipId}, time period ${timePeriodId}"/></if>
+
+            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="[timePeriodId:timePeriodId]" out-map="periodInfo"/>
+            <set field="fromTimestamp" from="periodInfo.fromTimestamp"/>
+            <set field="thruTimestamp" from="periodInfo.thruTimestamp"/>
+
+            <!-- Gather uninvoiced time entries -->
+            <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
+                <econdition field-name="partyId" from="employment.fromPartyId"/>
+                <econdition field-name="clientPartyId" from="employment.toPartyId"/>
+                <econdition field-name="invoiceId" operator="is-null"/>
+                <econdition field-name="vendorInvoiceId" operator="is-null"/>
+                <!--<econdition field-name="fromDate" operator="greater-equals" from="fromTimestamp"/>-->
+                <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
+            </entity-find>
+
+            <iterate list="timeEntryList" entry="timeEntry">
+                <!-- If the rates are defined by a rate amount ID, but the rate is not set, set it on the time entry. -->
+                <set field="updated" from="false" type="Boolean"/>
+                <if condition="timeEntry.clientHourRate == null &amp;&amp; timeEntry.rateAmountId != null">
+                    <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="clientHourRateMap" cache="true">
+                        <field-map field-name="rateAmountId" from="timeEntry.rateAmountId"/>
+                    </entity-find-one>
+                    <set field="timeEntry.clientHourRate" from="clientHourRateMap?.rateAmount"/>
+                    <set field="updated" from="true" type="Boolean"/>
+                </if>
+                <if condition="timeEntry.clientPieceRate == null &amp;&amp; timeEntry.pieceRateAmountId != null">
+                    <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="clientPieceRateMap" cache="true">
+                        <field-map field-name="rateAmountId" from="timeEntry.pieceRateAmountId"/>
+                    </entity-find-one>
+                    <set field="timeEntry.clientPieceRate" from="clientPieceRateMap?.rateAmount"/>
+                    <set field="updated" from="true" type="Boolean"/>
+                </if>
+                <if condition="timeEntry.vendorHourRate == null &amp;&amp; timeEntry.vendorRateAmountId != null">
+                    <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="vendorHourRateMap" cache="true">
+                        <field-map field-name="rateAmountId" from="timeEntry.vendorRateAmountId"/>
+                    </entity-find-one>
+                    <set field="timeEntry.vendorHourRate" from="vendorHourRateMap?.rateAmount"/>
+                    <set field="updated" from="true" type="Boolean"/>
+                </if>
+                <if condition="timeEntry.vendorPieceRate == null &amp;&amp; timeEntry.vendorPieceRateAmountId != null">
+                    <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="vendorPieceRateMap" cache="true">
+                        <field-map field-name="rateAmountId" from="timeEntry.vendorPieceRateAmountId"/>
+                    </entity-find-one>
+                    <set field="timeEntry.vendorPieceRate" from="vendorPieceRateMap?.rateAmount"/>
+                    <set field="updated" from="true" type="Boolean"/>
+                </if>
+
+                <if condition="updated">
+                    <entity-update value-field="timeEntry"/><!-- do direct update, was selected with for-update -->
+                </if>
+            </iterate>
 
             <!-- get the pay detail data; note that this sets default payDate if not passed in -->
             <service-call name="mantle.humanres.PayrollServices.get#EmploymentPayDetail" in-map="context" out-map="context"/>
@@ -342,12 +533,13 @@ along with this software (see the LICENSE.md file). If not, see
                             payrollAdjustmentId:adjustment.payrollAdjustmentId, adjCalcServiceId:adjustment.adjCalcServiceId,
                             itemTypeEnumId:adjustment.itemTypeEnumId, quantity:adjustment.quantity, amount:adjustment.amount,
                             isEmployerPaid:adjustment.isEmployerPaid, taxAuthorityId:adjustment.taxAuthorityId,
-                            garnishPartyId:adjustment.garnishPartyId, garnishCaseNumber:adjustment.garnishCaseNumber]"/>
+                            payeePartyId:adjustment.payeePartyId, payeeReference:adjustment.payeeReference]"/>
             </iterate>
 
             <!-- set TimeEntry.vendorInvoiceId on all in timeEntryList -->
             <iterate list="timeEntryList" entry="timeEntry">
                 <set field="timeEntry.vendorInvoiceId" from="invoiceId"/>
+
                 <entity-update value-field="timeEntry"/><!-- do direct update, was selected with for-update -->
             </iterate>
         </actions>
@@ -357,7 +549,8 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="get" noun="EmploymentPayAmount">
         <in-parameters>
-            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="partyRelationshipId"/> <!-- partyRelationshipId or employment is required -->
+            <parameter name="employment" type="Map"/>
             <parameter name="timePeriodId" required="true"/>
         </in-parameters>
         <out-parameters>
@@ -374,7 +567,15 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="thruTimestamp" type="Timestamp"/>
         </out-parameters>
         <actions>
-            <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+            <if condition="!employment"><then>
+                <if condition="partyRelationshipId"><then>
+                    <entity-find-one entity-name="mantle.humanres.employment.EmploymentAndRelationship" value-field="employment"/>
+                </then><else>
+                    <return error="true" message="partyRelationshipId or employment is required."/>
+                </else></if>
+            </then><else>
+                <set field="partyRelationshipId" from="employment.partyRelationshipId"/>
+            </else></if>
             <entity-find-one entity-name="mantle.humanres.employment.Employee" value-field="employee">
                 <field-map field-name="partyId" from="employment.fromPartyId"/></entity-find-one>
             <entity-find-one entity-name="mantle.humanres.position.EmplPosition" value-field="emplPosition">
@@ -432,10 +633,13 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                 </if>
             </then><else>
+                <!-- Gather uninvoiced time entries -->
                 <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
                     <econdition field-name="partyId" from="employment.fromPartyId"/>
                     <econdition field-name="clientPartyId" from="employment.toPartyId"/>
-                    <econdition field-name="fromDate" operator="greater-equals" from="fromTimestamp"/>
+                    <econdition field-name="invoiceId" operator="is-null"/>
+                    <econdition field-name="vendorInvoiceId" operator="is-null"/>
+                    <!--<econdition field-name="fromDate" operator="greater-equals" from="fromTimestamp"/>-->
                     <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
                 </entity-find>
                 <iterate list="timeEntryList" entry="timeEntry">
@@ -472,7 +676,8 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="get" noun="EmploymentPayDetail">
         <in-parameters>
-            <parameter name="partyRelationshipId" required="true"/>
+            <parameter name="partyRelationshipId"/> <!-- partyRelationshipId or employment is required -->
+            <parameter name="employment" type="Map"/>
             <parameter name="timePeriodId" required="true"/>
             <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
         </in-parameters>
@@ -552,11 +757,57 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId" or-null="true"/>
             </entity-find>
 
+            <!-- Remove any adjustments that have been superseded by an exclusive by item type flag. -->
+            <set field="exclusiveEmploymentAdjustmentList" from="allPayrollAdjustmentList.findAll(
+                { (it.exclusiveByItemType == 'Y') &amp;&amp; it.partyRelationshipId != null })"/>
+            <set field="exclusiveEmploymentPrAdjItemTypes" from="exclusiveEmploymentAdjustmentList.itemTypeEnumId"/>
+            <set field="exclusiveEmployerAdjustmentList" from="allPayrollAdjustmentList.findAll(
+                { (it.exclusiveByItemType == 'Y') &amp;&amp; it.organizationPartyId != null &amp;&amp; it.partyRelationshipId == null })"/>
+            <set field="exclusiveEmployerPrAdjItemTypes" from="exclusiveEmployerAdjustmentList.itemTypeEnumId"/>
+
+            <set field="applicablePayrollAdjustmentList" from="[]"/>
+            <iterate list="allPayrollAdjustmentList" entry="prAdj">
+                <!-- Keep any adjustments that don't have an exclusive item type. -->
+                <if condition="prAdj.itemTypeEnumId in exclusiveEmploymentPrAdjItemTypes"><then>
+                    <!-- Exclude any that have an employment and are not exclusive. -->
+                    <if condition="prAdj.partyRelationshipId != null &amp;&amp; prAdj.exclusiveByItemType != 'Y'">
+                        <continue/>
+                    </if>
+                </then><else-if condition="prAdj.itemTypeEnumId in exclusiveEmployerPrAdjItemTypes">
+                    <!-- Keep any with an employment even if they are not exclusive. -->
+                    <if condition="prAdj.partyRelationshipId == null">
+                        <!-- Exclude any that have an organization and are not exclusive. -->
+                        <if condition="prAdj.organizationPartyId != null &amp;&amp; prAdj.exclusiveByItemType != 'Y'">
+                            <continue/>
+                        </if>
+                    </if>
+                </else-if></if>
+                <!-- Default, the adjustment needs to be attempted (it may still not apply; e.g. workers comp) -->
+                <script>applicablePayrollAdjustmentList.add(prAdj)</script>
+            </iterate>
+
             <!-- calculate adjustments and run other calculations by phase, including those with no phase after the other taxable/deductible phase -->
             <set field="phaseEnumIdList" from="['PrphBonus', 'PrphBreak', 'PrphOvertime', 'PrphDeductible', null, 'PrphTax', 'PrphGarnish', 'PrphExpenses']"/>
 
-            <set field="calcAdjParameters" from="[partyRelationshipId:partyRelationshipId, employment:employment, employee:employee,
-                    timePeriod:timePeriod, timeEntryList:timeEntryList, timePeriodTypeId:timePeriod.timePeriodTypeId,
+            <!-- Workers Comp is likely among the adjustments that will need calculated.  Collect meta data on
+                 the time entries as to which risk class applies to each time entry so it does not need to be
+                 repeatedly looked up -->
+            <set field="timeEntryRiskClassInfoList" from="[]"/>
+            <iterate list="timeEntryList" entry="timeEntry">
+                <service-call name="mantle.work.TimeServices.get#TimeEntryRiskClassInfo"
+                              in-map="[timeEntryId:timeEntry.timeEntryId, timeEntry:timeEntry,
+                                       employment:employment, employee:employee,
+                                       dftRiskClassEnumId:(timeEntryRiskClassInfoList ? timeEntryRiskClassInfoList[0].dftRiskClassEnumId : null),
+                                       dftRiskClassOverride:(timeEntryRiskClassInfoList ? timeEntryRiskClassInfoList[0].dftRiskClassOverride : null)]"
+                              out-map="rcInfo" out-map-add-to-existing="false"/>
+                <script>timeEntryRiskClassInfoList.add(rcInfo)</script>
+            </iterate>
+            
+            <set field="calcAdjParameters" from="[
+                    partyRelationshipId:partyRelationshipId, employment:employment, employee:employee,
+                    timePeriod:timePeriod, timeEntryList:timeEntryList,
+                    timeEntryRiskClassInfoList:timeEntryRiskClassInfoList,
+                    timePeriodTypeId:timePeriod.timePeriodTypeId,
                     payTimestamp:payTimestamp, payAmount:payAmount, homePostalAddress:homePostalAddress]"/>
 
             <iterate list="phaseEnumIdList" entry="payrollPhaseEnumId">
@@ -576,7 +827,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
                 -->
 
-                <set field="phaseAdjList" from="allPayrollAdjustmentList.findAll({ it.payrollPhaseEnumId == payrollPhaseEnumId })"/>
+                <set field="phaseAdjList" from="applicablePayrollAdjustmentList.findAll({ it.payrollPhaseEnumId == payrollPhaseEnumId })"/>
                 <iterate list="phaseAdjList" entry="payrollAdjustment">
                     <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut" out-map-add-to-existing="false"
                             in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
@@ -655,7 +906,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="disposableRemaining" from="disposablePayAmount"/>
             <order-map-list list="adjustmentList"><order-by field-name="garnishPriority"/></order-map-list>
             <iterate list="adjustmentList" entry="adjustment">
-                <if condition="!adjustment.garnishPartyId"><continue/></if>
+                <if condition="adjustment.payrollPhaseEnumId != 'PrphGarnish'"><continue/></if>
 
                 <if condition="adjustment.garnishDisposablePercent">
                     <then><set field="garnishDisposableRatio" from="adjustment.garnishDisposablePercent / 100"/></then>
@@ -709,6 +960,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="payrollPhaseEnumId"/>
             <parameter name="timePeriod" type="Map"/>
             <parameter name="timeEntryList" type="List"/>
+            <parameter name="timeEntryRiskClassInfoList" type="List"/>
             <parameter name="timePeriodTypeId" required="true"/>
             <parameter name="payTimestamp" type="Timestamp"/>
 
@@ -744,12 +996,13 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="allowanceDeductionAmount" type="BigDecimal"/>
             <parameter name="allowanceExemptionAmount" type="BigDecimal"/>
             <parameter name="taxAuthorityId"/>
+            <!-- payee specific -->
+            <parameter name="payeePartyId"/>
+            <parameter name="payeeDueDays" type="Long"/>
+            <parameter name="payeeReference"/>
             <!-- garnishment specific -->
-            <parameter name="garnishPartyId"/>
             <parameter name="garnishDisposablePercent" type="BigDecimal"/>
             <parameter name="garnishPriority" type="Long"/>
-            <parameter name="garnishDueDays" type="Long"/>
-            <parameter name="garnishCaseNumber"/>
             <parameter name="deductFromDisposable"/>
         </out-parameters>
     </service>
@@ -775,12 +1028,12 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="itemTypeEnumId" from="payrollAdjustment.itemTypeEnumId"/>
             <set field="description" from="payrollAdjustment.description"/>
             <set field="taxAuthorityId" from="payrollAdjustment.taxAuthorityId"/>
-            <set field="garnishPartyId" from="payrollAdjustment.garnishPartyId"/>
+            <set field="payeePartyId" from="payrollAdjustment.payeePartyId"/>
+            <set field="payeeDueDays" from="payrollAdjustment.payeeDueDays"/>
+            <set field="payeeReference" from="payrollAdjustment.payeeReference"/>
             <set field="garnishDisposablePercent" from="payrollAdjustment.garnishDisposablePercent"/>
             <set field="garnishMinWageApplies" from="payrollAdjustment.garnishMinWageApplies"/>
             <set field="garnishPriority" from="payrollAdjustment.garnishPriority"/>
-            <set field="garnishDueDays" from="payrollAdjustment.garnishDueDays"/>
-            <set field="garnishCaseNumber" from="payrollAdjustment.garnishCaseNumber"/>
             <set field="deductFromDisposable" from="payrollAdjustment.deductFromDisposable"/>
 
             <if condition="employment == null">
@@ -811,13 +1064,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="adjustmentBasisAmount" from="medicalTaxablePayAmount"/>
                 <set field="adjustmentYtdAmount" from="medicalTaxableYtdIncome"/>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsStraightGross'">
-                <if condition="payrollAdjustment.riskClassCode"><then>
+                <if condition="payrollAdjustment.riskClassEnumId"><then>
                     <set field="adjustmentBasisAmount" from="0.0"/>
                     <!--<set field="adjustmentYtdAmount" value="0"/>-->
-                    <iterate list="timeEntryList" entry="timeEntry">
-                        <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
-                            <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
-                        <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
+                    <iterate list="timeEntryRiskClassInfoList" entry="timeEntryRiskClassInfo">
+                        <if condition="timeEntryRiskClassInfo.riskClassEnumId == payrollAdjustment.riskClassEnumId">
                             <!-- TODO: This is insufficient; straight time gross is much more complicated than time entries -->
                             <!-- California defines this as: -->
                             <!-- When determining the basis of premium, the following are included as payroll:
@@ -859,15 +1110,16 @@ along with this software (see the LICENSE.md file). If not, see
                     </iterate>
                 </else></if>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsHours'">
-                <if condition="payrollAdjustment.riskClassCode"><then>
+                <if condition="payrollAdjustment.riskClassEnumId"><then>
                     <set field="adjustmentBasisAmount" from="0.0"/>
                     <set field="riskClassMatch" from="false"/>
                     <!--<set field="adjustmentYtdAmount" value="0"/>-->
-                    <iterate list="timeEntryList" entry="timeEntry">
-                        <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
-                            <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
-                        <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
+
+                    <iterate list="timeEntryRiskClassInfoList" entry="timeEntryRiskClassInfo">
+                        <if condition="timeEntryRiskClassInfo.riskClassEnumId == payrollAdjustment.riskClassEnumId">
+                            <set field="timeEntry" from="timeEntryRiskClassInfo.timeEntry"/>
                             <!-- Do not include timeEntry.breakHours, those are for non-paid breaks -->
+
                             <set field="riskClassMatch" from="true"/>
                             <set field="adjustmentBasisAmount" from="adjustmentBasisAmount + timeEntry.hours"/>
                         </if>
@@ -884,13 +1136,11 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
             </else-if><else>
                 <!-- gross pay, PrbsGross -->
-                <if condition="payrollAdjustment.riskClassCode"><then>
+                <if condition="payrollAdjustment.riskClassEnumId"><then>
                     <set field="adjustmentBasisAmount" from="0.0"/>
                     <set field="adjustmentYtdAmount" from="0.0"/>
-                    <iterate list="timeEntryList" entry="timeEntry">
-                        <entity-find-one entity-name="mantle.humanres.employment.TimeEntryRiskClass" value-field="timeEntryRiskClass">
-                            <field-map field-name="timeEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
-                        <if condition="timeEntryRiskClass?.riskClassCode == payrollAdjustment.riskClassCode">
+                    <iterate list="timeEntryRiskClassInfoList" entry="timeEntryRiskClassInfo">
+                        <if condition="timeEntryRiskClassInfo.riskClassEnumId == payrollAdjustment.riskClassEnumId">
                             <!-- TODO: Only against the gross for this Risk Class Code -->
                         </if>
                     </iterate>
@@ -997,7 +1247,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="amount" from="amount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                 <!-- <log message="=== pre-exemption amount=${amount}"/> -->
 
-                <set field="adjustmentApplies" from="true"/>
+                <if condition="amount != 0">
+                    <set field="adjustmentApplies" from="true"/>
+                </if>
             </if>
 
             <!-- Find applicable PayrollAllowance Exemptions, multiply by (taxFederalAllowances or taxStateAllowances)
