@@ -23,6 +23,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="orderId" required="true"/>
             <parameter name="orderPartSeqId" required="true"/>
             <parameter name="storePromotionId" required="true"/>
+            <parameter name="promoCodeId"/>
             <parameter name="itemDescription"/>
         </in-parameters>
         <!-- TODO out for things like partially qualified promotions, etc -->
@@ -37,21 +38,89 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/></if>
             <set field="productStoreId" from="orderHeader.productStoreId"/>
             <if condition="!productStoreId"><return/></if>
+
             <!-- remove existing promotion items -->
             <entity-delete-by-condition entity-name="mantle.order.OrderItem">
                 <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
                 <econdition field-name="isPromo" value="Y"/>
             </entity-delete-by-condition>
-            <!-- run the promotion services -->
+
+            <!-- get all promos -->
             <entity-find entity-name="mantle.product.store.ProductStorePromotion" list="storePromoList" cache="true">
                 <date-filter valid-date="orderHeader.placedDate"/><econdition field-name="productStoreId"/><order-by field-name="sequenceNum"/></entity-find>
+
+            <set field="applicablePromoList" from="new ArrayList(storePromoList.size())"/>
+            <set field="promoCodesByPromo" from="[:]"/>
+            <iterate list="storePromoList" entry="storePromo">
+                <!-- see if store matches order -->
+                <if condition="storePromo.productStoreId">
+                    <!-- NOTE: could make more strict and require a store on the order to require code, but more flexible to not -->
+                    <if condition="orderHeader.productStoreId &amp;&amp; storePromo.productStoreId != orderHeader.productStoreId">
+                        <continue/></if>
+                </if>
+
+                <!-- check requireCode, see if valid code on order -->
+                <if condition="storePromo.requireCode == 'Y'">
+                    <entity-find entity-name="mantle.order.OrderPromoCode" list="orderPromoCodeList">
+                        <econdition field-name="orderId"/></entity-find>
+                    <!-- no codes on order? skip promo -->
+                    <if condition="orderPromoCodeList.size() == 0"><continue/></if>
+                    <set field="orderCodeIds" from="orderPromoCodeList*.promoCodeId"/>
+                    <!-- is this code associated with the promo? -->
+                    <entity-find entity-name="mantle.product.store.ProductStorePromoCode" list="storePromoCodeList">
+                        <date-filter valid-date="orderHeader.placedDate"/>
+                        <econdition field-name="promoCodeId" operator="in" from="orderCodeIds"/>
+                        <econdition field-name="storePromotionId" from="storePromo.storePromotionId"/>
+                    </entity-find>
+
+                    <set field="validPromoCodeId" from="null"/>
+                    <iterate list="storePromoCodeList" entry="storePromoCode">
+                        <!-- check requireParty for customerPartyId match -->
+                        <if condition="storePromoCode.requireParty == 'Y'">
+                            <if condition="!customerPartyId">
+                                <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                                    <econdition field-name="orderId"/><order-by field-name="orderPartSeqId"/></entity-find>
+                                <set field="orderPart" from="orderPartList?.first"/>
+                                <set field="customerPartyId" from="orderPart?.customerPartyId"/>
+                            </if>
+                            <!-- no customer? skip promo code -->
+                            <if condition="!customerPartyId"><continue/></if>
+                            <entity-find-one entity-name="mantle.product.store.ProductStorePromoCodeParty" value-field="promoCodeParty">
+                                <field-map field-name="promoCodeId" from="storePromoCode.promoCodeId"/>
+                                <field-map field-name="partyId" from="customerPartyId"/>
+                            </entity-find-one>
+                            <!-- customer not associated with code? skip promo code -->
+                            <if condition="promoCodeParty == null"><continue/></if>
+                        </if>
+
+                        <!-- TODO check useLimitPerCode, useLimitPerCustomer -->
+
+                        <set field="validPromoCodeId" from="storePromoCode.promoCodeId"/>
+                        <break/>
+                    </iterate>
+
+                    <if condition="validPromoCodeId"><then>
+                        <script>promoCodesByPromo.put(storePromo.storePromotionId, validPromoCodeId)</script>
+                    </then><else>
+                        <!-- no valid promo code found? skip promo -->
+                        <continue/>
+                    </else></if>
+                </if>
+
+                <!-- TODO check: useLimitPerOrder, useLimitPerCustomer, useLimitPerPromotion -->
+
+                <script>applicablePromoList.add(storePromo)</script>
+            </iterate>
+
+            <!-- run the promotion services -->
             <script><![CDATA[
-            for (storePromo in storePromoList) { try {
+            for (storePromo in applicablePromoList) { try {
                 Map parmMap = new HashMap(context)
                 parmMap.put("itemDescription", storePromo.itemDescription)
                 List promoParameterList = storePromo.parameters
                 for (promoParameter in promoParameterList) parmMap.put(promoParameter.parameterName, promoParameter.parameterValue)
                 parmMap.put("storePromotionId", storePromo.storePromotionId)
+                parmMap.put("promoCodeId", promoCodesByPromo.get(storePromo.storePromotionId))
 
                 Map serviceRegister = storePromo.serviceRegister
                 Map result = ec.service.sync().name(serviceRegister.serviceName).parameters(parmMap).disableAuthz().call()
@@ -62,6 +131,96 @@ along with this software (see the LICENSE.md file). If not, see
             ]]></script>
         </actions>
     </service>
+
+    <service verb="add" noun="OrderPromoCode">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="promoCode" required="true"/>
+        </in-parameters>
+        <actions>
+            <!-- make sure code is valid -->
+            <entity-find-one entity-name="mantle.product.store.ProductStorePromoCode" value-field="storePromoCode">
+                <field-map field-name="promoCode"/></entity-find-one>
+            <if condition="storePromoCode == null">
+                <entity-find-one entity-name="mantle.product.store.ProductStorePromoCode" value-field="storePromoCode">
+                    <field-map field-name="promoCodeId" from="promoCode"/></entity-find-one>
+            </if>
+            <if condition="storePromoCode == null">
+                <script>ec.message.addPublic("Promotion code ${promoCode} is not valid", "warning")</script>
+                <return/>
+            </if>
+            <!-- see if code already on order -->
+            <entity-find-one entity-name="mantle.order.OrderPromoCode" value-field="existingOrderPromoCode">
+                <field-map field-name="orderId"/><field-map field-name="promoCodeId" from="storePromoCode.promoCodeId"/></entity-find-one>
+            <if condition="existingOrderPromoCode != null">
+                <script>ec.message.addPublic("Promotion code ${promoCode} is already on this order", "success")</script>
+                <return/>
+            </if>
+
+            <!-- make sure has a promotion -->
+            <set field="storePromotion" from="storePromoCode.storePromotion"/>
+            <if condition="storePromotion == null">
+                <script>ec.message.addPublic("No promotion found for code ${promoCode}", "warning")</script>
+                <return/>
+            </if>
+            <!-- see if store matches order -->
+            <if condition="storePromotion.productStoreId">
+                <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+                <!-- NOTE: could make more strict and require a store on the order to require code, but more flexible to not -->
+                <if condition="orderHeader.productStoreId &amp;&amp; storePromotion.productStoreId != orderHeader.productStoreId">
+                    <script>ec.message.addPublic("Promotion code ${promoCode} is not valid for this store", "warning")</script>
+                    <return/>
+                </if>
+            </if>
+
+            <!-- check promo code from/thru dates -->
+            <if condition="storePromoCode.fromDate != null &amp;&amp; ec.user.nowTimestamp &lt; storePromoCode.fromDate">
+                <script>ec.message.addPublic("Promotion code ${promoCode} is not valid until ${ec.l10n.format(storePromoCode.fromDate, 'dd MMM yyyy h:mm a')}", "warning")</script>
+                <return/>
+            </if>
+            <if condition="storePromoCode.thruDate != null &amp;&amp; ec.user.nowTimestamp &lt; storePromoCode.thruDate">
+                <script>ec.message.addPublic("Promotion code ${promoCode} expired at ${ec.l10n.format(storePromoCode.thruDate, 'dd MMM yyyy h:mm a')}", "warning")</script>
+                <return/>
+            </if>
+            <!-- check promotion from/thru dates -->
+            <if condition="storePromotion.fromDate != null &amp;&amp; ec.user.nowTimestamp &lt; storePromotion.fromDate">
+                <script>ec.message.addPublic("Promotion for code ${promoCode} is not valid until ${ec.l10n.format(storePromotion.fromDate, 'dd MMM yyyy h:mm a')}", "warning")</script>
+                <return/>
+            </if>
+            <if condition="storePromotion.thruDate != null &amp;&amp; ec.user.nowTimestamp &lt; storePromotion.thruDate">
+                <script>ec.message.addPublic("Promotion for code ${promoCode} expired at ${ec.l10n.format(storePromotion.thruDate, 'dd MMM yyyy h:mm a')}", "warning")</script>
+                <return/>
+            </if>
+
+            <!-- check storePromoCode.requireParty -->
+            <if condition="storePromoCode.requireParty == 'Y'">
+                <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                    <econdition field-name="orderId"/><order-by field-name="orderPartSeqId"/></entity-find>
+                <set field="orderPart" from="orderPartList?.first"/>
+                <set field="customerPartyId" from="orderPart?.customerPartyId"/>
+                <if condition="!customerPartyId">
+                    <script>ec.message.addPublic("Promotion code ${promoCode} requires that a customer be set on the order", "warning")</script>
+                    <return/>
+                </if>
+                <entity-find-one entity-name="mantle.product.store.ProductStorePromoCodeParty" value-field="promoCodeParty">
+                    <field-map field-name="promoCodeId" from="storePromoCode.promoCodeId"/>
+                    <field-map field-name="partyId" from="customerPartyId"/>
+                </entity-find-one>
+                <if condition="promoCodeParty == null">
+                    <script>ec.message.addPublic("Customer not allowed to use promotion code ${promoCode}", "warning")</script>
+                    <return/>
+                </if>
+            </if>
+
+            <!-- TODO check storePromoCode.useLimitPerCode, useLimitPerCustomer -->
+            <!-- TODO check storePromotion.useLimitPerCustomer, useLimitPerPromotion -->
+
+            <!-- add the code -->
+            <service-call name="create#mantle.order.OrderPromoCode" in-map="[orderId:orderId, promoCodeId:storePromoCode.promoCodeId]"/>
+        </actions>
+    </service>
+
+    <!-- ========== Standard Promotion Services ========== -->
 
     <service verb="apply" noun="NewCustomerDiscount">
         <description>Apply a discountPercent to each OrderItem with itemTypeEnumId=ItemProduct if the customer is a new customer (no previous orders)</description>
@@ -133,7 +292,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
                                  itemTypeEnumId:'ItemDiscount', quantity:promoQuantity, unitAmount:discountAmount, sourcePercentage:discountPercent,
-                                 sourceReferenceId:storePromotionId, isPromo:'Y', promoQuantity:promoQuantity,
+                                 storePromotionId:storePromotionId, promoCodeId:promoCodeId, isPromo:'Y', promoQuantity:promoQuantity,
                                  itemDescription:ec.resource.expand(itemDescription, '')?:'New Customer Discount']"/>
             </iterate>
         </actions>
@@ -195,7 +354,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
                                  itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:discountAmount, sourcePercentage:discountPercent,
-                                 sourceReferenceId:storePromotionId, isPromo:'Y', promoQuantity:promoQuantity,
+                                 storePromotionId:storePromotionId, promoCodeId:promoCodeId, isPromo:'Y', promoQuantity:promoQuantity,
                                  itemDescription:ec.resource.expand(itemDescription, '')?:('Buy ' + buyQuantity + ' Get ' + getQuantity + ' at ' + discountPercent + '% off')]"/>
             </iterate>
         </actions>
