@@ -359,6 +359,54 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="responseMessage" value="Withdrew ${ec.l10n.format(amount, '0.00')} from account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)}"/>
         </actions>
     </service>
+    <service verb="transfer" noun="FinancialAccount">
+        <in-parameters>
+            <parameter name="fromFinAccountId" required="true"/>
+            <parameter name="toFinAccountId" required="true"/>
+            <parameter name="amount" type="BigDecimal" required="true"/>
+            <parameter name="transactionDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="entryDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="comments"/>
+            <parameter name="toComments" default="comments"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="withdrawFinAccountTransId"/>
+            <parameter name="depositFinAccountTransId"/>
+        </out-parameters>
+        <actions>
+            <if condition="amount == 0.0"><return message="Not doing transfer, amount is zero"/></if>
+
+            <!-- find and lock the two accounts -->
+            <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="fromFinAccount" for-update="true">
+                <field-map field-name="finAccountId" from="fromFinAccountId"/></entity-find-one>
+            <if condition="fromFinAccount == null"><return error="true" message="Could not find transfer from account ${fromFinAccountId}"/></if>
+            <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="toFinAccount" for-update="true">
+                <field-map field-name="finAccountId" from="toFinAccountId"/></entity-find-one>
+            <if condition="toFinAccount == null"><return error="true" message="Could not find transfer to account ${toFinAccountId}"/></if>
+
+            <!-- make sure org matches on the two FinancialAccounts -->
+            <if condition="fromFinAccount.organizationPartyId != toFinAccount.organizationPartyId">
+                <return error="true" message="Organization parties must match between the two accounts to do a transfer"/></if>
+
+            <!-- withdraw from FinancialAccount -->
+            <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" out-map="withdrawOut"
+                    in-map="[finAccountId:fromFinAccountId, reasonEnumId:'FatrTransfer', amount:amount,
+                        transactionDate:transactionDate, entryDate:entryDate, comments:comments]"/>
+            <if condition="withdrawOut.responseCode != 'success'"><return error="true" message="${withdrawOut.responseMessage}"/></if>
+            <set field="withdrawFinAccountTransId" from="withdrawOut.finAccountTransId"/>
+
+            <!-- deposit to FinancialAccount -->
+            <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="depositOut"
+                    in-map="[finAccountId:toFinAccountId, reasonEnumId:'FatrTransfer', amount:amount, transactionDate:transactionDate,
+                        entryDate:entryDate, comments:toComments, otherFinAccountTransId:withdrawFinAccountTransId]"/>
+            <set field="depositFinAccountTransId" from="depositOut.finAccountTransId"/>
+
+            <!-- set otherFinAccountTransId on withdraw TX -->
+            <service-call name="update#mantle.account.financial.FinancialAccountTrans"
+                    in-map="[finAccountTransId:withdrawFinAccountTransId, otherFinAccountTransId:depositFinAccountTransId]"/>
+        </actions>
+    </service>
+
     <service verb="reverse" noun="FinancialAccountTrans">
         <in-parameters><parameter name="finAccountTransId"/></in-parameters>
         <out-parameters><parameter name="finAccountTransId"/></out-parameters>
