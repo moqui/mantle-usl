@@ -467,6 +467,11 @@ class ReturnToResponseBasicFlow extends Specification {
                         toPartyId="ORG_ZIZI_RETAIL" finAccountTransTypeEnumId="FattWithdraw" reasonEnumId="FatrDisbursement"
                         amount="${kieEnabled ? '-13.77' : '-7.77'}" entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"
                         transactionDate="${effectiveTime}" postBalance="${kieEnabled ? '22.59' : '28.59'}" finAccountAuthId="55700" performedByUserId="EX_JOHN_DOE"/>
+                <acctgTrans acctgTransId="55705" otherPartyId="CustJqp" amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttFinancialWithdrawal"
+                        glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
+                    <entries acctgTransEntrySeqId="01" amount="7.77" glAccountId="258200000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
+                    <entries acctgTransEntrySeqId="02" amount="7.77" glAccountId="251100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
+                </acctgTrans>
                 <mantle.account.method.PaymentGatewayResponse approvalCode="55701" paymentGatewayConfigId="FinancialAccountLocal"
                         responseCode="success" amountUomId="USD" resultDeclined="N" paymentGatewayResponseId="55701" paymentId="55701"
                         paymentOperationEnumId="PgoCapture" amount="${kieEnabled ? '13.77' : '7.77'}" resultError="N" resultNsf="N" referenceNum="55701"
@@ -480,8 +485,8 @@ class ReturnToResponseBasicFlow extends Specification {
                             transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                         <entries acctgTransEntrySeqId="01" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="121000000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="GatAccountsReceivable" debitCreditFlag="C"/>
-                        <entries acctgTransEntrySeqId="02" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="251100000" reconcileStatusId="AterNot"
-                            isSummary="N" glAccountTypeEnumId="GatCustomerCredits" debitCreditFlag="D"/>
+                        <entries acctgTransEntrySeqId="02" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="258200000" reconcileStatusId="AterNot"
+                            isSummary="N" glAccountTypeEnumId="" debitCreditFlag="D"/>
                     </mantle.ledger.transaction.AcctgTrans>
                     <!-- NOTE: not checking acctgTransResultEnumId, could be success or payment not posted depending on if payment or application posts first -->
                     <applications amountApplied="${kieEnabled ? '13.77' : '7.77'}" appliedDate="${effectiveTime}"
