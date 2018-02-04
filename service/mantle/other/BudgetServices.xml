@@ -139,6 +139,71 @@ along with this software (see the LICENSE.md file). If not, see
             </else-if></if>
         </actions>
     </service>
+
+    <service verb="get" noun="BudgetItemsAccountsSubPeriods">
+        <in-parameters>
+            <parameter name="budgetId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="budget" type="Map"/>
+            <parameter name="timePeriod" type="Map"/>
+            <parameter name="partyAcctgPreference" type="Map"/>
+            <parameter name="accountCodeFormatter" type="javax.swing.text.MaskFormatter"/>
+            <parameter name="budgetItemList" type="List"><parameter name="budgetItem" type="Map"/></parameter>
+            <parameter name="budgetItemsByGlId" type="Map"/>
+            <parameter name="subTimePeriodList" type="List"><parameter name="subTimePeriod" type="Map"/></parameter>
+            <parameter name="subTimePeriodSize" type="Integer"/>
+            <parameter name="expenseClassEnumIds" type="Set"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.other.budget.Budget" value-field="budget"/>
+            <set field="timePeriod" from="budget.timePeriod"/>
+
+            <if condition="timePeriod?.partyId">
+                <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
+                        in-map="[organizationPartyId:timePeriod.partyId]"/>
+                <if condition="partyAcctgPreference?.glAccountCodeMask">
+                    <set field="glAccountCodeMask" from="partyAcctgPreference?.glAccountCodeMask ?: ec.user.getPreference('GlAccountCodeMask')"/>
+                    <set field="accountCodeFormatter" from="masker(glAccountCodeMask, '0')"/><!-- will be null if no mask -->
+                </if>
+            </if>
+
+            <entity-find entity-name="mantle.other.budget.BudgetItem" list="budgetItemList">
+                <econdition field-name="budgetId"/></entity-find>
+
+            <if condition="budget.timePeriodId &amp;&amp; budget.subTimePeriodTypeId">
+                <service-call name="mantle.party.TimeServices.get#DescendantPeriods" out-map="subPeriodOut"
+                        in-map="[parentPeriodId:budget.timePeriodId, timePeriodTypeId:budget.subTimePeriodTypeId, createMissing:true]"/>
+                <set field="subTimePeriodList" from="subPeriodOut.timePeriodList"/>
+                <set field="subTimePeriodIds" from="new ArrayList(subTimePeriodList*.timePeriodId)"/>
+            </if>
+            <set field="subTimePeriodSize" from="subTimePeriodList?.size() ?: 0"/>
+
+            <service-call name="org.moqui.impl.BasicServices.find#EnumerationByParent" out-map="expenseClassOut"
+                    in-map="[parentEnumId:'EXPENSE', includeNested:true]"/>
+            <set field="expenseClassEnumIds" from="expenseClassOut.enumIdSet"/>
+
+            <script><![CDATA[
+                budgetItemsByGlId = new HashMap<String, ArrayList>()
+                for (Map curBi in budgetItemList) {
+                    String glAccountId = curBi.glAccountId
+                    ArrayList curBiList = budgetItemsByGlId.get(glAccountId)
+                    if (curBiList == null) {
+                        curBiList = new ArrayList([null, null, null, null, null, null, null, null, null, null, null, null, null]) // 13 null entries
+                        budgetItemsByGlId.put(glAccountId, curBiList)
+                    }
+
+                    String subTimePeriodId = (String) curBi.subTimePeriodId
+                    if (subTimePeriodId == null) {
+                        curBiList.set(0, curBi)
+                    } else {
+                        int subPeriodIndex = subTimePeriodIds.indexOf(subTimePeriodId)
+                        if (subPeriodIndex >= 0) curBiList.set(subPeriodIndex + 1, curBi)
+                    }
+                }
+            ]]></script>
+        </actions>
+    </service>
     <service verb="store" noun="BudgetItemsSubPeriods">
         <in-parameters>
             <parameter name="budgetId" required="true"/>
@@ -162,6 +227,16 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="subTimePeriodList" from="subPeriodOut.timePeriodList"/>
             <set field="subTimePeriodIds" from="new ArrayList(subTimePeriodList*.timePeriodId)"/>
 
+            <set field="specifiedPerTotal" from="0.0"/>
+            <set field="specifiedPerCount" from="0"/>
+            <iterate list="subTimePeriodIds" entry="subTimePeriodId">
+                <set field="amount" from="context.get('amountPer' + (subTimePeriodId_index + 1))"/>
+                <if condition="amount">
+                    <set field="specifiedPerTotal" from="specifiedPerTotal + amount"/>
+                    <set field="specifiedPerCount" from="specifiedPerCount + 1"/>
+                </if>
+            </iterate>
+
             <set field="subAmountTotal" from="0.0"/>
             <iterate list="subTimePeriodIds" entry="subTimePeriodId">
                 <set field="budgetItems" from="budgetItemList.findAll({ it.subTimePeriodId == subTimePeriodId })"/>
@@ -172,6 +247,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="budgetItem" from="budgetItems ? budgetItems.get(0) : null"/>
                 <set field="budgetItemSeqId" from="budgetItem?.budgetItemSeqId"/>
                 <set field="amount" from="context.get('amountPer' + (subTimePeriodId_index + 1))"/>
+                <if condition="amount == null &amp;&amp; amountMain &amp;&amp; amountMain &gt; specifiedPerTotal">
+                    <set field="amount" from="(amountMain - specifiedPerTotal) / (subTimePeriodIds.size() - specifiedPerCount)"/></if>
                 <if condition="amount != null"><then>
                     <set field="subAmountTotal" from="subAmountTotal + amount"/>
                     <if condition="budgetItem != null"><then>
