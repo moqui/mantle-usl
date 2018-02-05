@@ -36,7 +36,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <if condition="timeEntryId">
                 <entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="timeEntry" for-update="true"/>
-                <if condition="timeEntry">
+                <if condition="timeEntry != null">
                     <!-- fill in field values not passed into this service so that calcs can run -->
                     <iterate list="timeEntry" entry="fieldValue" key="fieldName">
                         <if condition="fieldValue != null &amp;&amp; !context.containsKey(fieldName)">
@@ -48,12 +48,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.party.PartyDetailAndRole" value-field="teamPartyDetail">
                     <field-map field-name="partyId" from="teamPartyId"/>
                     <field-map field-name="roleTypeId" value="OrgTeam"/>
-                    <field-map field-name="partyTypeEnumId" value="PtyOrganization"/>
                 </entity-find-one>
-                <if condition="!teamPartyDetail"><then>
-                    <return error="true" message="Time Entry not created, ${ec.getL10n().localize('Team')} not found."/>
+                <if condition="teamPartyDetail == null"><then>
+                    <return error="true" message="Team ${teamPartyId} not found or is not in the Team role"/>
                 </then><else-if condition="teamPartyDetail.disabled == 'Y'">
-                    <return error="true" message="Time Entry not created, ${ec.getL10n().localize('Team')} ${ec.resource.expand('', '', teamPartyDetail)} is disabled."/>
+                    <return error="true" message="Team ${ec.resource.expand('PartyNameTemplate', '', teamPartyDetail)} is disabled."/>
                 </else-if></if>
             </if>
 
@@ -64,7 +63,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="thruDate" from="new Timestamp((Long) (fromDate.time + (hours*60*60*1000) + (breakHours ? (breakHours*60*60*1000) : 0)))"/>
             </if>
             <!-- at this point if there is no thruDate default to now -->
-            <if condition="!thruDate"><set field="thruDate" from="ec.user.nowTimestamp"/></if>
+            <if condition="thruDate == null"><set field="thruDate" from="ec.user.nowTimestamp"/></if>
 
             <!-- calculate fromDate based on thruDate/hours/breakHours -->
             <if condition="hours &amp;&amp; !fromDate &amp;&amp; thruDate">
@@ -104,7 +103,7 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!emplPositionClassId">
                 <!-- look at Employment/EmplPosition for the emplPositionClassId -->
                 <entity-find entity-name="mantle.party.PartyRelationship" list="employRelList">
-                    <date-filter/><econdition field-name="fromPartyId" from="partyId"/>
+                    <date-filter valid-date="fromDate"/><econdition field-name="fromPartyId" from="partyId"/>
                     <econdition field-name="toPartyId" from="partyId"/>
                     <econdition field-name="relationshipTypeEnumId" value="PrtEmployee"/>
                 </entity-find>
@@ -120,7 +119,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- look at EmplPositionClassParty for the emplPositionClassId? maybe too generic, better to not filter by
             <if condition="!emplPositionClassId">
                 <entity-find entity-name="mantle.humanres.position.EmplPositionClassParty" list="emplPositionClassPartyList">
-                    <date-filter/><econdition field-name="partyId" from="timeEntry.partyId"/>
+                    <date-filter valid-date="fromDate"/><econdition field-name="partyId" from="timeEntry.partyId"/>
                     <order-by field-name="fromDate"/></entity-find>
                 <if condition="emplPositionClassPartyList">
                     <set field="emplPositionClassId" from="emplPositionClassPartyList[0].emplPositionClassId"/></if>
@@ -151,16 +150,17 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </if>
 
-            <!-- if clientPartyId not set find from timesheetId or workEffortId -->
+            <!-- if clientPartyId not set find from timesheetId, workEffortId, or facilityId -->
             <if condition="!clientPartyId &amp;&amp; timesheetId">
                 <entity-find-one entity-name="mantle.work.time.Timesheet" value-field="timesheet"/>
                 <set field="clientPartyId" from="timesheet.clientPartyId"/>
             </if>
             <if condition="!clientPartyId &amp;&amp; workEffortId">
-                <!-- see if there is a CustomerBillTo associated with the WorkEffort (task) -->
+                <!-- see if there is a Customer associated with the WorkEffort (task or project) -->
                 <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="billToList">
-                    <date-filter/><econdition field-name="workEffortId"/>
-                    <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/></entity-find>
+                    <date-filter valid-date="fromDate"/><econdition field-name="workEffortId"/>
+                    <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/>
+                </entity-find>
                 <if condition="billToList"><then>
                     <set field="clientPartyId" from="billToList[0].partyId"/>
                 </then><else>
@@ -168,10 +168,63 @@ along with this software (see the LICENSE.md file). If not, see
                     <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort"/>
                     <if condition="workEffort?.rootWorkEffortId">
                         <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="rootBillToList">
-                            <date-filter/><econdition field-name="workEffortId" from="workEffort.rootWorkEffortId"/>
-                            <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/></entity-find>
+                            <date-filter valid-date="fromDate"/>
+                            <econdition field-name="workEffortId" from="workEffort.rootWorkEffortId"/>
+                            <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/>
+                        </entity-find>
                         <if condition="rootBillToList"><set field="clientPartyId" from="rootBillToList[0].partyId"/></if>
                     </if>
+                </else></if>
+            </if>
+            <if condition="!clientPartyId &amp;&amp; facilityId">
+                <!-- set vendorPartyId to facility Customer -->
+                <entity-find entity-name="mantle.facility.FacilityParty" list="customerList">
+                    <date-filter valid-date="fromDate"/><econdition field-name="facilityId"/>
+                    <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/>
+                </entity-find>
+                <if condition="customerList"><then>
+                    <set field="clientPartyId" from="customerList[0].partyId"/>
+                </then><else>
+                    <!-- set clientPartyId to facility owner -->
+                    <entity-find-one entity-name="mantle.facility.Facility" value-field="facility"/>
+                    <set field="clientPartyId" from="facility?.ownerPartyId"/>
+                </else></if>
+            </if>
+
+            <!-- if vendorPartyId not set find from workEffortId or facilityId -->
+            <if condition="!vendorPartyId &amp;&amp; workEffortId">
+                <!-- see if there is a Vendor associated with the WorkEffort (task or project) -->
+                <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="billFromList">
+                    <date-filter valid-date="fromDate"/><econdition field-name="workEffortId"/>
+                    <econdition field-name="roleTypeId" operator="in" value="Vendor,VendorBillFrom"/>
+                </entity-find>
+                <if condition="billFromList"><then>
+                    <set field="vendorPartyId" from="billFromList[0].partyId"/>
+                </then><else>
+                    <!-- see if there is a Vendor associated with the root (project) -->
+                    <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort"/>
+                    <if condition="workEffort?.rootWorkEffortId">
+                        <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="rootBillFromList">
+                            <date-filter valid-date="fromDate"/>
+                            <econdition field-name="workEffortId" from="workEffort.rootWorkEffortId"/>
+                            <econdition field-name="roleTypeId" operator="in" value="Vendor,VendorBillFrom"/>
+                        </entity-find>
+                        <if condition="rootBillFromList"><set field="vendorPartyId" from="rootBillFromList[0].partyId"/></if>
+                    </if>
+                </else></if>
+            </if>
+            <if condition="!vendorPartyId &amp;&amp; facilityId">
+                <!-- set vendorPartyId to facility Manager or Vendor -->
+                <entity-find entity-name="mantle.facility.FacilityParty" list="vendorList">
+                    <date-filter valid-date="fromDate"/><econdition field-name="facilityId"/>
+                    <econdition field-name="roleTypeId" operator="in" value="Manager,Vendor,VendorBillFrom"/>
+                </entity-find>
+                <if condition="vendorList"><then>
+                    <set field="vendorPartyId" from="vendorList[0].partyId"/>
+                </then><else>
+                    <!-- set vendorPartyId to facility owner -->
+                    <entity-find-one entity-name="mantle.facility.Facility" value-field="facility"/>
+                    <set field="clientPartyId" from="facility?.ownerPartyId"/>
                 </else></if>
             </if>
 
