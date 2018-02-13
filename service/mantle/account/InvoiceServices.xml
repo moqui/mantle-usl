@@ -800,7 +800,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="oibBaseMap" from="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId]"/>
                 <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
                     <econdition-object field="oibBaseMap"/></entity-find>
-                <set field="quantityNotBilled" from="(orderItem.quantity ?: 1) * (orderItem.selectedAmount ?: 1)"/>
+                <set field="quantityNotBilled" from="(orderItem.quantity != null ? orderItem.quantity : 1.0) * (orderItem.selectedAmount ?: 1.0)"/>
                 <iterate list="orderItemBillingList" entry="orderItemBilling">
                     <set field="quantityNotBilled" from="quantityNotBilled - orderItemBilling.quantity"/></iterate>
                 <if condition="quantityNotBilled &gt; 0">
@@ -1717,9 +1717,15 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="invoiceId" required="true"/>
             <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId"/>
         </in-parameters>
         <actions>
-            <!-- TODO -->
+            <entity-find entity-name="mantle.account.invoice.InvoiceItem" list="invoiceItemList">
+                <econdition field-name="invoiceId"/></entity-find>
+            <iterate list="invoiceItemList" entry="invoiceItem">
+                <service-call name="mantle.account.InvoiceServices.apply#InvoiceItemToOrder" in-map="[invoiceId:invoiceId,
+                        invoiceItemSeqId:invoiceItem.invoiceItemSeqId, orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
+            </iterate>
         </actions>
     </service>
     <service verb="apply" noun="InvoiceItemToOrder">
@@ -1727,9 +1733,132 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="invoiceId" required="true"/>
             <parameter name="invoiceItemSeqId" required="true"/>
             <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId"/>
         </in-parameters>
         <actions>
-            <!-- TODO -->
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+            <entity-find-one entity-name="mantle.account.invoice.InvoiceItem" value-field="invoiceItem"/>
+
+            <!-- make sure parties match on Invoice and OrderPart -->
+            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderPartSeqId" ignore-if-empty="true"/>
+            </entity-find>
+            <set field="orderPart" from="orderPartList.first()"/>
+            <if condition="orderPart.customerPartyId != invoice.toPartyId">
+                <return error="true" message="Order customer ${orderPart.customerPartyId} does not match invoice to party ${invoice.toPartyId}"/></if>
+            <if condition="orderPart.vendorPartyId != invoice.fromPartyId">
+                <return error="true" message="Order vendor ${orderPart.vendorPartyId} does not match invoice from party ${invoice.fromPartyId}"/></if>
+
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
+            <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderPartSeqId" ignore-if-empty="true"/>
+                <econdition field-name="itemTypeEnumId" from="invoiceItem.itemTypeEnumId"/>
+                <econdition field-name="productId" from="invoiceItem.productId" ignore-if-empty="true"/>
+                <!-- TODO: other matching constraints? just warn about price diff (done below in loop) -->
+            </entity-find>
+
+            <set field="invoiceQtyOrig" from="invoiceItem.quantity != null ? invoiceItem.quantity : 1.0"/>
+            <set field="invoiceQtyRemaining" from="invoiceQtyOrig"/>
+            <entity-find entity-name="mantle.order.OrderItemBillingQuantity" list="oibqList">
+                <econdition field-name="invoiceId"/><econdition field-name="invoiceItemSeqId"/><select-field field-name="quantity"/></entity-find>
+            <set field="invoiceBilledQuantity" from="oibqList?.first()?.quantity ?: 0.0"/>
+            <set field="invoiceQtyRemaining" from="invoiceQtyRemaining - invoiceBilledQuantity"/>
+            <if condition="invoiceQtyRemaining &lt;= 0.0"><return message="Invoice ${invoiceId} item ${invoiceItemSeqId} already fully applied to orders"/></if>
+
+            <iterate list="orderItemList" entry="orderItem">
+                <entity-find entity-name="mantle.order.OrderItemBillingQuantity" list="oibqList">
+                    <econdition field-name="orderId"/><econdition field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
+                    <select-field field-name="quantity"/>
+                </entity-find>
+                <set field="orderBilledQuantity" from="oibqList?.first()?.quantity ?: 0.0"/>
+
+                <set field="quantityNotBilled" from="(orderItem.quantity != null ? orderItem.quantity : 1.0) * (orderItem.selectedAmount ?: 1.0)"/>
+                <set field="quantityNotBilled" from="quantityNotBilled - orderBilledQuantity"/>
+                <if condition="quantityNotBilled &lt;= 0.0"><continue/></if>
+
+                <set field="quantityToBill" from="quantityNotBilled &gt; invoiceQtyRemaining ? invoiceQtyRemaining : quantityNotBilled"/>
+
+                <!-- check and warn about price diff -->
+                <if condition="invoiceItem.amount != orderItem.unitAmount">
+                    <if condition="invoiceItem.itemTypeEnumId in productItemTypes"><then>
+                        <script>ec.message.addMessage("Invoice ${invoiceId} item ${invoiceItemSeqId} amount ${invoiceItem.amount} different from order ${orderId} item ${orderItem.orderItemSeqId} amount ${orderItem.unitAmount} but is product so applying anyway", 'warning')</script>
+                    </then><else>
+                        <continue/>
+                    </else></if>
+                </if>
+
+                <set field="curShipmentId" from="null"/>
+                <set field="curAssetIssuanceId" from="null"/>
+                <set field="curAssetReceiptId" from="null"/>
+                <if condition="invoiceItem.itemTypeEnumId in productItemTypes">
+                    <!-- for ShipmentItemSource set the invoiceId/invoiceItemSeqId on it -->
+                    <set field="quantityNotShipSourced" from="quantityToBill"/>
+                    <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList">
+                        <econdition field-name="orderId"/>
+                        <econdition field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
+                    </entity-find>
+                    <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
+                        <if condition="!shipmentItemSource.invoiceId &amp;&amp; quantityNotShipSourced &gt;= shipmentItemSource.quantity">
+                            <set field="shipmentItemSource.invoiceId" from="invoiceId"/>
+                            <set field="shipmentItemSource.invoiceItemSeqId" from="invoiceItemSeqId"/>
+                            <entity-update value-field="shipmentItemSource"/>
+                            <set field="quantityNotShipSourced" from="quantityNotShipSourced - shipmentItemSource.quantity"/>
+                            <set field="curShipmentId" from="shipmentItemSource.shipmentId"/>
+                        </if>
+                    </iterate>
+
+                    <!-- lookup and fill in assetIssuanceId -->
+                    <set field="quantityNotIssuance" from="quantityToBill"/>
+                    <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList">
+                        <econdition field-name="orderId"/>
+                        <econdition field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
+                    </entity-find>
+                    <iterate list="assetIssuanceList" entry="assetIssuance">
+                        <if condition="!assetIssuance.invoiceId &amp;&amp; quantityNotIssuance &gt;= assetIssuance.quantity">
+                            <set field="assetIssuance.invoiceId" from="invoiceId"/>
+                            <set field="assetIssuance.invoiceItemSeqId" from="invoiceItemSeqId"/>
+                            <entity-update value-field="assetIssuance"/>
+                            <set field="quantityNotIssuance" from="quantityNotIssuance - assetIssuance.quantity"/>
+                            <set field="curAssetIssuanceId" from="assetIssuance.assetIssuanceId"/>
+                        </if>
+                    </iterate>
+
+                    <!-- lookup and fill in assetReceiptId -->
+                    <set field="quantityNotIssuance" from="quantityToBill"/>
+                    <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList">
+                        <econdition field-name="orderId"/>
+                        <econdition field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
+                    </entity-find>
+                    <iterate list="assetReceiptList" entry="assetReceipt">
+                        <if condition="!assetReceipt.invoiceId &amp;&amp; quantityNotIssuance &gt;= assetReceipt.quantityAccepted">
+                            <set field="assetReceipt.invoiceId" from="invoiceId"/>
+                            <set field="assetReceipt.invoiceItemSeqId" from="invoiceItemSeqId"/>
+                            <entity-update value-field="assetReceipt"/>
+                            <set field="quantityNotIssuance" from="quantityNotIssuance - assetReceipt.quantityAccepted"/>
+                            <set field="curAssetReceiptId" from="assetReceipt.assetReceiptId"/>
+                        </if>
+                    </iterate>
+                </if>
+
+                <!-- finally create OrderItemBilling -->
+                <service-call name="create#mantle.order.OrderItemBilling" in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId,
+                        invoiceId:invoiceId, invoiceItemSeqId:invoiceItemSeqId, quantity:quantityToBill, amount:invoiceItem.amount,
+                        shipmentId:curShipmentId, assetReceiptId:curAssetReceiptId, assetIssuanceId:curAssetIssuanceId]"/>
+                <set field="invoiceQtyRemaining" from="invoiceQtyRemaining - quantityToBill"/>
+            </iterate>
+
+            <if condition="invoiceQtyRemaining == 0.0"><then>
+                <script>ec.message.addMessage("Invoice ${invoiceId} item ${invoiceItemSeqId} now fully applied", 'success')</script>
+            </then><else-if condition="invoiceQtyRemaining &lt; invoiceQtyOrig">
+                <script>ec.message.addMessage("Invoice ${invoiceId} item ${invoiceItemSeqId} partially applied", 'warning')</script>
+            </else-if><else>
+                <script>ec.message.addMessage("No order item matches found for invoice ${invoiceId} item ${invoiceItemSeqId}", 'warning')</script>
+            </else></if>
         </actions>
     </service>
     <service verb="unapply" noun="InvoiceItemFromOrder">
@@ -1738,7 +1867,11 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="orderItemBillingId" required="true"/>
         </in-parameters>
         <actions>
-            <!-- TODO -->
+            <entity-find-one entity-name="mantle.order.OrderItemBilling" value-field="orderItemBilling" for-update="true"/>
+            <if condition="orderItemBilling?.invoiceId != invoiceId"><return error="true" message="Invoice ID did not match, not unapplying"/></if>
+
+            <set field="orderItemBilling.quantity" from="0.0"/>
+            <entity-update value-field="orderItemBilling"/>
         </actions>
     </service>
 
@@ -1750,7 +1883,17 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shipmentId" required="true"/>
         </in-parameters>
         <actions>
-            <!-- TODO -->
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
+            <entity-find entity-name="mantle.account.invoice.InvoiceItem" list="invoiceItemList">
+                <econdition field-name="invoiceId"/></entity-find>
+            <iterate list="invoiceItemList" entry="invoiceItem">
+                <if condition="!(invoiceItem.itemTypeEnumId in productItemTypes)"><continue/></if>
+                <service-call name="mantle.account.InvoiceServices.apply#InvoiceItemToShipment"
+                        in-map="[invoiceId:invoiceId, invoiceItemSeqId:invoiceItem.invoiceItemSeqId, shipmentId:shipmentId]"/>
+            </iterate>
         </actions>
     </service>
     <service verb="apply" noun="InvoiceItemToShipment">
@@ -1769,7 +1912,12 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shipmentItemSourceId" required="true"/>
         </in-parameters>
         <actions>
-            <!-- TODO -->
+            <entity-find-one entity-name="mantle.shipment.ShipmentItemSource" value-field="shipmentItemSource" for-update="true"/>
+            <if condition="shipmentItemSource?.invoiceId != invoiceId"><return error="true" message="Invoice ID did not match, not unapplying"/></if>
+
+            <set field="shipmentItemSource.invoiceId" from="null"/>
+            <set field="shipmentItemSource.invoiceItemSeqId" from="null"/>
+            <entity-update value-field="shipmentItemSource"/>
         </actions>
     </service>
 
