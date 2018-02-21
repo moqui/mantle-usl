@@ -1087,7 +1087,7 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
     </service>
     <service verb="release" noun="Payment" type="interface">
-        <description>Release (void) an authorized Payment.</description>
+        <description>Release (void) an authorized Payment</description>
         <in-parameters>
             <parameter name="paymentId" required="true"/>
             <parameter name="paymentGatewayConfigId" required="true"/>
@@ -1097,7 +1097,7 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
     </service>
     <service verb="refund" noun="Payment" type="interface">
-        <description>Refund (credit) a captured Payment.</description>
+        <description>Refund (credit) a captured Payment</description>
         <in-parameters>
             <parameter name="paymentId" required="true"/>
             <parameter name="paymentGatewayConfigId" required="true"/>
@@ -1105,6 +1105,23 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="paymentGatewayResponseId"/>
+        </out-parameters>
+    </service>
+    <service verb="get" noun="PaymentGatewayDetails" type="interface">
+        <description>
+            Get the latest transaction details for a Payment from the gateway.
+            If status has changed implementations should update Payment statusId and create a PaymentGatewayResponse record.
+        </description>
+        <in-parameters>
+            <parameter name="paymentId" required="true"/>
+            <parameter name="paymentGatewayConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="paymentGatewayResponseId"/>
+            <parameter name="gatewayStatusId"><description>
+                Mantle Payment statusId based on gateway transaction status.
+                If returned and is different from current Payment.statusId calling service will update.
+            </description></parameter>
         </out-parameters>
     </service>
 
@@ -1187,6 +1204,7 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <if condition="payment == null"><entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/></if>
+            <if condition="payment == null"><return message="Payment ${paymentId} not found"/></if>
 
             <!-- use paymentGatewayConfigId from Payment if present -->
             <set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/>
@@ -1225,6 +1243,7 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <if condition="payment == null"><entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/></if>
+            <if condition="payment == null"><return message="Payment ${paymentId} not found"/></if>
 
             <!-- if Payment.statusId is PmntDelivered, don't auth (if PmntAuthorized allow for re-auth) -->
             <if condition="payment.statusId == 'PmntDelivered'">
@@ -1250,7 +1269,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <return message="Not authorizing Payment ${paymentId}, could not find Payment Gateway Config"/></if>
 
             <if condition="!paymentGatewayConfig.authorizeServiceName">
-                <log message="Not capturing Payment ${paymentId}, no authorizeServiceName in PaymentGatewayConfig [${paymentGatewayConfigId}]"/>
+                <log message="Not authorizing Payment ${paymentId}, no authorizeServiceName in PaymentGatewayConfig [${paymentGatewayConfigId}]"/>
                 <return/>
             </if>
 
@@ -1317,7 +1336,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="paymentOperationEnumId" operator="in" value="PgoAuthorize,PgoAuthAndCapture"/>
                 <order-by field-name="-transactionDate"/>
             </entity-find>
-            <set field="paymentGatewayResponse" from="pgrList?.first"/>
+            <set field="paymentGatewayResponse" from="pgrList?.getAt(0)"/>
         </actions>
     </service>
     
@@ -1360,21 +1379,10 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <if condition="payment == null"><entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/></if>
+            <if condition="payment == null"><return message="Payment ${paymentId} not found"/></if>
             <if condition="amount == null"><set field="amount" from="payment.amount"/></if>
 
-            <if condition="payment.statusId == 'PmntPromised' &amp;&amp; payment.paymentGatewayConfigId">
-                <!-- do an auth first -->
-                <service-call name="mantle.account.PaymentServices.authorize#SinglePayment"
-                        in-map="[paymentId:paymentId, payment:payment]"/>
-                <!-- status should be updated, if not is checked below -->
-                <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
-            </if>
-
-            <!-- if the Payment.statusId is already PmntDelivered don't try again -->
-            <!-- NOTE: also handle other statuses, ie anything other than PmntAuthorized? might be too inflexible... -->
-            <if condition="payment.statusId != 'PmntAuthorized'">
-                <return message="Not capturing Payment ${paymentId}, is in ${payment.statusId} and not the Authorized status"/>
-            </if>
+            <set field="justDidAuthorize" from="false"/>
 
             <!-- use paymentGatewayConfigId from Payment if present -->
             <set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/>
@@ -1382,7 +1390,7 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!paymentGatewayConfigId">
                 <service-call name="mantle.account.PaymentServices.get#AuthorizePaymentGatewayResponse" out-map="authRespOut"
                         in-map="[paymentId:paymentId]"/>
-                <if condition="authRespOut.paymentGatewayResponse">
+                <if condition="authRespOut.paymentGatewayResponse != null">
                     <set field="paymentGatewayConfigId" from="authRespOut.paymentGatewayResponse.paymentGatewayConfigId"/></if>
             </if>
             <!-- see if associated PaymentMethod has a paymentGatewayConfigId -->
@@ -1407,7 +1415,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="!paymentGatewayConfig.captureServiceName">
                 <!-- don't blow up on this, we allow no capture service if intentionally configured that way -->
-                <log message="Not capturing Payment ${paymentId}, no captureServiceName in PaymentGatewayConfig [${paymentGatewayConfigId}]"/>
+                <log message="Not capturing Payment ${paymentId}, no captureServiceName in PaymentGatewayConfig ${paymentGatewayConfigId}"/>
                 <return/>
             </if>
 
@@ -1417,14 +1425,78 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-update value-field="payment"/>
             </if>
 
-            <!-- if auth expired do an auth now -->
-            <!-- TODO: determine if auth is expired (based on configured days per CC type...) -->
-            <if condition="false">
-                <service-call name="mantle.account.PaymentServices.authorize#SinglePayment" out-map="authOut"
-                        in-map="[paymentId:payment.paymentId, payment:payment, paymentGatewayConfigId:paymentGatewayConfigId]"/>
+            <!-- check Payment status, need to do an auth first? -->
+            <if condition="payment.statusId == 'PmntPromised'">
+                <!-- do an auth first -->
+                <service-call name="mantle.account.PaymentServices.authorize#SinglePayment"
+                        in-map="[paymentId:paymentId, payment:payment, paymentGatewayConfigId:paymentGatewayConfigId]"/>
+                <set field="justDidAuthorize" from="true"/>
+                <!-- status should be updated, if not is checked below -->
+                <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
             </if>
 
-            <!-- call the configured service -->
+            <!-- if the Payment.statusId is already PmntDelivered don't try again -->
+            <!-- NOTE: also handle other statuses, ie anything other than PmntAuthorized? might be too inflexible... -->
+            <if condition="payment.statusId != 'PmntAuthorized'">
+                <return message="Not capturing Payment ${paymentId}, is in ${payment.statusId} and not the Authorized status"/></if>
+
+            <!-- if no payment.paymentRefNum look it up or do an auth -->
+            <if condition="!payment.paymentRefNum">
+                <if condition="authRespOut?.paymentGatewayResponse == null">
+                    <service-call name="mantle.account.PaymentServices.get#AuthorizePaymentGatewayResponse"
+                            out-map="authRespOut" in-map="[paymentId:paymentId]"/>
+                </if>
+                <if condition="authRespOut?.paymentGatewayResponse?.referenceNum"><then>
+                    <set field="payment.paymentRefNum" from="authRespOut.paymentGatewayResponse.referenceNum"/>
+                    <entity-update value-field="payment"/>
+                </then><else>
+                    <service-call name="mantle.account.PaymentServices.authorize#SinglePayment" out-map="authOut"
+                            in-map="[paymentId:paymentId, payment:payment, paymentGatewayConfigId:paymentGatewayConfigId]"/>
+                    <set field="justDidAuthorize" from="true"/>
+                    <!-- paymentRefNum should be updated, if not is checked below -->
+                    <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
+                </else>
+                </if>
+            </if>
+            <if condition="!payment.paymentRefNum">
+                <return message="Not capturing Payment ${paymentId}, has no transaction ID (reference number)"/></if>
+
+            <!-- check if auth expired and do an auth now -->
+            <!-- NOTE: maybe determine if auth is expired (based on configured days per CC type...)? -->
+            <if condition="!justDidAuthorize &amp;&amp; paymentGatewayConfig.detailsServiceName">
+                <service-call name="${paymentGatewayConfig.detailsServiceName}" out-map="detailOut"
+                        in-map="[paymentId:paymentId, payment:payment, paymentGatewayConfigId:paymentGatewayConfigId]"/>
+                <if condition="detailOut.gatewayStatusId == 'PmntPromised'"><then>
+                    <!-- probably expired, set Payment to Promised, then auth and don't return now so will capture below -->
+                    <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntPromised']"/>
+                    <service-call name="mantle.account.PaymentServices.authorize#SinglePayment" out-map="authOut"
+                            in-map="[paymentId:paymentId, paymentGatewayConfigId:paymentGatewayConfigId]"/>
+                    <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
+                    <!-- don't return like others below, continue so capture is called -->
+                </then><else-if condition="detailOut.gatewayStatusId == 'PmntDelivered'">
+                    <!-- already captured, update status -->
+                    <!-- NOTE: somehow get actual capture date from gateway to use as effectiveDate? possible? -->
+                    <service-call name="update#mantle.account.payment.Payment"
+                            in-map="[paymentId:paymentId, effectiveDate:(payment.effectiveDate ?: ec.user.nowTimestamp), statusId:'PmntDelivered']"/>
+                    <return message="Gateway reports Payment ${paymentId} was already captured"/>
+                </else-if><else-if condition="detailOut.gatewayStatusId == 'PmntConfirmed'">
+                    <!-- already settled, update status (to PmntDelivered first) -->
+                    <!-- TODO: get actual settled date from gateway to use as effectiveDate -->
+                    <service-call name="update#mantle.account.payment.Payment"
+                            in-map="[paymentId:paymentId, effectiveDate:(payment.effectiveDate ?: ec.user.nowTimestamp), statusId:'PmntDelivered']"/>
+                    <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntConfirmed']"/>
+                    <return message="Gateway reports Payment ${paymentId} was already settled"/>
+                </else-if><else-if condition="detailOut.gatewayStatusId == 'PmntDeclined'">
+                    <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntDeclined']"/>
+                    <return message="Gateway reports Payment ${paymentId} was declined"/>
+                </else-if><else-if condition="detailOut.gatewayStatusId == 'PmntVoid'">
+                    <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntVoid']"/>
+                    <return message="Gateway reports Payment ${paymentId} has been voided"/>
+                </else-if></if>
+                <!-- NOTE: if PmntAuthorized is returned or there is a gateway transaction status that isn't mapped to a Mantle one just try to capture anyway -->
+            </if>
+
+            <!-- call the configured capture service -->
             <service-call name="${paymentGatewayConfig.captureServiceName}" out-map="captOut"
                     in-map="[paymentId:payment.paymentId, amount:amount, paymentGatewayConfigId:paymentGatewayConfig.paymentGatewayConfigId]"/>
 
@@ -1449,9 +1521,9 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="paymentGatewayResponse?.resultSuccess == 'Y'"><then>
                 <service-call name="update#mantle.account.payment.Payment"
-                        in-map="[paymentId:payment.paymentId, effectiveDate:ec.user.nowTimestamp, statusId:'PmntDelivered']"/>
+                        in-map="[paymentId:paymentId, effectiveDate:(payment.effectiveDate ?: ec.user.nowTimestamp), statusId:'PmntDelivered']"/>
             </then><else-if condition="paymentGatewayResponse?.resultDeclined == 'Y'">
-                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:payment.paymentId, statusId:'PmntDeclined']"/>
+                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntDeclined']"/>
             </else-if></if>
         </actions>
     </service>
@@ -1461,6 +1533,7 @@ along with this software (see the LICENSE.md file). If not, see
         <out-parameters><parameter name="paymentGatewayResponseId"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/>
+            <if condition="payment == null"><return message="Payment ${paymentId} not found"/></if>
 
             <!-- if the Payment.statusId is already PmntDelivered don't try again -->
             <!-- NOTE: also handle other statuses, ie anything other than PmntAuthorized? might be too inflexible... -->
@@ -1544,6 +1617,7 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment" for-update="true"/>
+            <if condition="payment == null"><return message="Payment ${paymentId} not found"/></if>
 
             <service-call name="mantle.account.PaymentServices.get#PaymentTotals" in-map="[paymentId:paymentId]" out-map="totalOut"/>
             <if condition="amount"><then>
@@ -1626,6 +1700,81 @@ along with this software (see the LICENSE.md file). If not, see
                         paymentGatewayConfigId:payment.paymentGatewayConfigId]"/>
                 <set field="refundPaymentId" from="refundOut.paymentId"/>
             </if>
+        </actions>
+    </service>
+
+    <service verb="get" noun="SinglePaymentGatewayDetails">
+        <description>
+            Get the latest transaction details for a Payment from the gateway.
+            If automatically handled status found and matches current Payment status paymentGatewayResponseId may be null.
+        </description>
+        <in-parameters>
+            <parameter name="paymentId" required="true"/>
+            <parameter name="payment" type="EntityValue"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="paymentGatewayResponseId"/>
+        </out-parameters>
+        <actions>
+            <if condition="payment == null"><entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment"/></if>
+            <if condition="payment == null"><return message="Payment ${paymentId} not found"/></if>
+
+            <!-- use paymentGatewayConfigId from Payment if present -->
+            <if condition="!paymentGatewayConfigId"><set field="paymentGatewayConfigId" from="payment.paymentGatewayConfigId"/></if>
+            <!-- see if associated PaymentMethod has a paymentGatewayConfigId -->
+            <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentMethodId">
+                <set field="paymentMethod" from="payment.method"/>
+                <set field="paymentGatewayConfigId" from="paymentMethod?.paymentGatewayConfigId"/>
+            </if>
+            <!-- if no paymentGatewayConfigId and this is a Financial Account payment, default to local gateway -->
+            <if condition="!paymentGatewayConfigId &amp;&amp; payment.paymentInstrumentEnumId == 'PiFinancialAccount'">
+                <set field="paymentGatewayConfigId" value="FinancialAccountLocal"/></if>
+            <!-- look up the gateway and make sure we found one -->
+            <entity-find-one entity-name="mantle.account.method.PaymentGatewayConfig" value-field="paymentGatewayConfig" cache="true"/>
+            <if condition="paymentGatewayConfig == null">
+                <return message="Not getting transaction details for Payment ${paymentId}, could not find Payment Gateway Config"/></if>
+
+            <if condition="!paymentGatewayConfig.detailsServiceName">
+                <log message="Not getting transaction details for Payment ${paymentId}, no detailsServiceName in PaymentGatewayConfig ${paymentGatewayConfigId}"/>
+                <return/>
+            </if>
+
+            <!-- make sure paymentGatewayConfigId set on Payment -->
+            <if condition="!payment.paymentGatewayConfigId">
+                <set field="payment.paymentGatewayConfigId" from="paymentGatewayConfigId"/>
+                <entity-update value-field="payment"/>
+            </if>
+
+            <!-- call the configured service -->
+            <service-call name="${paymentGatewayConfig.detailsServiceName}" out-map="detailOut"
+                    in-map="[paymentId:payment.paymentId, paymentGatewayConfigId:paymentGatewayConfig.paymentGatewayConfigId]"/>
+            <set field="paymentGatewayResponseId" from="detailOut.paymentGatewayResponseId"/>
+
+            <!-- do status update if needed -->
+            <if condition="detailOut.gatewayStatusId"><then>
+                <if condition="detailOut.gatewayStatusId != payment.statusId"><then>
+                    <!-- TODO: consider protection from invalid status transitions, more intelligently handle some scenarios and for others better error messages -->
+                    <if condition="detailOut.gatewayStatusId == 'PmntConfirmed' &amp;&amp; payment.statusId != 'PmntDelivered'">
+                        <!-- go through PmntDelivered first -->
+                        <!-- TODO: get real settled date from gateway for effectiveDate -->
+                        <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId,
+                            effectiveDate:(payment.effectiveDate ?: ec.user.nowTimestamp), statusId:'PmntDelivered']"/>
+                    </if>
+                    <if condition="detailOut.gatewayStatusId == 'PmntDelivered'"><then>
+                        <!-- for Delivered we need to make sure the effectiveDate is set -->
+                        <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId,
+                            effectiveDate:(payment.effectiveDate ?: ec.user.nowTimestamp), statusId:'PmntDelivered']"/>
+                    </then><else>
+                        <service-call name="update#mantle.account.payment.Payment"
+                                in-map="[paymentId:paymentId, statusId:detailOut.gatewayStatusId]"/>
+                    </else></if>
+                    <message>Status for Payment ${paymentId} updated from gateway transaction status</message>
+                </then><else>
+                    <message>Status for Payment ${paymentId} matches gateway transaction status</message>
+                </else></if>
+            </then><else>
+                <message>No automatically handled status for Payment ${paymentId} found from gateway, see gateway history for details</message>
+            </else></if>
         </actions>
     </service>
 
