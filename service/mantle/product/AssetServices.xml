@@ -1508,17 +1508,67 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="assetId" required="true"/>
             <parameter name="facilityId"><description>Defaults to current facilityId</description></parameter>
             <parameter name="locationSeqId"/>
+            <parameter name="containerId"><description>May be actual containerId or serialNumber</description></parameter>
+            <parameter name="scanLocation"><description>May be locationSeqId within facility, containerId, or container serialNumber</description></parameter>
             <parameter name="quantity" type="BigDecimal"><description>Defaults to quantityOnHandTotal if hasQuantity, generally move entire Asset</description></parameter>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true"/>
             <if condition="asset == null"><message error="true">No asset found for ID ${assetId}</message></if>
-            <set field="facLoc" from="asset.location"/>
             <if condition="!facilityId"><set field="facilityId" from="asset.facilityId"/></if>
 
-            <if condition="locationSeqId">
+            <!-- see if scanLocation is a locationSeqId in the Facility -->
+            <if condition="scanLocation &amp;&amp; facilityId">
                 <entity-find-one entity-name="mantle.facility.FacilityLocation" value-field="checkFacLoc">
-                    <field-map field-name="facilityId"/><field-map field-name="locationSeqId"/></entity-find-one>
+                    <field-map field-name="facilityId"/>
+                    <field-map field-name="locationSeqId" from="scanLocation"/>
+                </entity-find-one>
+                <if condition="checkFacLoc != null">
+                    <set field="locationSeqId" from="checkFacLoc.locationSeqId"/>
+                    <set field="scanLocation" from="null"/>
+                </if>
+            </if>
+            <!-- see if scanLocation is a containerId -->
+            <if condition="scanLocation">
+                <entity-find-one entity-name="mantle.product.asset.Container" value-field="container">
+                    <field-map field-name="containerId" from="scanLocation"/></entity-find-one>
+                <if condition="container != null">
+                    <set field="containerId" from="container.containerId"/>
+                    <set field="scanLocation" from="null"/>
+                </if>
+            </if>
+            <!-- see if scanLocation is a Container.serialNumber -->
+            <if condition="scanLocation">
+                <entity-find-one entity-name="mantle.product.asset.Container" value-field="container">
+                    <field-map field-name="serialNumber" from="scanLocation"/></entity-find-one>
+                <if condition="container != null">
+                    <set field="containerId" from="container.containerId"/>
+                    <set field="scanLocation" from="null"/>
+                </if>
+            </if>
+
+            <!-- get facilityId and locationSeqId from Container, do here instead of relying on EECA rule just in case involves a move to another facility -->
+            <if condition="containerId"><then>
+                <if condition="container == null">
+                    <entity-find-one entity-name="mantle.product.asset.Container" value-field="container"/></if>
+                <if condition="container == null">
+                    <entity-find-one entity-name="mantle.product.asset.Container" value-field="container">
+                        <field-map field-name="serialNumber" from="containerId"/></entity-find-one>
+                    <if condition="container == null"><return error="true" message="Container not found with ID or serial number ${containerId}"/></if>
+                    <set field="containerId" from="container.containerId"/>
+                </if>
+                <set field="facilityId" from="container.facilityId"/>
+                <set field="locationSeqId" from="container.locationSeqId"/>
+            </then><else-if condition="asset.containerId">
+                <!-- no containerId passed but Asset has containerId, clear otherwise new location won't get set (will be overridden by container -->
+                <set field="asset.containerId" from="null"/>
+                <entity-update value-field="asset"/>
+            </else-if></if>
+
+            <set field="facLoc" from="asset.location"/>
+            <if condition="locationSeqId">
+                <if condition="checkFacLoc == null"><entity-find-one entity-name="mantle.facility.FacilityLocation" value-field="checkFacLoc">
+                    <field-map field-name="facilityId"/><field-map field-name="locationSeqId"/></entity-find-one></if>
                 <if condition="checkFacLoc == null"><return error="true" message="Location [${locationSeqId}] is not valid in facility ${ec.resource.expand('FacilityNameTemplate', '', asset.facility)}"/></if>
             </if>
             <if condition="asset.hasQuantity != 'N'">
@@ -1535,7 +1585,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- clone asset in new facility/location with quantity -->
                 <service-call name="create#mantle.product.asset.Asset" out-map="newAssetOut"
                         in-map="asset.getMap() + [assetId:null, facilityId:facilityId, locationSeqId:locationSeqId,
-                                quantityOnHandTotal:0, availableToPromiseTotal:0]"/>
+                                containerId:containerId, quantityOnHandTotal:0, availableToPromiseTotal:0]"/>
                 <set field="newAssetId" from="newAssetOut.assetId"/>
                 <service-call name="create#mantle.product.asset.AssetDetail" out-map="context"
                         in-map="[assetId:newAssetId, effectiveDate:ec.user.nowTimestamp, quantityOnHandDiff:quantity,
@@ -1576,7 +1626,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="newAsset"/>
             <set field="newFacLoc" from="newAsset.location"/>
-            <message>Moved asset ${ec.resource.expand('AssetNameTemplate', '', asset)} from ${ec.resource.expand('FacilityLocationNameTemplate', '', facLoc?:[:])} to ${ec.resource.expand('FacilityLocationNameTemplate', '', newFacLoc?:[:])}.</message>
+            <message>Moved asset ${ec.resource.expand('AssetNameTemplate', '', asset)} from ${ec.resource.expand('FacilityLocationNameTemplate', '', facLoc?:[:])} to ${ec.resource.expand('FacilityLocationNameTemplate', '', newFacLoc?:[:])}${container ? ' in container ' + (container.serialNumber ?: container.description ?: containerId) : ''}.</message>
         </actions>
     </service>
 
