@@ -43,4 +43,68 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
         </actions>
     </service>
+
+    <service verb="add" noun="ShipmentToShipmentLoad">
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="binLocationNumber" type="Integer"/>
+            <parameter name="allowBulkLocations" type="Boolean" default="false"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipment.statusId in ['ShipShipped', 'ShipDelivered', 'ShipRejected','ShipCancelled']">
+                <return message="Shipment ${shipmentId} is in status ${shipment.status?.description ?: shipment.statusId}, not shipping" type="warning"/></if>
+
+            <!-- if !allowBulkLocations return with warning if any inventory reserved against bulk location -->
+
+            <!-- update the shipment -->
+            <service-call name="update#mantle.shipment.Shipment"
+                    in-map="[shipmentId:shipmentId, shipWorkEffortId:workEffortId, binLocationNumber:binLocationNumber]"/>
+        </actions>
+    </service>
+    <service verb="add" noun="OrderPartToShipmentLoad">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId" required="true"/>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="binLocationNumber" type="Integer"/>
+            <parameter name="allowBulkLocations" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="shipmentId"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
+            <if condition="orderPart.statusId != 'OrderApproved'">
+                <return message="Order ${orderId} part ${orderPartSeqId} is not in Approved status, not shipping" type="warning"/></if>
+
+            <!-- find existing shipment(s) for items in this order part -->
+            <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
+                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/></entity-find>
+            <set field="orderItemSeqIdList" from="orderItemList*.orderItemSeqId"/>
+            <entity-find entity-name="mantle.shipment.ShipmentAndItemSource" list="shipmentItemSourceList" distinct="true">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderItemSeqId" operator="in" from="orderItemSeqIdList"/>
+                <econdition field-name="shipmentStatusId" operator="not-in" value="ShipRejected,ShipCancelled"/>
+                <econdition field-name="statusId" operator="not-equals" value="SisCancelled"/>
+                <select-field field-name="shipmentId"/>
+            </entity-find>
+            <set field="shipmentIdList" from="shipmentItemSourceList*.shipmentId"/>
+
+            <!-- if has no shipments create one -->
+            <!-- NOTE: if not all shipped then ship the rest? no, don't bulk or auto extend what is likely a manual order shipment -->
+            <if condition="!shipmentIdList">
+                <service-call name="mantle.shipment.ShipmentServices.create#OrderPartShipment" out-map="createShipmentOut"
+                        in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
+                <set field="shipmentIdList" from="[createShipmentOut.shipmentId]"/>
+            </if>
+
+            <!-- add shipment(s) to shipment load (picklist) -->
+            <iterate list="shipmentIdList" entry="shipmentId">
+                <service-call name="mantle.work.ShipmentWorkServices.add#ShipmentToShipmentLoad" in-map="[shipmentId:shipmentId,
+                        workEffortId:workEffortId, binLocationNumber:binLocationNumber, allowBulkLocations:allowBulkLocations]"/>
+            </iterate>
+        </actions>
+    </service>
 </services>
