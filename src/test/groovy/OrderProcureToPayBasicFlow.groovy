@@ -496,35 +496,35 @@ class OrderProcureToPayBasicFlow extends Specification {
 
             <mantle.account.invoice.InvoiceItem invoiceId="55400" invoiceItemSeqId="01"
                 itemTypeEnumId="ItemInventory" productId="DEMO_1_1" quantity="400" amount="8.00"
-                description="Demo Product One-One" itemDate="${effectiveTime}"/>
+                description="Demo Product One-One" itemDate=""/>
             <mantle.order.OrderItemBilling orderItemBillingId="55400" orderId="${purchaseOrderId}" orderItemSeqId="01"
                 invoiceId="55400" invoiceItemSeqId="01" quantity="400" amount="8.00"
                 shipmentId="${shipResult.shipmentId}"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="55400" invoiceItemSeqId="02"
                 itemTypeEnumId="ItemInventory" productId="DEMO_3_1" quantity="100" amount="4.50"
-                description="Demo Product Three-One" itemDate="${effectiveTime}"/>
+                description="Demo Product Three-One" itemDate=""/>
             <mantle.order.OrderItemBilling orderItemBillingId="55401" orderId="${purchaseOrderId}" orderItemSeqId="02"
                 invoiceId="55400" invoiceItemSeqId="02" quantity="100" amount="4.50"
                 shipmentId="${shipResult.shipmentId}"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="55400" invoiceItemSeqId="03"
                 itemTypeEnumId="ItemAsset" productId="EQUIP_1" quantity="1" amount="10,000" description="Picker Bot 2000"
-                itemDate="${effectiveTime}" assetId="${equip1AssetId}"/>
+                itemDate="" assetId="${equip1AssetId}"/>
             <mantle.order.OrderItemBilling orderItemBillingId="55402" orderId="${purchaseOrderId}" orderItemSeqId="03"
                 invoiceId="55400" invoiceItemSeqId="03" quantity="1" amount="10,000"
                 shipmentId="${shipResult.shipmentId}"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="55400" invoiceItemSeqId="04"
                 itemTypeEnumId="ItemAsset" productId="EQUIP_1" quantity="1" amount="10,000" description="Picker Bot 2000"
-                itemDate="${effectiveTime}" assetId="${equip2AssetId}"/>
+                itemDate="" assetId="${equip2AssetId}"/>
             <mantle.order.OrderItemBilling orderItemBillingId="55403" orderId="${purchaseOrderId}" orderItemSeqId="03"
                 invoiceId="55400" invoiceItemSeqId="04" quantity="1" amount="10,000"
                 shipmentId="${shipResult.shipmentId}"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="55400" invoiceItemSeqId="05"
                 itemTypeEnumId="ItemShipping" quantity="1" amount="145" description="Incoming Freight"
-                itemDate="${effectiveTime}"/>
+                itemDate=""/>
             <mantle.order.OrderItemBilling orderItemBillingId="55404" orderId="${purchaseOrderId}" orderItemSeqId="04"
                 invoiceId="55400" invoiceItemSeqId="05" quantity="1" amount="145"/>
 
@@ -938,7 +938,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     toPartyId="CustJqp" fromPartyId="ORG_ZIZI_RETAIL" description="For Order 55401 part 01 and Shipment 55401"
                     invoiceDate="${effectiveTime}" currencyUomId="USD" statusId="InvoicePmtRecvd">
                 <mantle.account.invoice.InvoiceItem invoiceItemSeqId="01" itemTypeEnumId="ItemAsset" amount="9000"
-                        quantity="1" productId="EQUIP_1" description="Picker Bot 2000" itemDate="${effectiveTime}" assetId="${equip1AssetId}">
+                        quantity="1" productId="EQUIP_1" description="Picker Bot 2000" itemDate="" assetId="${equip1AssetId}">
                     <mantle.shipment.ShipmentItemSource shipmentItemSourceId="55404" quantity="1" productId="EQUIP_1"
                             orderId="55401" orderItemSeqId="01" statusId="SisPacked" quantityNotHandled="0" shipmentId="55401"/>
                     <mantle.order.OrderItemBilling orderItemBillingId="55405" orderItemSeqId="01" amount="9000"
@@ -1050,7 +1050,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                     toPartyId="CustJqp" fromPartyId="ORG_ZIZI_RETAIL" description="For Order 55402 part 01 and Shipment 55402"
                     invoiceDate="${effectiveTime}" currencyUomId="USD" statusId="InvoicePmtRecvd">
                 <mantle.account.invoice.InvoiceItem invoiceItemSeqId="01" itemTypeEnumId="ItemAsset" amount="11000"
-                        quantity="1" productId="EQUIP_1" description="Picker Bot 2000" itemDate="${effectiveTime}" assetId="${equip2AssetId}">
+                        quantity="1" productId="EQUIP_1" description="Picker Bot 2000" itemDate="" assetId="${equip2AssetId}">
                     <mantle.shipment.ShipmentItemSource shipmentItemSourceId="55405" quantity="1" productId="EQUIP_1"
                             orderId="55402" orderItemSeqId="01" statusId="SisPacked" quantityNotHandled="0" shipmentId="55402"/>
                     <mantle.order.OrderItemBilling orderItemBillingId="55406" orderItemSeqId="01" amount="11000"

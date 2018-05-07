@@ -361,19 +361,19 @@ class OrderToCashBasicFlow extends Specification {
                 description="For Order ${cartOrderId} part 01 and Shipment ${shipResult.shipmentId}" currencyUomId="USD"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="55500" invoiceItemSeqId="01" itemTypeEnumId="ItemProduct"
-                productId="DEMO_1_1" quantity="1" amount="16.99" description="Demo Product One-One" itemDate="${effectiveTime}"/>
+                productId="DEMO_1_1" quantity="1" amount="16.99" description="Demo Product One-One" itemDate=""/>
             <mantle.order.OrderItemBilling orderItemBillingId="55500" orderId="${cartOrderId}" orderItemSeqId="01"
                 invoiceId="55500" invoiceItemSeqId="01" assetIssuanceId="55500" shipmentId="${shipResult.shipmentId}"
                 quantity="1" amount="16.99"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="55500" invoiceItemSeqId="02" itemTypeEnumId="ItemProduct"
-                productId="DEMO_3_1" quantity="5" amount="7.77" description="Demo Product Three-One" itemDate="${effectiveTime}"/>
+                productId="DEMO_3_1" quantity="5" amount="7.77" description="Demo Product Three-One" itemDate=""/>
             <mantle.order.OrderItemBilling orderItemBillingId="55501" orderId="${cartOrderId}" orderItemSeqId="02"
                 invoiceId="55500" invoiceItemSeqId="02" assetIssuanceId="55501" shipmentId="${shipResult.shipmentId}"
                 quantity="5" amount="7.77"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="55500" invoiceItemSeqId="03" itemTypeEnumId="ItemProduct"
-                productId="DEMO_2_1" quantity="7" amount="12.12" description="Demo Product Two-One" itemDate="${effectiveTime}"/>
+                productId="DEMO_2_1" quantity="7" amount="12.12" description="Demo Product Two-One" itemDate=""/>
             <mantle.order.OrderItemBilling orderItemBillingId="55502" orderId="${cartOrderId}" orderItemSeqId="03"
                 invoiceId="55500" invoiceItemSeqId="03" assetIssuanceId="55502" shipmentId="${shipResult.shipmentId}"
                 quantity="7" amount="12.12"/>
@@ -381,7 +381,7 @@ class OrderToCashBasicFlow extends Specification {
         if (kieEnabled) {
             dataCheckErrors += ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
                 <mantle.account.invoice.InvoiceItem invoiceId="55500" invoiceItemSeqId="04" itemTypeEnumId="ItemShipping"
-                    quantity="1" amount="5" description="Ground Parcel" itemDate="${effectiveTime}"/>
+                    quantity="1" amount="5" description="Ground Parcel" itemDate=""/>
                 <mantle.order.OrderItemBilling orderItemBillingId="55503" orderId="${cartOrderId}" orderItemSeqId="04"
                     invoiceId="55500" invoiceItemSeqId="04" shipmentId="${shipResult.shipmentId}" quantity="1" amount="${kieEnabled ? '5' : '0'}"/>
             </entity-facade-xml>""").check()
