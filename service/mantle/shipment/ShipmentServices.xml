@@ -59,6 +59,14 @@ along with this software (see the LICENSE.md file). If not, see
 
             <parameter name="acctgTransList" type="List"><parameter name="acctgTrans" type="Map"/></parameter>
             <parameter name="acctgTransIdSet" type="Set"><parameter name="acctgTransId"/></parameter>
+
+            <parameter name="anyReceived" type="Boolean"/>
+            <parameter name="allItemsPacked" type="Boolean"/><parameter name="anyItemPacked" type="Boolean"/>
+
+            <parameter name="shippingGatewayConfigId"/>
+            <parameter name="shippingGatewayConfig" type="Map"/>
+            <parameter name="hasAllLabels" type="Boolean"/><parameter name="hasAnyLabels" type="Boolean"/>
+            <parameter name="destContactMechValid" type="Boolean"/>
         </out-parameters>
         <actions>
             <service-call name="mantle.shipment.ShipmentServices.get#ShipmentContactInfo" out-map="context" in-map="[shipmentId:shipmentId]"/>
@@ -109,6 +117,40 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="acctgTransList">
                 <econdition field-name="shipmentId"/></entity-find>
             <set field="acctgTransIdSet" from="new TreeSet(acctgTransList*.acctgTransId)"/>
+
+            <if condition="isIncoming || isTransfer">
+                <set field="anyReceived" from="false"/>
+                <iterate list="shipmentItemDetailList" entry="sid">
+                    <if condition="sid.quantityAcceptedTotal || sid.quantityRejectedTotal"><set field="anyReceived" from="true"/></if>
+                </iterate>
+            </if>
+            <if condition="isOutgoing || isTransfer">
+                <set field="allItemsPacked" from="true"/>
+                <iterate list="shipmentItemSourceList" entry="sisCheck">
+                    <if condition="sisCheck.quantityNotHandled &gt; 0.0"><set field="allItemsPacked" from="false"/><break/></if></iterate>
+                <set field="anyItemPacked" from="false"/>
+                <iterate list="shipmentItemSourceList" entry="sisCheck">
+                    <if condition="sisCheck.quantityNotHandled == 0.0"><set field="anyItemPacked" from="true"/><break/></if></iterate>
+
+                <set field="hasAllLabels" from="true"/>
+                <set field="hasAnyLabels" from="false"/>
+                <iterate list="packageRouteSegList" entry="packageRouteSeg">
+                    <if condition="packageRouteSeg.gatewayLabelId || packageRouteSeg.labelImage != null || packageRouteSeg.labelUrl">
+                        <then><set field="hasAnyLabels" from="true"/></then>
+                        <else><set field="hasAllLabels" from="false"/></else>
+                    </if>
+                </iterate>
+
+                <set field="shippingGatewayConfigId" from="firstRouteSegment.shippingGatewayConfigId ?: ec.user.getPreference('DefaultShipmentGatewayConfigId')"/>
+                <if condition="shippingGatewayConfigId"><entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig"/></if>
+            </if>
+
+            <!-- get dest ContactMech for trust level -->
+            <if condition="lastRouteSegment.destPostalContactMechId">
+                <entity-find-one entity-name="mantle.party.contact.ContactMech" value-field="destContactMech">
+                    <field-map field-name="contactMechId" from="lastRouteSegment.destPostalContactMechId"/></entity-find-one>
+            </if>
+            <set field="destContactMechValid" from="destContactMech != null &amp;&amp; destContactMech.trustLevelEnumId in ['CmtlValid', 'CmtlVerified']"/>
         </actions>
     </service>
     <service verb="get" noun="ShipmentContactInfo">
@@ -1408,6 +1450,45 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="pack" noun="ShipmentProductScan">
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="scanInput" required="true"/>
+            <parameter name="shipmentPackageSeqId"/>
+            <parameter name="quantity" type="BigDecimal" required="true"/>
+            <parameter name="packDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+        </in-parameters>
+        <actions>
+            <!-- try scanInput by productId, then assetId, then ProductIdentification -->
+            <entity-find entity-name="mantle.shipment.ShipmentItem" list="shipItemList">
+                <econdition field-name="shipmentId"/></entity-find>
+            <set field="productIdList" from="shipItemList*.productId"/>
+            <if condition="!productIdList"><return message="Shipment ${shipmentId} has no items"/></if>
+
+            <if condition="scanInput in productIdList"><set field="productId" from="scanInput"/></if>
+            <if condition="!productId">
+                <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
+                    <field-map field-name="assetId" from="scanInput"/></entity-find-one>
+                <if condition="asset != null &amp;&amp; asset.productId in productIdList">
+                    <set field="productId" from="asset.productId"/></if>
+            </if>
+            <if condition="!productId">
+                <entity-find entity-name="mantle.product.ProductIdentification" list="prodIdentList">
+                    <econdition field-name="idValue" from="scanInput"/>
+                    <econdition field-name="productId" operator="in" from="productIdList"/>
+                </entity-find>
+                <if condition="prodIdentList">
+                    <if condition="prodIdentList.size() &gt; 1">
+                        <return type="warning" message="Found more than one product on shipment ${shipmentId} with other ID ${scanInput}, scan internal product or asset ID or manually select the product to pack"/></if>
+                    <set field="productId" from="prodIdentList[0].productId"/>
+                </if>
+            </if>
+
+            <if condition="!productId"><return type="warning" message="Could not find product on shipment ${shipmentId} with scanned ID ${scanInput}"/></if>
+
+            <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentProduct" in-map="context"/>
+        </actions>
+    </service>
     <service verb="pack" noun="ShipmentProduct">
         <in-parameters>
             <parameter name="productId" required="true"/>
