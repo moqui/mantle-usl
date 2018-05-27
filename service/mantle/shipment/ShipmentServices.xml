@@ -2045,6 +2045,7 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="cancel" noun="Shipment">
+        <!-- TODO: consider changing most of this to always run on through SECA on update#mantle.shipment.Shipment with statusId changed to ShipCancelled -->
         <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
         <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
@@ -2052,7 +2053,47 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="shipment == null"><return error="true" message="Shipment not found with ID ${shipmentId}"/></if>
             <set field="shipmentTypeEnum" from="shipment.'ShipmentType#moqui.basic.Enumeration'"/>
             <set field="isIncoming" from="shipmentTypeEnum?.enumId == 'ShpTpIncoming' || shipmentTypeEnum?.parentEnumId == 'ShpTpIncoming'"/>
+            <set field="isOutgoing" from="shipmentTypeEnum?.enumId == 'ShpTpOutgoing' || shipmentTypeEnum?.parentEnumId == 'ShpTpOutgoing'"/>
+            <set field="isTransfer" from="shipmentTypeEnum?.enumId == 'ShpTpTransfer' || shipmentTypeEnum?.parentEnumId == 'ShpTpTransfer'"/>
 
+            <!-- cancel invoices, ONLY for outgoing shipments -->
+            <if condition="isOutgoing">
+                <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="sisInvoiceList" distinct="true">
+                    <econdition field-name="shipmentId"/>
+                    <econdition field-name="invoiceId" operator="is-not-null"/>
+                    <select-field field-name="invoiceId"/>
+                </entity-find>
+                <set field="invoiceIdList" from="sisInvoiceList*.invoiceId"/>
+                <iterate list="invoiceIdList" entry="invoiceId">
+                    <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+                    <if condition="invoice.statusId == 'InvoiceCancelled'"><then>
+                        <message type="info">Invoice ${invoiceId} already cancelled</message>
+                    </then><else>
+                        <service-call name="update#mantle.account.invoice.Invoice" in-map="[invoiceId:invoiceId, statusId:'InvoiceCancelled']"/>
+                    </else></if>
+                </iterate>
+            </if>
+
+            <!-- unpack/unissue issuances -->
+            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList">
+                <econdition field-name="shipmentId"/><econdition field-name="quantity" operator="greater" from="0.0"/></entity-find>
+            <iterate list="assetIssuanceList" entry="assetIssuance">
+                <service-call name="mantle.shipment.ShipmentServices.unpack#ShipmentItemIssuance"
+                        in-map="[assetIssuanceId:assetIssuance.assetIssuanceId]"/>
+            </iterate>
+
+            <!-- un-receive receipts (zero out) -->
+            <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList">
+                <econdition field-name="shipmentId"/><econdition field-name="quantityAccepted" operator="greater" from="0.0"/></entity-find>
+            <iterate list="assetReceiptList" entry="assetReceipt">
+                <service-call name="mantle.product.AssetServices.update#AssetAndReceipt" in-map="[assetId:assetReceipt.assetId,
+                        assetReceiptId:assetReceipt.assetReceiptId, shipmentId:shipmentId, quantityAccepted:0.0, quantityRejected:0.0]"/>
+            </iterate>
+
+            <!-- NOTE: cancel/refund labels? NO: warn that need to be refunded -->
+            <!-- NOTE: check Payment auth/delivered and warn that won't cancel/refund payment -->
+
+            <!-- validations to make sure nothing left hanging -->
             <entity-find-count entity-name="mantle.shipment.ShipmentItemSource" count-field="handledCount">
                 <econdition field-name="shipmentId"/>
                 <econdition field-name="quantity" operator="greater" to-field-name="quantityNotHandled"/>
@@ -2060,17 +2101,18 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="handledCount">
                 <return error="true" message="Shipment ${shipmentId} has items already handled, cannot cancel."/></if>
 
-            <if condition="isIncoming"><then>
+            <if condition="isIncoming || isTransfer">
                 <entity-find-count entity-name="mantle.product.receipt.AssetReceipt" count-field="assetReceiptCount">
                     <econdition field-name="shipmentId"/><econdition field-name="quantityAccepted" operator="greater" from="0.0"/></entity-find-count>
                 <if condition="assetReceiptCount">
                     <return error="true" message="Incoming shipment ${shipmentId} has items already received, cannot cancel."/></if>
-            </then><else>
+            </if>
+            <if condition="isOutgoing || isTransfer">
                 <entity-find-count entity-name="mantle.product.issuance.AssetIssuance" count-field="assetIssuanceCount">
                     <econdition field-name="shipmentId"/><econdition field-name="quantity" operator="greater" from="0.0"/></entity-find-count>
                 <if condition="assetIssuanceCount">
                     <return error="true" message="Outgoing shipment ${shipmentId} has items already issued/packed, cannot cancel."/></if>
-            </else></if>
+            </if>
 
             <service-call name="mantle.shipment.ShipmentServices.reduce#QuantitiesToHandled" in-map="[shipmentId:shipmentId]"/>
 
