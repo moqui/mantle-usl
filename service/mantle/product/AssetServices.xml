@@ -853,11 +853,29 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="quantity &gt; assetReservation.quantityNotIssued">
                 <return error="true" message="For reservation ${assetReservation.assetReservationId} tried to issue quantity ${quantity} which is greater than quantity not issued ${assetReservation.quantityNotIssued} for the reservation"/></if>
 
-            <service-call name="create#mantle.product.issuance.AssetIssuance" out-map="context"
-                    in-map="[assetId:assetReservation.assetId, assetReservationId:assetReservation.assetReservationId,
-                        orderId:assetReservation.orderId, orderItemSeqId:assetReservation.orderItemSeqId,
-                        shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId, productId:assetReservation.productId,
-                        issuedDate:issuedDate, issuedByUserId:ec.user.userId, quantity:quantity]"/>
+            <!-- see if there is another issuance we can add to -->
+            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingIssuanceList">
+                <econdition field-name="shipmentId"/>
+                <econdition field-name="assetReservationId" from="assetReservation.assetReservationId"/>
+                <!-- these 3 shouldn't be necessary when constrained by assetReservationId but just in case -->
+                <econdition field-name="assetId" from="assetReservation.assetId"/>
+                <econdition field-name="orderId" from="assetReservation.orderId" ignore-if-empty="true"/>
+                <econdition field-name="orderItemSeqId" from="assetReservation.orderItemSeqId" ignore-if-empty="true"/>
+            </entity-find>
+            <if condition="existingIssuanceList"><then>
+                <!-- add to existing issuance -->
+                <set field="existingIssuance" from="existingIssuanceList[0]"/>
+                <set field="assetIssuanceId" from="existingIssuance.assetIssuanceId"/>
+                <service-call name="update#mantle.product.issuance.AssetIssuance"
+                        in-map="[assetIssuanceId:assetIssuanceId, quantity:(existingIssuance.quantity + quantity)]"/>
+            </then><else>
+                <!-- create an issuance -->
+                <service-call name="create#mantle.product.issuance.AssetIssuance" out-map="context"
+                        in-map="[assetId:assetReservation.assetId, assetReservationId:assetReservation.assetReservationId,
+                            orderId:assetReservation.orderId, orderItemSeqId:assetReservation.orderItemSeqId,
+                            shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId, productId:assetReservation.productId,
+                            issuedDate:issuedDate, issuedByUserId:ec.user.userId, quantity:quantity]"/>
+            </else></if>
 
             <!-- create AssetDetail to decrement quantityOnHand -->
             <!-- NOTE: no availableToPromiseDiff because that was modified during the reservation -->
@@ -875,7 +893,7 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="issue" noun="Asset" no-tx-cache="true">
-        <description>Issue an Asset with no reservation.</description>
+        <description>Issue an Asset (with no reservation) to a Shipment.</description>
         <in-parameters>
             <parameter name="assetId"><description>Optional assetId, issues against this first if specified.</description></parameter>
             <parameter name="shipmentId" required="true"/>
@@ -950,18 +968,55 @@ along with this software (see the LICENSE.md file). If not, see
                         <set field="quantityToIssue" from="asset.availableToPromiseTotal &gt; quantityRemaining ? quantityRemaining : asset.availableToPromiseTotal"/>
                         <if condition="quantityToIssue &lt;= 0.0"><continue/></if>
                         <set field="quantityRemaining" from="quantityRemaining - quantityToIssue"/>
-                        <service-call name="create#mantle.product.issuance.AssetIssuance" out-map="issueOut" in-map="baseMap +
+
+                        <!-- see if there is another issuance we can add to -->
+                        <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingIssuanceList">
+                            <econdition field-name="shipmentId"/>
+                            <econdition field-name="assetId" from="asset.assetId"/>
+                            <econdition field-name="shipmentItemSourceId" from="baseMap.shipmentItemSourceId" ignore-if-empty="true"/>
+                            <econdition field-name="orderId" from="baseMap.orderId" ignore-if-empty="true"/>
+                            <econdition field-name="orderItemSeqId" from="baseMap.orderItemSeqId" ignore-if-empty="true"/>
+                        </entity-find>
+                        <if condition="existingIssuanceList"><then>
+                            <!-- add to existing issuance -->
+                            <set field="existingIssuance" from="existingIssuanceList[0]"/>
+                            <service-call name="update#mantle.product.issuance.AssetIssuance"
+                                    in-map="[assetIssuanceId:existingIssuance.assetIssuanceId, quantity:(existingIssuance.quantity + quantityToIssue)]"/>
+                            <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="baseMap + [assetId:asset.assetId,
+                                effectiveDate:issuedDate, quantityDiff:-quantityToIssue, assetIssuanceId:existingIssuance.assetIssuanceId]"/>
+                        </then><else>
+                            <!-- create an issuance -->
+                            <service-call name="create#mantle.product.issuance.AssetIssuance" out-map="issueOut" in-map="baseMap +
                                 [assetId:asset.assetId, issuedDate:issuedDate, issuedByUserId:ec.user.userId, quantity:quantityToIssue]"/>
-                        <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="baseMap + [assetId:asset.assetId,
+                            <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="baseMap + [assetId:asset.assetId,
                                 effectiveDate:issuedDate, quantityDiff:-quantityToIssue, assetIssuanceId:issueOut.assetIssuanceId]"/>
+                        </else></if>
                     </if>
                 </iterate>
                 <!-- not all issued? issue to last (most recent) Asset -->
                 <if condition="quantityRemaining &gt; 0">
-                    <service-call name="create#mantle.product.issuance.AssetIssuance" out-map="issueOut" in-map="baseMap +
+                    <!-- see if there is another issuance we can add to -->
+                    <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingIssuanceList">
+                        <econdition field-name="shipmentId"/>
+                        <econdition field-name="assetId" from="lastAsset.assetId"/>
+                        <econdition field-name="shipmentItemSourceId" from="baseMap.shipmentItemSourceId" ignore-if-empty="true"/>
+                        <econdition field-name="orderId" from="baseMap.orderId" ignore-if-empty="true"/>
+                        <econdition field-name="orderItemSeqId" from="baseMap.orderItemSeqId" ignore-if-empty="true"/>
+                    </entity-find>
+                    <if condition="existingIssuanceList"><then>
+                        <!-- add to existing issuance -->
+                        <set field="existingIssuance" from="existingIssuanceList[0]"/>
+                        <service-call name="update#mantle.product.issuance.AssetIssuance"
+                                in-map="[assetIssuanceId:existingIssuance.assetIssuanceId, quantity:(existingIssuance.quantity + quantityRemaining)]"/>
+                        <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="baseMap + [assetId:asset.assetId,
+                                effectiveDate:issuedDate, quantityDiff:-quantityRemaining, assetIssuanceId:existingIssuance.assetIssuanceId]"/>
+                    </then><else>
+                        <!-- create an issuance -->
+                        <service-call name="create#mantle.product.issuance.AssetIssuance" out-map="issueOut" in-map="baseMap +
                             [assetId:lastAsset.assetId, issuedDate:issuedDate, issuedByUserId:ec.user.userId, quantity:quantityRemaining]"/>
-                    <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="baseMap + [assetId:lastAsset.assetId,
+                        <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="baseMap + [assetId:lastAsset.assetId,
                             effectiveDate:issuedDate, quantityDiff:-quantityRemaining, assetIssuanceId:issueOut.assetIssuanceId]"/>
+                    </else></if>
                 </if>
             </then><else>
                 <!-- no asset... create a shell one to record the issuance and detail against -->
