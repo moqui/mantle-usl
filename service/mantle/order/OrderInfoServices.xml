@@ -458,6 +458,8 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="isVendorInternalOrg"><then>
                 <!-- ========== Sales Order Validations ========== -->
 
+                <!-- TODO: add ProductStore based configuration for all of these validations -->
+
                 <!-- get other OrderParts for various validations -->
                 <set field="includeStatuses" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderCompleted', 'OrderHold']"/>
                 <entity-find entity-name="mantle.order.OrderPart" list="otherPartList">
@@ -513,6 +515,18 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetResList">
                     <econdition field-name="orderId"/><order-by field-name="orderItemSeqId"/></entity-find>
 
+                <!-- are there any unavailable reservations? -->
+                <set field="arUnavailableMap" from="[:]"/>
+                <iterate list="assetResList" entry="assetRes">
+                    <if condition="assetRes.quantityNotAvailable">
+                        <script>addToBigDecimalInMap(assetRes.orderItemSeqId, assetRes.quantityNotAvailable, arUnavailableMap)</script></if>
+                </iterate>
+                <iterate list="arUnavailableMap" key="orderItemSeqId" entry="quantityNotAvailable">
+                    <set field="curOrderItem" from="orderItemList.find({ it.orderItemSeqId == orderItemSeqId })"/>
+                    <script>approveWarnings.add(ec.resource.expand(
+                            'Item ${orderItemSeqId} has ${ec.l10n.format(quantityNotAvailable, "0.##")} of ${ec.l10n.format(curOrderItem.quantity, "0.##")} not available in inventory', null))</script>
+                </iterate>
+
                 <!-- see if we need to check for single lot or newer inventory -->
                 <set field="singleLot" from="'BlY'.equals(ec.service.sync().name('mantle.party.PartyServices.get#PartySettingValue')
                         .parameter('partySettingTypeId', 'CustomerSingleLot').parameter('partyId', orderPart.customerPartyId).call()?.get('settingValue'))"/>
@@ -523,11 +537,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="oldestLotExpireByItemSeqId" from="[:]"/>
                 <iterate list="assetResList" entry="assetRes">
                     <set field="orderItemSeqId" from="assetRes.orderItemSeqId"/>
-                    <!-- is inventory available? get from AssetReservation.quantityNotAvailable -->
-                    <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetResList">
-                        <econdition field-name="orderId"/><econdition field-name="quantityNotAvailable" operator="greater" from="0.0"/></entity-find>
-                    <if condition="assetRes.quantityNotAvailable &gt; 0.0"><script>approveWarnings.add(ec.resource.expand(
-                        'Item ${orderItemSeqId} asset ${assetRes.assetId} has ${ec.l10n.format(assetRes.quantityNotAvailable, "0.##")} of ${ec.l10n.format(assetRes.quantity, "0.##")} not available', null))</script></if>
 
                     <!-- get data for single lot and newer inventory -->
                     <if condition="singleLot || newerInventory">
@@ -579,7 +588,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="!productId"><continue/></if>
                     <script>productIdSet.add(productId)</script>
                     <set field="quantity" from="orderItem.quantity"/>
-                    <!-- TODO: make the 10 configurable? -->
+                    <!-- TODO: make the 10 configurable (by ProductStore) -->
                     <if condition="quantity &lt; 10"><continue/></if>
                     <set field="curOrderPart" from="orderPartList.find({ it.orderPartSeqId == orderItem.orderPartSeqId })"/>
                     <set field="curFacilityId" from="curOrderPart?.facilityId"/>
@@ -587,16 +596,17 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- get current available inventory for product in facility; will not include this order as already reserved -->
                     <entity-find entity-name="mantle.product.asset.AssetSummaryView" list="atpList">
                         <econdition field-name="productId"/><econdition field-name="facilityId" from="curFacilityId"/>
+                        <having-econditions><econdition field-name="availableToPromiseTotal" operator="greater" from="0.0"/></having-econditions>
                         <select-field field-name="availableToPromiseTotal"/>
                     </entity-find>
                     <if condition="!atpList"><continue/></if>
                     <set field="availableToPromiseTotal" from="atpList[0].availableToPromiseTotal"/>
                     <if condition="!availableToPromiseTotal"><continue/></if><!-- if null or zero ATP -->
-                    <!-- TODO: make the 20% configurable? -->
+                    <!-- TODO: make the 20% configurable (by ProductStore) -->
                     <set field="percentOfAvailable" from="20.0"/>
                     <set field="curLimit" from="(quantity + availableToPromiseTotal) * (percentOfAvailable/100.0)"/>
                     <if condition="quantity &gt; curLimit"><script>approveWarnings.add(ec.resource.expand(
-                        'Item ${orderItem.orderItemSeqId} has ${ec.l10n.format(quantity, "0.##")} which is greater than ${percentOfAvailable}% of available inventory (${ec.l10n.format(curLimit, "0.##")})', null))</script></if>
+                        'Item ${orderItem.orderItemSeqId} has ${ec.l10n.format(quantity, "0.##")} which is greater than ${percentOfAvailable}% of available inventory (${ec.l10n.format(availableToPromiseTotal, "0.##")})', null))</script></if>
                 </iterate>
 
                 <!-- duplicate/similar order with 24 hours (+/- 24hrs); any other order with any of the products on this order -->
