@@ -1930,6 +1930,70 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="convertedQuantity" from="convertQuantityOut?.convertedAmount ?: 0"/>
         </actions>
     </service>
+    <service verb="get" noun="ShipmentPackageWeight">
+        <description>Calculate package weight including box type and contents (products by ShippingWeight), converting units as needed</description>
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="shipmentPackageSeqId" required="true"/>
+            <parameter name="shipmentBoxTypeId"/>
+            <parameter name="weightUomId"><description>If not specified defaults to ShipmentBoxType.weightUomId</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="weight" type="BigDecimal"/>
+            <parameter name="weightUomId"/>
+        </out-parameters>
+        <actions>
+            <if condition="!shipmentBoxTypeId">
+                <entity-find-one entity-name="mantle.shipment.ShipmentPackage" value-field="shipmentPackage"/>
+                <if condition="shipmentPackage == null"><return type="danger" message="Package ${shipmentPackageSeqId} not found for shipment ${shipmentId}, not calculating weight"/></if>
+                <set field="shipmentBoxTypeId" from="shipmentPackage.shipmentBoxTypeId"/>
+            </if>
+            <if condition="!shipmentBoxTypeId"><return type="warning" message="No box type specified or set on package, not calculating weight"/></if>
+            <entity-find-one entity-name="mantle.shipment.ShipmentBoxType" value-field="shipmentBoxType"/>
+            <if condition="shipmentBoxType == null"><return type="danger" message="Box type not found with ID ${shipmentBoxTypeId}"/></if>
+            <if condition="!shipmentBoxType.boxWeight"><return type="danger" message="Box type ${shipmentBoxTypeId} has no weight"/></if>
+            <if condition="!shipmentBoxType.weightUomId"><return type="danger" message="Box type ${shipmentBoxTypeId} has no weight unit (UOM)"/></if>
+
+            <entity-find entity-name="mantle.shipment.ShipmentPackageContent" list="pkgContentList">
+                <econdition field-name="shipmentId"/><econdition field-name="shipmentPackageSeqId"/></entity-find>
+            <if condition="!pkgContentList"><return type="warning" message="No contents found for package ${shipmentPackageSeqId} of shipment ${shipmentId}, no calculating weight"/></if>
+
+            <set field="weightUomId" from="weightUomId ?: shipmentBoxType.weightUomId ?: 'WT_lb'"/>
+            <set field="boxWeight" from="shipmentBoxType.boxWeight"/>
+            <if condition="weightUomId != shipmentBoxType.weightUomId">
+                <service-call name="org.moqui.impl.BasicServices.convert#Uom" out-map="convertOut" out-map-add-to-existing="false"
+                        in-map="[uomId:shipmentBoxType.weightUomId, toUomId:weightUomId, amount:boxWeight]"/>
+                <set field="boxWeight" from="convertOut.convertedAmount"/>
+            </if>
+
+            <set field="contentWeight" from="0.0"/>
+            <iterate list="pkgContentList" entry="pkgContent">
+                <entity-find-one entity-name="mantle.product.ProductDimension" value-field="weightDim" cache="true">
+                    <field-map field-name="productId" from="pkgContent.productId"/>
+                    <field-map field-name="dimensionTypeId" value="ShippingWeight"/>
+                </entity-find-one>
+                <if condition="weightDim == null">
+                    <entity-find-one entity-name="mantle.product.ProductDimension" value-field="weightDim" cache="true">
+                        <field-map field-name="productId" from="pkgContent.productId"/>
+                        <field-map field-name="dimensionTypeId" value="Weight"/>
+                    </entity-find-one>
+                </if>
+                <if condition="!weightDim?.value"><return type="danger" message="Product ${pkgContent.productId} has no Shipping Weight dimension value"/></if>
+                <if condition="!weightDim?.valueUomId"><return type="danger" message="Product ${pkgContent.productId} has no Shipping Weight dimension unit (UOM)"/></if>
+
+                <set field="itemWeight" from="weightDim.value * (pkgContent.quantity ?: 0.0)"/>
+                <if condition="weightUomId != weightDim.valueUomId">
+                    <service-call name="org.moqui.impl.BasicServices.convert#Uom" out-map="convertOut" out-map-add-to-existing="false"
+                            in-map="[uomId:weightDim.valueUomId, toUomId:weightUomId, amount:itemWeight]"/>
+                    <set field="itemWeight" from="convertOut.convertedAmount"/>
+                </if>
+
+                <set field="contentWeight" from="contentWeight + itemWeight"/>
+            </iterate>
+
+            <set field="weight" from="boxWeight + contentWeight"/>
+        </actions>
+    </service>
 
     <service verb="print" noun="ShipmentLabels">
         <in-parameters>
