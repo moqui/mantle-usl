@@ -211,10 +211,6 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <service verb="check" noun="FreeShippingPromos">
-
-    </service>
-
     <service verb="add" noun="OrderPromoCode">
         <in-parameters>
             <parameter name="orderId" required="true"/>
@@ -555,10 +551,85 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="discountAmount" from="-(orderItemTotalOut.combinedAmount*(discountPercent/100.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                 <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
-                                 itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:discountAmount,
-                                 sourcePercentage:discountPercent, storePromotionId:storePromotionId, promoCodeId:promoCodeId,
-                                 isPromo:'Y', promoQuantity:promoQuantity, promoTimesUsed:timesToApply,
-                                 itemDescription:ec.resource.expand(itemDescription, '')?:('Buy ' + buyQuantity + ' Get ' + getQuantity + ' at ' + discountPercent + '% off')]"/>
+                             itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:discountAmount,
+                             sourcePercentage:discountPercent, storePromotionId:storePromotionId, promoCodeId:promoCodeId,
+                             isPromo:'Y', promoQuantity:promoQuantity, promoTimesUsed:timesToApply,
+                             itemDescription:ec.resource.expand(itemDescription, '')?:('Buy ' + buyQuantity + ' Get ' + getQuantity + ' at ' + discountPercent + '% off')]"/>
+            </iterate>
+        </actions>
+    </service>
+
+    <service verb="apply" noun="FlatDiscount">
+        <description>Apply discountAmount per quantity. Best limited by applicable products and with one or more use limits.</description>
+        <implements service="mantle.product.PromotionServices.apply#Promotion"/>
+        <in-parameters>
+            <parameter name="discountAmount" type="BigDecimal" required="true">
+                <description>Required. Discount Amount applied per quantity. Set limits per order and/or customer on promo or code (if no limit specified defaults to 1).</description></parameter>
+            <parameter name="itemsWithPromo" type="Boolean" default="false">
+                <description>If true apply to product item quantities that already have another promotion (defaults to false)</description></parameter>
+            <parameter name="includeNonConsumer" type="Boolean" default="false">
+                <description>If true apply when customer has a classification other than Consumer (defaults to false)</description></parameter>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
+            <set field="customerPartyId" from="orderPart?.customerPartyId"/>
+
+            <!-- does the customer have a classification other than consumer? -->
+            <if condition="customerPartyId &amp;&amp; !includeNonConsumer">
+                <entity-find entity-name="mantle.party.PartyClassificationAndAppl" list="classApplList">
+                    <date-filter/><econdition field-name="partyId" from="customerPartyId"/>
+                    <econdition field-name="classificationTypeEnumId" value="PcltCustomer"/>
+                </entity-find>
+                <iterate list="classApplList" entry="classAppl">
+                    <if condition="classAppl.partyClassificationId != 'CustConsumer'"><return/></if>
+                </iterate>
+            </if>
+
+            <entity-find entity-name="mantle.product.store.ProductStorePromoProduct" list="psppList" cache="true">
+                <econdition field-name="storePromotionId"/></entity-find>
+            <set field="applProductIdSet" from="psppList ? new HashSet(psppList*.productId) : null"/>
+
+            <!-- NOTE: default use limit is 1000.0 so if that then set to 1.0 as a more sensible default -->
+            <set field="useLimitRemaining" from="!useLimit || useLimit == 1000.0 ? 1.0 : useLimit"/>
+
+            <!-- apply promo to each eligible item -->
+            <entity-find entity-name="mantle.order.OrderItem" list="prodItemList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderPartSeqId"/>
+                <econdition field-name="itemTypeEnumId" value="ItemProduct"/>
+                <econdition field-name="productId" operator="in" from="applProductIdSet" ignore-if-empty="true"/>
+            </entity-find>
+            <iterate list="prodItemList" entry="orderItem">
+                <service-call name="mantle.order.OrderServices.get#OrderItemTotal" out-map-add-to-existing="false"
+                        in-map="[orderItem:orderItem, getChildrenTotals:true]" out-map="orderItemTotalOut"/>
+                <!-- <log level="warn" message="orderItemTotalOut ${orderItemTotalOut}"/> -->
+                <if condition="!orderItemTotalOut.combinedAmount"><continue/></if>
+
+                <if condition="itemsWithPromo"><then>
+                    <set field="eligibleQuantity" from="orderItem.quantity != null ? orderItem.quantity : 1.0"/>
+                </then><else>
+                    <set field="eligibleQuantity" from="(orderItem.quantity != null ? orderItem.quantity : 1.0) - orderItemTotalOut.promoQuantityUsed"/>
+                </else></if>
+
+                <!-- check useLimit -->
+                <if condition="eligibleQuantity &gt; useLimitRemaining"><set field="eligibleQuantity" from="useLimitRemaining"/></if>
+                <!-- deduct from useLimit -->
+                <set field="useLimitRemaining" from="useLimitRemaining - eligibleQuantity"/>
+
+                <set field="itemQuantity" from="eligibleQuantity"/>
+                <set field="promoQuantity" from="eligibleQuantity"/>
+                <!-- <log level="warn" message="quantity ${orderItem.quantity} promoQuantityUsed ${orderItemTotalOut.promoQuantityUsed} eligibleQuantity ${eligibleQuantity} itemQuantity ${itemQuantity} promoQuantity ${promoQuantity}"/> -->
+                <if condition="eligibleQuantity == 0.0"><continue/></if>
+
+                <!-- create promo item -->
+                <if condition="discountAmount &gt; orderItemTotalOut.combinedAmount">
+                    <set field="discountAmount" from="orderItemTotalOut.combinedAmount"/></if>
+                <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
+                        in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
+                             itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:-discountAmount,
+                             storePromotionId:storePromotionId, promoCodeId:promoCodeId,
+                             isPromo:'Y', promoQuantity:promoQuantity, promoTimesUsed:eligibleQuantity,
+                             itemDescription:ec.resource.expand(itemDescription, '')?:('Get ' + ec.l10n.format(discountAmount, '#,##0.00') + ' off')]"/>
             </iterate>
         </actions>
     </service>
