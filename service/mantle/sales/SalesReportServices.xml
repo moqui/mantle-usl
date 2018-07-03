@@ -413,6 +413,8 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="topProductList" type="List"><parameter name="result" type="Map"/></parameter>
+            <parameter name="topProductStart" type="Timestamp"/>
+            <parameter name="topProductEnd" type="Timestamp"/>
         </out-parameters>
         <actions><script><![CDATA[
             import org.elasticsearch.action.search.SearchResponse
@@ -426,6 +428,10 @@ along with this software (see the LICENSE.md file). If not, see
 
             Map<String, String> perMap = [w:'week', M:'month', q:'quarter', y:'year']
             ArrayList<Timestamp> curPer = ec.user.getPeriodRange(perMap.get(interval), poffset, thruDate)
+            // for weeks shift by one to start on Monday (like ES does for aggregations) instead of Sunday
+            if (interval == 'w') { curPer[0] = curPer[0] + 1; curPer[1] = curPer[1] + 1 }
+            topProductStart = curPer[0]
+            topProductEnd = curPer[1]
 
             Map queryMap = [bool: [filter: [
                     [range: [(dateField): [gte:(curPer[0].time as String), lt:(curPer[1].time as String), format: 'epoch_millis']]],
@@ -438,13 +444,22 @@ along with this software (see the LICENSE.md file). If not, see
                     .order(Terms.Order.aggregation(orderByField, false))
             prodAggBuilder.subAggregation(AggregationBuilders.sum("totalQuantity").field("orderQuantity"))
             prodAggBuilder.subAggregation(AggregationBuilders.sum("totalSales").field("itemSaleTotal"))
+            // total product shipped (issuedSaleTotal; itemTypeEnumId = ItemProduct)
+            prodAggBuilder.subAggregation(AggregationBuilders.sum("productIssuedTotal").field("issuances.issuedSaleTotal"))
+            // product cost total (issuedCostTotal)
+            prodAggBuilder.subAggregation(AggregationBuilders.sum("productCostTotal").field("issuances.issuedCostTotal"))
+
             SearchResponse prodSr = ElasticSearchUtil.aggregationSearch(indexName, [documentType], null, queryMap, prodAggBuilder, ec)
 
             topProductList = new ArrayList(topLimit)
             for (Terms.Bucket bucket in prodSr.getAggregations().get("TopTerms").getBuckets()) {
+                BigDecimal productIssuedTotal = new BigDecimal(bucket.getAggregations().get("productIssuedTotal").getValue())
+                BigDecimal productCostTotal = new BigDecimal(bucket.getAggregations().get("productCostTotal").getValue())
                 Map curLine = [productId:bucket.keyAsString,
                         totalQuantity:new BigDecimal(bucket.getAggregations().get("totalQuantity").getValue()),
-                        totalSales:new BigDecimal(bucket.getAggregations().get("totalSales").getValue())]
+                        totalSales:new BigDecimal(bucket.getAggregations().get("totalSales").getValue()),
+                        productIssuedTotal:productIssuedTotal, productCostTotal:productCostTotal,
+                        costPercent:(productIssuedTotal ? (productCostTotal/productIssuedTotal) : 0.0)]
                 topProductList.add(curLine)
             }
         ]]></script></actions>
