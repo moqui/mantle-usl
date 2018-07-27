@@ -2024,6 +2024,57 @@ along with this software (see the LICENSE.md file). If not, see
 
     <!-- ========== Invoice Notification Services ========== -->
 
+    <service verb="find" noun="InvoiceProductStores">
+        <in-parameters>
+            <parameter name="invoiceId" required="true"/>
+            <parameter name="invoice" type="EntityValue"/>
+        </in-parameters>
+        <out-parameters><parameter name="productStoreIdSet" type="Set"/></out-parameters>
+        <actions>
+            <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList" distinct="true">
+                <econdition field-name="invoiceId"/>
+                <select-field field-name="orderId"/>
+            </entity-find>
+            <set field="orderIdSet" from="new HashSet(orderItemBillingList*.orderId)"/>
+            <if condition="!orderIdSet"><return/></if>
+
+            <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList" distinct="true">
+                <econdition field-name="orderId" operator="in" from="orderIdSet"/>
+                <econdition field-name="productStoreId" operator="is-not-null"/>
+                <select-field field-name="productStoreId"/>
+            </entity-find>
+            <set field="productStoreIdSet" from="new HashSet(orderHeaderList*.productStoreId)"/>
+
+            <!-- use PartySetting to look up default store if none associated with invoice through orders -->
+            <if condition="!productStoreIdSet">
+                <if condition="invoice == null"><entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/></if>
+                <if condition="invoice?.fromPartyId">
+                    <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="ptySettingOut"
+                            in-map="[partyId:invoice.fromPartyId, partySettingTypeId:'OrgInvoiceProductStoreId']"/>
+                    <if condition="ptySettingOut.settingValue">
+                        <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="checkProdStore">
+                            <field-map field-name="productStoreId" from="ptySettingOut.settingValue"/></entity-find-one>
+                        <if condition="checkProdStore != null"><then>
+                            <set field="productStoreIdSet" from="new HashSet()"/>
+                            <script>productStoreIdSet.add(ptySettingOut.settingValue)</script>
+                        </then><else>
+                            <log level="error" message="In find#InvoiceProductStores found OrgInvoiceProductStoreId setting for party ${invoice.fromPartyId} with invalid productStoreId ${ptySettingOut.settingValue}"/>
+                        </else></if>
+                    </if>
+                    <!-- still nothing?!? after all that? if there is one ProductStore for org use that -->
+                    <if condition="!productStoreIdSet">
+                        <entity-find entity-name="mantle.product.store.ProductStore" list="prodStoreList" limit="2">
+                            <econdition field-name="organizationPartyId" from="invoice.fromPartyId"/></entity-find>
+                        <if condition="prodStoreList.size() == 1">
+                            <set field="productStoreIdSet" from="new HashSet()"/>
+                            <script>productStoreIdSet.add(prodStoreList[0].productStoreId)</script>
+                        </if>
+                    </if>
+                </if>
+            </if>
+        </actions>
+    </service>
+
     <service verb="send" noun="InvoiceStoreEmail" authenticate="anonymous-view">
         <description>
             Send an email for Finalized receivable invoices. By default sends to all EmailBilling email addresses, if
@@ -2040,15 +2091,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="setFinalizedInvoiceSent" type="Boolean" default="true"/>
         </in-parameters>
         <actions>
-            <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
-                <econdition field-name="invoiceId"/><order-by field-name="invoiceItemSeqId"/></entity-find>
-            <set field="orderIdSet" from="new TreeSet(orderItemBillingList*.orderId)"/>
-            <if condition="!orderIdSet"><return/></if>
-
-            <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList">
-                <econdition field-name="orderId" operator="in" from="orderIdSet"/></entity-find>
-            <set field="productStoreIdSet" from="new HashSet(orderHeaderList*.productStoreId)"/>
-            <script>productStoreIdSet.remove(null)</script>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+            <service-call name="mantle.account.InvoiceServices.find#InvoiceProductStores" in-map="context" out-map="context"/>
             <if condition="!productStoreIdSet"><return/></if>
 
             <entity-find entity-name="mantle.product.store.ProductStoreEmail" list="storeEmailList">
@@ -2056,7 +2100,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="emailTypeEnumId"/>
             </entity-find>
             <if condition="storeEmailList">
-                <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
                 <set field="toPartyId" from="invoice.toPartyId"/>
 
                 <if condition="toAddresses"><set field="toAddressesList" from="[toAddresses]"/></if>
@@ -2078,14 +2121,14 @@ along with this software (see the LICENSE.md file). If not, see
                         <field-map field-name="productStoreId" from="storeEmail.productStoreId"/></entity-find-one>
                     <!-- simple bodyParameters, let the screen do data prep -->
                     <set field="bodyParameters" from="[invoiceId:invoiceId, orderIdSet:orderIdSet,
-                        storeDomain:productStore.storeDomain, profileUrlPath:productStore.profileUrlPath,
-                        headerImagePath:storeEmail.headerImagePath, detailLinkPath:storeEmail.detailLinkPath]"/>
+                            storeDomain:productStore.storeDomain, profileUrlPath:productStore.profileUrlPath,
+                            headerImagePath:storeEmail.headerImagePath, detailLinkPath:storeEmail.detailLinkPath]"/>
                     <if condition="!storeEmail.emailTemplateId"><continue/></if>
 
                     <iterate list="toAddressesList" entry="toAddressesCur">
                         <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="false"
                                 in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId,
-                                toAddresses:toAddressesCur, bodyParameters:bodyParameters, toUserId:toUserId]"/>
+                                    toAddresses:toAddressesCur, bodyParameters:bodyParameters, toUserId:toUserId]"/>
                         <if condition="sendOut.emailMessageId"><script><![CDATA[
                             ec.service.sync().name("create#mantle.account.invoice.InvoiceEmailMessage")
                                 .parameter("invoiceId", invoiceId).parameter("emailMessageId", sendOut.emailMessageId).disableAuthz().call()
@@ -2100,6 +2143,161 @@ along with this software (see the LICENSE.md file). If not, see
                     </iterate>
                 </iterate>
             </if>
+        </actions>
+    </service>
+
+    <service verb="send" noun="SalesInvoicePastDueEmails" authenticate="anonymous-all" transaction-timeout="3600">
+        <description>Send reminder emails for past due invoices. Meant to be called through a scheduled job running once a week (such as on Monday) or daily.</description>
+        <in-parameters>
+            <parameter name="daysPastDue" type="Long" default="7"/>
+            <parameter name="daysPastInvoice" type="Long" default="40"/>
+            <parameter name="daysLastEmail" type="Long" default="2"/>
+            <parameter name="organizationPartyIdList" type="List"><parameter name="organizationPartyId"/></parameter>
+            <parameter name="alsoPrimaryEmails" type="Boolean" default="false"/>
+        </in-parameters>
+        <actions>
+            <set field="nowZdt" from="java.time.ZonedDateTime.ofInstant(java.time.Instant.now(), java.time.ZoneId.systemDefault())"/>
+            <set field="dueLookBack" from="java.sql.Timestamp.from(nowZdt.minusDays(daysPastDue).toInstant())"/>
+            <set field="invoiceLookBack" from="java.sql.Timestamp.from(nowZdt.minusDays(daysPastInvoice).toInstant())"/>
+
+            <if condition="!organizationPartyIdList">
+                <entity-find entity-name="mantle.party.PartyRole" list="orgPartyRoleList">
+                    <econdition field-name="roleTypeId" value="OrgInternal"/></entity-find>
+                <set field="organizationPartyIdList" from="orgPartyRoleList*.partyId"/>
+            </if>
+            <if condition="!organizationPartyIdList"><return message="No internal organizations specified or found, not sending Sales Invoice past due emails"/></if>
+
+            <!-- do a query for each organizationPartyId to simplify and handle larger data a bit better -->
+            <iterate list="organizationPartyIdList" entry="organizationPartyId">
+                <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceToPtyList" distinct="true">
+                    <econdition field-name="fromPartyId" from="organizationPartyId"/>
+                    <econdition field-name="toPartyId" operator="is-not-null"/>
+                    <econdition field-name="unpaidTotal" operator="greater" from="0.0"/>
+                    <econditions combine="or">
+                        <econdition field-name="dueDate" operator="less" from="dueLookBack"/>
+                        <econdition field-name="invoiceDate" operator="less" from="invoiceLookBack"/>
+                    </econditions>
+                    <select-field field-name="toPartyId"/>
+                    <order-by field-name="toPartyId"/>
+                </entity-find>
+
+                <log message="In send#SalesInvoicePastDueEmails for org ${organizationPartyId} found ${invoiceToPtyList.size()} customers with past due invoices"/>
+                <iterate list="invoiceToPtyList" entry="invoiceToPty">
+                    <service-call name="mantle.account.InvoiceServices.send#CustomerPastDueEmail"
+                            in-map="[fromPartyId:organizationPartyId, toPartyId:invoiceToPty.toPartyId, alsoPrimaryEmails:alsoPrimaryEmails,
+                                daysPastDue:daysPastDue, daysPastInvoice:daysPastInvoice, daysLastEmail:daysLastEmail]"/>
+                </iterate>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="send" noun="CustomerPastDueEmail">
+        <in-parameters>
+            <parameter name="fromPartyId" required="true"/>
+            <parameter name="toPartyId" required="true"/>
+            <parameter name="daysPastDue" type="Long" default="7"/>
+            <parameter name="daysPastInvoice" type="Long" default="40"/>
+            <parameter name="daysLastEmail" type="Long" default="2"/>
+            <parameter name="alsoPrimaryEmails" type="Boolean" default="false"/>
+            <parameter name="toAddresses"><text-email/></parameter>
+            <parameter name="emailTypeEnumId" default-value="PsetInvoicesPastDue"/>
+        </in-parameters>
+        <actions>
+            <set field="nowZdt" from="java.time.ZonedDateTime.ofInstant(java.time.Instant.now(), java.time.ZoneId.systemDefault())"/>
+            <set field="dueLookBack" from="java.sql.Timestamp.from(nowZdt.minusDays(daysPastDue).toInstant())"/>
+            <set field="invoiceLookBack" from="java.sql.Timestamp.from(nowZdt.minusDays(daysPastInvoice).toInstant())"/>
+
+            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toParty">
+                <field-map field-name="partyId" from="toPartyId"/></entity-find-one>
+
+            <if condition="toAddresses"><set field="toAddressesList" from="[toAddresses]"/></if>
+            <if condition="!toAddressesList">
+                <!-- see if customer has a EmailBilling address, or if also primary then look for EmailPrimary too -->
+                <service-call name="mantle.party.ContactServices.get#PartyContactInfoList" out-map="emailInfo"
+                        in-map="[partyId:toPartyId, emailContactMechPurposeId:'EmailBilling', alsoIncludePrimaryPurpose:alsoPrimaryEmails]"/>
+                <set field="toAddressesList" from="emailInfo.emailAddressList*.emailAddress"/>
+                <!-- get to party userId for toUserId -->
+                <entity-find entity-name="moqui.security.UserAccount" list="userAccountList" limit="1">
+                    <econdition field-name="partyId" from="toPartyId"/></entity-find>
+                <if condition="userAccountList"><set field="toUserId" from="userAccountList[0].userId"/></if>
+            </if>
+
+            <if condition="!toAddressesList">
+                <return type="warning" message="No billing email address found for customer party ${toPartyId}, not sending invoices past due email"/>
+            </if>
+
+            <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceList">
+                <econdition field-name="fromPartyId" from="fromPartyId"/>
+                <econdition field-name="toPartyId" from="toPartyId"/>
+                <econdition field-name="unpaidTotal" operator="greater" from="0.0"/>
+                <econditions combine="or">
+                    <econdition field-name="dueDate" operator="less" from="dueLookBack"/>
+                    <econdition field-name="invoiceDate" operator="less" from="invoiceLookBack"/>
+                </econditions>
+                <order-by field-name="invoiceDate"/>
+            </entity-find>
+            <if condition="!invoiceList">
+                <return type="warning" message="No past due invoices found for customer ${toPartyId} and org ${fromPartyId} with due before ${dueLookBack} or invoice before ${invoiceLookBack}"/>
+            </if>
+
+            <!-- sanity check: look to see if any invoice has past due email that was sent in last 2 days -->
+            <if condition="daysLastEmail">
+                <set field="sanityLookBack" from="java.sql.Timestamp.from(nowZdt.minusDays(daysLastEmail).toInstant())"/>
+                <entity-find-count entity-name="mantle.account.invoice.InvoiceEmailMessageDetail" count-field="recentEmailCount">
+                    <econdition field-name="invoiceId" operator="in" from="invoiceList*.invoiceId"/>
+                    <econdition field-name="sentDate" operator="greater" from="sanityLookBack"/>
+                    <econdition field-name="statusId" operator="in" value="ES_SENT,ES_RECEIVED,ES_VIEWED"/>
+                </entity-find-count>
+                <if condition="recentEmailCount">
+                    <return type="warning" message="Found ${recentEmailCount} past due emails sent in last ${daysLastEmail} days for one or more of current past due invoices, not sending past due email for customer ${toPartyId} and org ${fromPartyId}"/>
+                </if>
+            </if>
+
+            <!-- get ProductStore for settings for each invoice, if multiple split invoices by productStoreId and send email for each -->
+            <set field="invoicesByStoreId" from="[:]"/>
+            <iterate list="invoiceList" entry="invoice">
+                <service-call name="mantle.account.InvoiceServices.find#InvoiceProductStores" out-map="findStoreOut" out-map-add-to-existing="false"
+                        in-map="[invoiceId:invoice.invoiceId, invoice:invoice]"/>
+                <if condition="findStoreOut.productStoreIdSet"><then>
+                    <set field="curProductStoreId" from="findStoreOut.productStoreIdSet.first()"/>
+                    <script>addToListInMap(curProductStoreId, invoice, invoicesByStoreId)</script>
+                </then><else>
+                    <message type="warning">Not sending past due email for invoice ${invoice.invoiceId}, no Product Store found for email configuration</message>
+                </else></if>
+            </iterate>
+            
+            <!-- send email for each list of invoices for each store -->
+            <iterate list="invoicesByStoreId" key="productStoreId" entry="storeInvoiceList">
+                <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore">
+                    <field-map field-name="productStoreId"/></entity-find-one>
+                <entity-find entity-name="mantle.product.store.ProductStoreEmail" list="storeEmailList">
+                    <date-filter/><econdition field-name="productStoreId"/>
+                    <econdition field-name="emailTypeEnumId"/>
+                </entity-find>
+                <!-- send email for each configured -->
+                <iterate list="storeEmailList" entry="storeEmail">
+                    <!-- simple bodyParameters, let the screen do data prep -->
+                    <set field="bodyParameters" from="[toParty:toParty , invoiceList:storeInvoiceList,
+                            storeDomain:productStore.storeDomain, profileUrlPath:productStore.profileUrlPath,
+                            headerImagePath:storeEmail.headerImagePath, detailLinkPath:storeEmail.detailLinkPath]"/>
+                    <if condition="!storeEmail.emailTemplateId"><continue/></if>
+
+                    <iterate list="toAddressesList" entry="toAddressesCur">
+                        <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="false"
+                                in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId,
+                                toAddresses:toAddressesCur, bodyParameters:bodyParameters, toUserId:toUserId]"/>
+
+                        <!-- add InvoiceEmailMessage record for each invoice -->
+                        <if condition="sendOut.emailMessageId"><script><![CDATA[
+                            for (curInvoice in storeInvoiceList) {
+                                ec.service.sync().name("create#mantle.account.invoice.InvoiceEmailMessage")
+                                        .parameter("invoiceId", curInvoice.invoiceId)
+                                        .parameter("emailMessageId", sendOut.emailMessageId).disableAuthz().call()
+                            }
+                        ]]></script></if>
+                        <message>Email sent to ${toAddressesCur}${sendOut.emailMessageId ? ', message ID ' + sendOut.emailMessageId : ''}</message>
+                    </iterate>
+                </iterate>
+            </iterate>
         </actions>
     </service>
 
