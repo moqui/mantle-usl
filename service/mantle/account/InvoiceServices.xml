@@ -2226,6 +2226,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <return type="warning" message="No billing email address found for customer party ${toPartyId}, not sending invoices past due email"/>
             </if>
 
+            <!-- unpaid invoices past due -->
             <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceList">
                 <econdition field-name="fromPartyId" from="fromPartyId"/>
                 <econdition field-name="toPartyId" from="toPartyId"/>
@@ -2238,7 +2239,34 @@ along with this software (see the LICENSE.md file). If not, see
                 <order-by field-name="invoiceDate"/>
             </entity-find>
             <if condition="!invoiceList">
-                <return type="warning" message="No past due invoices found for customer ${toPartyId} and org ${fromPartyId} with due before ${dueLookBack} or invoice before ${invoiceLookBack}"/>
+                <return type="warning" message="No past due invoices found for customer ${toPartyId} and org ${fromPartyId} with due before ${dueLookBack} or invoice before ${invoiceLookBack}, not sending past due invoices email"/>
+            </if>
+            <set field="unpaidInvoiceTotal" from="invoiceList.collect({ it.unpaidTotal }).sum()"/>
+
+            <!-- unapplied payments, will they cover unpaid invoices past due? -->
+            <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                <!-- payments with reverse parties from invoice -->
+                <econdition field-name="fromPartyId" from="toPartyId"/>
+                <econdition field-name="toPartyId" from="fromPartyId"/>
+                <econdition field-name="unappliedTotal" operator="greater" from="0.0"/>
+                <econdition field-name="statusId" operator="in" value="PmntDelivered,PmntConfirmed"/>
+                <order-by field-name="effectiveDate"/>
+            </entity-find>
+            <set field="unappliedPaymentTotal" from="paymentList ? paymentList.collect({ it.unappliedTotal }).sum() : 0.0"/>
+
+            <!-- unapplied reverse (credit memo, etc) invoices, will they cover unpaid invoices past due? -->
+            <entity-find entity-name="mantle.account.invoice.Invoice" list="creditInvoiceList">
+                <!-- credit invoices with reverse parties from invoice -->
+                <econdition field-name="fromPartyId" from="toPartyId"/>
+                <econdition field-name="toPartyId" from="fromPartyId"/>
+                <econdition field-name="unpaidTotal" operator="greater" from="0.0"/>
+                <econdition field-name="statusId" operator="not-in" value="InvoiceIncoming,InvoiceReceived,InvoiceCancelled"/>
+                <order-by field-name="invoiceDate"/>
+            </entity-find>
+            <set field="creditInvoiceTotal" from="creditInvoiceList ? creditInvoiceList.collect({ it.unpaidTotal }).sum() : 0.0"/>
+
+            <if condition="(unappliedPaymentTotal + creditInvoiceTotal) &gt;= unpaidInvoiceTotal">
+                <return type="warning" message="Unapplied payments total ${unappliedPaymentTotal} plus credit invoice total ${creditInvoiceTotal} covers past due invoices total ${unpaidInvoiceTotal} for customer ${toPartyId} and org ${fromPartyId}, not sending past due invoices email"/>
             </if>
 
             <!-- sanity check: look to see if any invoice has past due email that was sent in last 2 days -->
@@ -2277,11 +2305,15 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
                 <!-- send email for each configured -->
                 <iterate list="storeEmailList" entry="storeEmail">
-                    <!-- simple bodyParameters, let the screen do data prep -->
-                    <set field="bodyParameters" from="[toParty:toParty , invoiceList:storeInvoiceList,
+                    <if condition="!storeEmail.emailTemplateId"><continue/></if>
+
+                    <!-- bodyParameters from what we have already, screen may do additional data prep -->
+                    <set field="bodyParameters" from="[fromPartyId:fromPartyId, toParty:toParty,
+                            invoiceList:storeInvoiceList, unpaidInvoiceTotal:unpaidInvoiceTotal,
+                            paymentList:paymentList, unappliedPaymentTotal:unappliedPaymentTotal,
+                            creditInvoiceList:creditInvoiceList, creditInvoiceTotal:creditInvoiceTotal,
                             storeDomain:productStore.storeDomain, profileUrlPath:productStore.profileUrlPath,
                             headerImagePath:storeEmail.headerImagePath, detailLinkPath:storeEmail.detailLinkPath]"/>
-                    <if condition="!storeEmail.emailTemplateId"><continue/></if>
 
                     <iterate list="toAddressesList" entry="toAddressesCur">
                         <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="false"
