@@ -220,17 +220,34 @@ General Order Placement and eCommerce Usage
             <parameter name="orderPartSeqId" required="true"/>
             <parameter name="itemTypeEnumId" default-value="ItemProduct"/>
             <parameter name="quantity" type="BigDecimal" default="1"/>
+            <parameter name="requireInventory" type="Boolean">
+                <description>If true make sure inventory is available, if false don't check. If null defer to ProductStore setting.</description></parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="orderItemSeqId" required="true"/>
         </out-parameters>
         <actions>
+            <set field="isProductItem" from="false"/>
             <if condition="productId">
-                <entity-find-one entity-name="mantle.product.Product" value-field="product"/>
-                <if condition="product == null"><return error="true" message="Product [${productId}] not found."/></if>
+                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
+                <if condition="product == null"><return error="true" message="Product ${productId} not found"/></if>
+
+                <!-- Is this a product item? -->
+                <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                    <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+                <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+                <set field="isProductItem" from="itemTypeEnumId in productItemTypes"/>
             </if>
+
+            <!-- if requireInventory check available inventory (for store/facility, product) -->
+            <if condition="isProductItem &amp;&amp; quantity">
+                <service-call name="mantle.order.OrderServices.check#AvailableInventory"
+                        in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId,
+                            requireInventory:requireInventory]"/>
+            </if>
+
             <if condition="product?.amountRequire == 'Y' &amp;&amp; !selectedAmount">
-                <return error="true" message="Product [${productId}] requires a selected amount"/></if>
+                <return error="true" message="Product ${productId} requires a selected amount"/></if>
             <if condition="!itemDescription"><set field="itemDescription" from="product?.productName"/></if>
             <if condition="!quantityUomId"><set field="quantityUomId" from="product?.amountUomId"/></if>
 
@@ -244,13 +261,33 @@ General Order Placement and eCommerce Usage
             <auto-parameters include="nonpk"/>
             <parameter name="unitAmount_changeReason"/>
             <parameter name="quantity_changeReason"/>
+            <parameter name="requireInventory" type="Boolean">
+                <description>If true make sure inventory is available, if false don't check. If null defer to ProductStore setting.</description></parameter>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem" for-update="true"/>
             <set field="productId" from="productId ?: orderItem.productId"/>
+            <set field="quantity" from="quantity != null ? quantity : orderItem.quantity"/>
+            <set field="orderPartSeqId" from="orderPartSeqId ?: orderItem.orderPartSeqId"/>
+
+            <!-- is this a product item? -->
+            <set field="isProductItem" from="false"/>
+            <if condition="productId">
+                <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                    <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+                <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+                <set field="isProductItem" from="orderItem.itemTypeEnumId in productItemTypes"/>
+            </if>
+
+            <!-- if requireInventory check available inventory (for store/facility, product) -->
+            <if condition="isProductItem &amp;&amp; quantity">
+                <service-call name="mantle.order.OrderServices.check#AvailableInventory"
+                        in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId,
+                            orderItemSeqId:orderItemSeqId, requireInventory:requireInventory]"/>
+            </if>
 
             <!-- calculate the price based on quantity, etc, -->
-            <if condition="unitAmount == null &amp;&amp; productId"><then>
+            <if condition="unitAmount == null &amp;&amp; isProductItem"><then>
                 <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
                 <set field="orderPart" from="orderItem.part"/>
 
@@ -338,6 +375,47 @@ General Order Placement and eCommerce Usage
         </actions>
     </service>
 
+    <service verb="check" noun="AvailableInventory">
+        <in-parameters>
+            <parameter name="productId" required="true"/>
+            <parameter name="quantity" type="BigDecimal" required="true"/>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId" required="true"/>
+            <parameter name="orderItemSeqId"/>
+            <parameter name="requireInventory" type="Boolean">
+                <description>If true make sure inventory is available, if false don't check. If null defer to ProductStore.requireInventory setting.</description></parameter>
+
+            <parameter name="orderHeader" type="EntityValue"/>
+            <parameter name="orderPart" type="EntityValue"/>
+            <parameter name="productStore" type="EntityValue"/>
+        </in-parameters>
+        <actions>
+            <if condition="requireInventory == null">
+                <if condition="productStore == null">
+                    <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/></if>
+                    <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore" cache="true">
+                        <field-map field-name="productStoreId" from="orderHeader.productStore"/></entity-find-one>
+                </if>
+                <set field="requireInventory" from="productStore?.requireInventory == 'Y'"/>
+            </if>
+            <!-- if available inventory not required return now -->
+            <if condition="!requireInventory"><return/></if>
+            <!-- get current available inventory -->
+            <service-call name="mantle.product.AssetServices.get#AvailableInventory" out-map="availOut"
+                    in-map="[productId:productId, orderId:orderId, orderPartSeqId:orderPartSeqId, orderHeader:orderHeader, orderPart:orderPart]"/>
+            <set field="availableToPromiseTotal" from="availOut.availableToPromiseTotal"/>
+            <!-- If out of stock show one message, if insufficient available show another -->
+            <if condition="availableToPromiseTotal &lt; quantity">
+                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
+                <if condition="availableToPromiseTotal &lt;= 0.0"><then>
+                    <return error="true" type="warning" public="true" message="OrderInventoryNotAvailable"/>
+                </then><else>
+                    <return error="true" type="warning" public="true" message="OrderInventoryInsufficient"/>
+                </else></if>
+            </if>
+        </actions>
+    </service>
+
     <!-- OrderProductQuantity aka "Cart" Services -->
     <service verb="add" noun="OrderProductQuantity" authenticate="anonymous-all">
         <!-- TODO had transaction="cache" but causing issues with updating single Payment amount and sometimes part/header total when there are multiple promotions active (ie New Customer and BOGO) -->
@@ -365,6 +443,8 @@ General Order Placement and eCommerce Usage
                 <description>If true add to existing quantity, if false set quantity on current item</description></parameter>
             <parameter name="updateExisting" type="Boolean" default="true">
                 <description>If true update existing item by productId, if false always create a new item</description></parameter>
+            <parameter name="requireInventory" type="Boolean">
+                <description>If true make sure inventory is available, if false don't check. If null defer to ProductStore setting.</description></parameter>
             <parameter name="itemTypeEnumId" default-value="ItemProduct"/>
             <parameter name="unitAmount" type="BigDecimal"/>
             <parameter name="standardCost" type="BigDecimal"/>

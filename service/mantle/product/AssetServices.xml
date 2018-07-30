@@ -56,6 +56,76 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="get" noun="AvailableInventory">
+        <in-parameters>
+            <parameter name="productId" required="true"/>
+            <parameter name="facilityId" required="true"/>
+            <parameter name="ownerPartyId"><description>Defaults to Facility.ownerPartyId; if Facility.assetAllowOtherOwner = Y this is ignored</description></parameter>
+        </in-parameters>
+        <out-parameters><parameter name="availableToPromiseTotal" type="BigDecimal"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.facility.Facility" value-field="facility" cache="true"/>
+            <set field="assetAllowOtherOwner" from="facility.assetAllowOtherOwner"/>
+            <if condition="!ownerPartyId"><set field="ownerPartyId" from="facility.ownerPartyId"/> </if>
+
+            <entity-find entity-name="mantle.product.asset.AssetQuantitySummary" list="quantSumList">
+                <econdition field-name="productId"/>
+                <econdition field-name="facilityId"/>
+                <econdition field-name="ownerPartyId" ignore="assetAllowOtherOwner == 'Y'" ignore-if-empty="true"/>
+                <econdition field-name="statusId" value="AstAvailable"/>
+                <select-field field-name="availableToPromiseTotal"/>
+            </entity-find>
+            <if condition="quantSumList.size() &gt; 0"><then>
+                <set field="availableToPromiseTotal" from="quantSumList[0].availableToPromiseTotal"/>
+            </then><else>
+                <set field="availableToPromiseTotal" from="0.0"/>
+            </else></if>
+        </actions>
+    </service>
+    <service verb="get" noun="AvailableByStore">
+        <in-parameters>
+            <parameter name="productId" required="true"/>
+            <parameter name="productStoreId" required="true"/>
+            <parameter name="productStore" type="EntityValue"/>
+        </in-parameters>
+        <out-parameters><parameter name="availableToPromiseTotal" type="BigDecimal"/></out-parameters>
+        <actions>
+            <if condition="productStore == null"><entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore" cache="true"/></if>
+            <!-- TODO: support multiple inventory facilities for store, get total across all -->
+            <set field="facilityId" from="productStore.inventoryFacilityId"/>
+
+            <service-call name="mantle.product.AssetServices.get#AvailableInventory" out-map="context"
+                    in-map="[productId:productId, facilityId:facilityId, ownerPartyId:productStore.organizationPartyId]"/>
+        </actions>
+    </service>
+    <service verb="get" noun="AvailableForOrder">
+        <in-parameters>
+            <parameter name="productId" required="true"/>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId" required="true"/>
+            <parameter name="orderHeader" type="EntityValue"/>
+            <parameter name="orderPart" type="EntityValue"/>
+        </in-parameters>
+        <out-parameters><parameter name="availableToPromiseTotal" type="BigDecimal"/></out-parameters>
+        <actions>
+            <if condition="orderPart == null"><entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/></if>
+
+            <set field="facilityId" from="orderPart.facilityId"/>
+            <if condition="!facilityId"><then>
+                <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/></if>
+                <if condition="!orderHeader?.productStoreId">
+                    <return type="warning" message="Cannot get available inventory for order ${orderId} part ${orderPartSeqId}, no facility on order part and no store on header"/></if>
+
+                <!-- get inventory by store, let it handle specifics -->
+                <service-call name="mantle.product.AssetServices.get#AvailableByStore" out-map="context"
+                        in-map="[productId:productId, productStoreId:orderHeader.productStoreId]"/>
+            </then><else>
+                <service-call name="mantle.product.AssetServices.get#AvailableInventory" out-map="context"
+                        in-map="[productId:productId, facilityId:facilityId, ownerPartyId:orderPart.vendorPartyId]"/>
+            </else></if>
+        </actions>
+    </service>
+
     <service verb="update" noun="Asset">
         <in-parameters>
             <parameter name="assetId" required="true"/>
@@ -271,12 +341,12 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="assetOrderBy" from="resOrderEnum?.enumCode ?: 'receivedDate'"/><!-- default: FIFO by received date -->
 
             <set field="inventoryFacilityId" from="orderPart?.facilityId ?: productStore?.inventoryFacilityId"/>
-            <entity-find-one entity-name="mantle.facility.Facility" value-field="inventoryFacility">
+            <entity-find-one entity-name="mantle.facility.Facility" value-field="inventoryFacility" cache="true">
                 <field-map field-name="facilityId" from="inventoryFacilityId"/></entity-find-one>
             <set field="assetAllowOtherOwner" from="inventoryFacility?.assetAllowOtherOwner"/>
 
             <!-- determine organizationPartyId -->
-            <set field="organizationPartyId" from="productStore?.organizationPartyId ?: orderPart?.vendorPartyId"/>
+            <set field="organizationPartyId" from="orderPart?.vendorPartyId ?: productStore?.organizationPartyId"/>
             <!-- if organizationPartyId is not an internal org this is not a sales order, so don't do inventory res (return) -->
             <entity-find-one entity-name="mantle.party.PartyRole" value-field="orgPartyRole" cache="true">
                 <field-map field-name="partyId" from="organizationPartyId"/>
