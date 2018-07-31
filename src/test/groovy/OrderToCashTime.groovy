@@ -67,22 +67,23 @@ class OrderToCashTime extends Specification {
 
             Map addOut1 = ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
                     .parameters([productId:'DEMO_1_1', quantity:1, customerPartyId:customerPartyId,
-                    currencyUomId:currencyUomId, productStoreId:productStoreId]).call()
+                        currencyUomId:currencyUomId, productStoreId:productStoreId]).call()
 
             String cartOrderId = addOut1.orderId
             String orderPartSeqId = addOut1.orderPartSeqId
 
             ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
                     .parameters([orderId:cartOrderId, productId:'DEMO_3_1', quantity:1, customerPartyId:customerPartyId,
-                    currencyUomId:currencyUomId, productStoreId:productStoreId]).call()
+                        currencyUomId:currencyUomId, productStoreId:productStoreId]).call()
             ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
                     .parameters([orderId:cartOrderId, productId:'DEMO_2_1', quantity:1, customerPartyId:customerPartyId,
-                    currencyUomId:currencyUomId, productStoreId:productStoreId]).call()
+                        currencyUomId:currencyUomId, productStoreId:productStoreId, requireInventory:false]).call()
 
             ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
                     .parameters([orderId:cartOrderId, paymentMethodId:'CustJqpCc', shippingPostalContactMechId:'CustJqpAddr',
-                    shippingTelecomContactMechId:'CustJqpTeln', carrierPartyId:'_NA_', shipmentMethodEnumId:'ShMthGround']).call()
-            ec.service.sync().name("mantle.order.OrderServices.place#Order").parameters([orderId:cartOrderId]).call()
+                        shippingTelecomContactMechId:'CustJqpTeln', carrierPartyId:'_NA_', shipmentMethodEnumId:'ShMthGround']).call()
+            ec.service.sync().name("mantle.order.OrderServices.place#Order")
+                    .parameters([orderId:cartOrderId, requireInventory:false]).call()
 
             ec.user.logoutUser()
 

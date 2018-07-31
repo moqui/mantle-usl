@@ -409,9 +409,11 @@ General Order Placement and eCommerce Usage
             <if condition="availableToPromiseTotal &lt; quantity">
                 <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
                 <if condition="availableToPromiseTotal &lt;= 0.0"><then>
-                    <return error="true" type="warning" public="true" message="OrderInventoryNotAvailable"/>
+                    <message public="true" type="warning">OrderInventoryNotAvailable</message>
+                    <return error="true" message="Inventory not available, not updating order ${orderId}:${orderPartSeqId} product ${productId} for quantity ${quantity}"/>
                 </then><else>
-                    <return error="true" type="warning" public="true" message="OrderInventoryInsufficient"/>
+                    <message public="true" type="warning">OrderInventoryInsufficient</message>
+                    <return error="true" message="Inventory insufficient, not updating order ${orderId}:${orderPartSeqId} product ${productId} for quantity ${quantity}"/>
                 </else></if>
             </if>
         </actions>
@@ -445,7 +447,7 @@ General Order Placement and eCommerce Usage
             <parameter name="updateExisting" type="Boolean" default="true">
                 <description>If true update existing item by productId, if false always create a new item</description></parameter>
             <parameter name="requireInventory" type="Boolean">
-                <description>If true make sure inventory is available, if false don't check. If null defer to ProductStore setting.</description></parameter>
+                <description>If true make sure inventory is available, if false don't check. If null defer to ProductStore.requireInventory setting.</description></parameter>
             <parameter name="itemTypeEnumId" default-value="ItemProduct"/>
             <parameter name="unitAmount" type="BigDecimal"/>
             <parameter name="standardCost" type="BigDecimal"/>
@@ -478,7 +480,10 @@ General Order Placement and eCommerce Usage
             <!-- lookup orderPartSeqId if not passed in -->
             <if condition="!orderPartSeqId &amp;&amp; orderId">
                 <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
-                    <econdition field-name="orderId"/><order-by field-name="orderPartSeqId"/></entity-find>
+                    <econdition field-name="orderId"/>
+                    <select-field field-name="orderPartSeqId"/>
+                    <order-by field-name="orderPartSeqId"/>
+                </entity-find>
                 <set field="orderPartSeqId" from="orderPartList?.first?.orderPartSeqId"/>
             </if>
 
@@ -516,6 +521,9 @@ General Order Placement and eCommerce Usage
                                 shipmentMethodEnumId:shipmentMethodEnumId]"/>
                     <set field="orderId" from="createOrderOut.orderId"/>
                     <set field="orderPartSeqId" from="createOrderOut.orderPartSeqId"/>
+
+                    <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+                    <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
                 </if>
             </if>
 
@@ -534,7 +542,6 @@ General Order Placement and eCommerce Usage
 
             <!-- look up otherPartyProductId if not specified -->
             <if condition="!otherPartyProductId &amp;&amp; productId">
-                <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart" for-update="true"/>
                 <entity-find-one entity-name="mantle.party.PartyRole" value-field="vendorOrgRole">
                     <field-map field-name="partyId" from="orderPart.vendorPartyId"/>
                     <field-map field-name="roleTypeId" value="OrgInternal"/>
@@ -797,10 +804,59 @@ General Order Placement and eCommerce Usage
         <implements service="mantle.order.OrderServices.change#OrderStatusInterface"/>
         <in-parameters>
             <parameter name="placedDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="requireInventory" type="Boolean">
+                <description>If true make sure inventory is available, if false don't check. If null defer to ProductStore.requireInventory setting.</description></parameter>
         </in-parameters>
         <actions>
             <service-call name="mantle.order.OrderServices.update#OrderStatus" out-map="context"
                     in-map="context + [statusId:'OrderPlaced', placedDate:placedDate]"/>
+
+            <!-- if requireInventory make sure all is available (or was reserved) -->
+            <!-- NOTE: do this AFTER the update#OrderStatus call so that transactional reservation is already done and we know if we were able to reserve all (or if reservation not done that all is available) -->
+            <if condition="requireInventory == null">
+                <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/></if>
+                <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore" cache="true">
+                    <field-map field-name="productStoreId" from="orderHeader.productStoreId"/></entity-find-one>
+                <set field="requireInventory" from="productStore?.requireInventory == 'Y'"/>
+            </if>
+            <if condition="requireInventory">
+                <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                    <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+                <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
+                <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/></if>
+                <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
+                    <econdition field-name="orderId"/><order-by field-name="orderItemSeqId"/></entity-find>
+
+                <set field="allInventoryAvailable" from="true"/>
+                <iterate list="orderItemList" entry="orderItem">
+                    <set field="isProductItem" from="orderItem.itemTypeEnumId in productItemTypes &amp;&amp; orderItem.productId"/>
+                    <if condition="!isProductItem"><continue/></if>
+
+                    <!-- get current available inventory -->
+                    <service-call name="mantle.product.AssetServices.get#AvailableForOrder" out-map="availOut" out-map-add-to-existing="false"
+                            in-map="[productId:orderItem.productId, orderId:orderId, orderPartSeqId:orderItem.orderPartSeqId,
+                                orderItemSeqId:orderItem.orderItemSeqId, orderHeader:orderHeader]"/>
+                    <set field="availableToPromiseTotal" from="availOut.availableToPromiseTotal"/>
+                    <!-- if out of stock show one message, if insufficient available show another -->
+                    <if condition="availableToPromiseTotal &lt; orderItem.quantity">
+                        <set field="allInventoryAvailable" from="false"/>
+
+                        <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
+                            <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
+                        <if condition="availableToPromiseTotal &lt;= 0.0"><then>
+                            <message public="true" type="warning">OrderInventoryNotAvailable</message>
+                        </then><else>
+                            <message public="true" type="warning">OrderInventoryInsufficient</message>
+                        </else></if>
+                    </if>
+                </iterate>
+
+                <if condition="!allInventoryAvailable">
+                    <!-- NOTE: return with error=true will cause TX rollback, including reservations -->
+                    <return error="true" message="Inventory required but not all available, not placing order ${orderId}"/>
+                </if>
+            </if>
 
             <!-- New Customer: see if this is the first order for a customer -->
             <entity-find entity-name="mantle.order.OrderPart" list="orderPartList" for-update="true">
