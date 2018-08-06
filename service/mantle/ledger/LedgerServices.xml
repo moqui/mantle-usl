@@ -182,7 +182,7 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="moqui.basic.Enumeration" value-field="enumValue" cache="true">
                 <field-map field-name="enumId" from="glAccountClassEnumId"/></entity-find-one>
-            <set field="isContra" from="enumValue.optionIndicator"/>
+            <set field="isContra" from="enumValue.optionIndicator ?: 'N'"/>
 
             <set field="ancestorClassEnumIdSet" from="new HashSet([glAccountClassEnumId])"/>
             <if condition="enumValue.parentEnumId"><then>
@@ -225,18 +225,19 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="isTemporary" operator="is-not-null"/></econditions>
             </entity-find>
             <iterate list="glAccountList" entry="glAccount">
-                <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="context"
+                <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum"
+                        out-map="rootOut" out-map-add-to-existing="false"
                         in-map="[glAccountClassEnumId:glAccount.glAccountClassEnumId]"/>
 
-                <if condition="isContra == 'Y'"><then>
-                    <set field="entityValue.isDebit" from="'DEBIT'.equals(rootGlAccountClassEnumId) ? 'N' : 'Y'"/>
+                <if condition="rootOut.isContra == 'Y'"><then>
+                    <set field="entityValue.isDebit" from="'DEBIT'.equals(rootOut.rootGlAccountClassEnumId) ? 'N' : 'Y'"/>
                 </then><else>
-                    <set field="entityValue.isDebit" from="'DEBIT'.equals(rootGlAccountClassEnumId) ? 'Y' : 'N'"/>
+                    <set field="entityValue.isDebit" from="'DEBIT'.equals(rootOut.rootGlAccountClassEnumId) ? 'Y' : 'N'"/>
                 </else></if>
                 <set field="glAccount.isTemporary" value="N"/>
                 <set field="tempAccountClasses" from="['REVENUE', 'COST_OF_SALES', 'INCOME', 'EXPENSE', 'NON_OP_EXPENSE']"/>
                 <iterate list="tempAccountClasses" entry="tempAccountClass">
-                    <if condition="ancestorClassEnumIdSet.contains(tempAccountClass)">
+                    <if condition="rootOut.ancestorClassEnumIdSet.contains(tempAccountClass)">
                         <set field="glAccount.isTemporary" value="Y"/><break/></if>
                 </iterate>
                 <entity-update value-field="glAccount"/>
@@ -1403,22 +1404,27 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[parentEnumId:tempAccountClass, includeNested:true]"/>
                 <set field="descEnumIdSet" from="nestedEnumOut.enumIdSet"/>
                 <service-call name="mantle.ledger.LedgerServices.find#RootGlAccountClassEnum" out-map="rootEnumOut"
-                        in-map="[glAccountClassEnumId:classEnum.parentEnumId]"/>
+                        in-map="[glAccountClassEnumId:tempAccountClass]"/>
                 <set field="isDebit" from="'DEBIT'.equals(rootEnumOut.rootGlAccountClassEnumId)"/>
                 <if condition="rootEnumOut.isContra == 'Y'"><set field="isDebit" from="!isDebit"/></if>
 
-                <set field="balanceTotal" from="0.0"/>
+                <!-- find GAOTP records for balances -->
                 <entity-find entity-name="mantle.ledger.report.GlAccountOrgTimePeriodDetail" list="glAccountDetailList">
                     <econdition field-name="timePeriodId"/>
                     <econdition field-name="glAccountClassEnumId" operator="in" from="descEnumIdSet"/>
-                    <select-field field-name="glAccountId,endingBalance"/>
+                    <select-field field-name="glAccountId,isDebit,endingBalance"/>
                 </entity-find>
+
+                <!-- see if we have any endingBalance values, if not no TX needed -->
+                <set field="hasEndingBalances" from="false"/>
                 <iterate list="glAccountDetailList" entry="glAccountDetail">
-                    <if condition="!glAccountDetail.endingBalance"><continue/></if>
-                    <set field="balanceTotal" from="balanceTotal + glAccountDetail.endingBalance"/>
+                    <if condition="glAccountDetail.endingBalance">
+                        <set field="hasEndingBalances" from="true"/>
+                        <break/>
+                    </if>
                 </iterate>
-                <if condition="balanceTotal == 0.0">
-                    <message>No transaction for ${classEnum.description}, balance of all accounts is zero</message>
+                <if condition="!hasEndingBalances">
+                    <message>No transaction for ${classEnum.description}, ending balance of all accounts is zero</message>
                     <continue/>
                 </if>
 
@@ -1428,21 +1434,32 @@ along with this software (see the LICENSE.md file). If not, see
                             transactionDate:transactionDate, description:txDesc, glJournalId:glJournalId]"/>
                 <set field="acctgTransId" from="createOut.acctgTransId"/>
                 <script>acctgTransIdByClassId.put(tempAccountClass, acctgTransId)</script>
-                <message>Created transaction ${acctgTransId} ${ec.l10n.format(transactionDate, null)} for ${classEnum.description}, total balance ${ec.l10n.format(balanceTotal, '#,##0.00')}</message>
-                <log message="Created transaction ${acctgTransId} ${ec.l10n.format(transactionDate, null)} for ${classEnum.description}, total balance ${ec.l10n.format(balanceTotal, '#,##0.00')}"/>
 
                 <!-- entry for each GlAccount with a balance -->
+                <set field="balanceTotal" from="0.0"/>
                 <iterate list="glAccountDetailList" entry="glAccountDetail">
                     <if condition="!glAccountDetail.endingBalance"><continue/></if>
+                    <set field="curEndingBalance" from="glAccountDetail.endingBalance"/>
+
+                    <!-- if current account isDebit indicator opposite of  -->
+                    <set field="isCurDebit" from="glAccountDetail.isDebit == 'Y'"/>
+                    <set field="isCurContra" from="isDebit != isCurDebit"/>
+                    <!-- <log level="warn" message="isDebit ${isDebit} glAccountId ${glAccountDetail.glAccountId} isDebit ${isCurDebit} isCurContra ${isCurContra} endingBalance ${glAccountDetail.endingBalance}"/> -->
+
+                    <!-- create the TX entry, add to balance for balancing entry -->
                     <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
                             in-map="[acctgTransId:acctgTransId, glAccountId:glAccountDetail.glAccountId,
-                                debitCreditFlag:(isDebit ? 'C' : 'D'), amount:glAccountDetail.endingBalance]"/>
+                                debitCreditFlag:(isCurDebit ? 'C' : 'D'), amount:curEndingBalance]"/>
+                    <set field="balanceTotal" from="isCurContra ? balanceTotal - curEndingBalance : balanceTotal + curEndingBalance"/>
                 </iterate>
 
                 <!-- balancing entry for the Net Income account -->
                 <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
                         in-map="[acctgTransId:acctgTransId, glAccountId:netIncomeGlAccountId,
                             debitCreditFlag:(isDebit ? 'D' : 'C'), amount:balanceTotal]"/>
+
+                <message>Created transaction ${acctgTransId} ${ec.l10n.format(transactionDate, null)} for ${classEnum.description}, total balance ${ec.l10n.format(balanceTotal, '#,##0.00')}</message>
+                <log message="Created transaction ${acctgTransId} ${ec.l10n.format(transactionDate, null)} for ${classEnum.description}, total balance ${ec.l10n.format(balanceTotal, '#,##0.00')}"/>
 
                 <if condition="postTransactions">
                     <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="[acctgTransId:acctgTransId]"/></if>
