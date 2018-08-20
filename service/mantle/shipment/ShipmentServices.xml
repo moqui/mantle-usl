@@ -147,7 +147,16 @@ along with this software (see the LICENSE.md file). If not, see
                     <else><set field="hasAllLabels" from="false"/></else>
                 </if>
             </iterate>
-            <set field="shippingGatewayConfigId" from="firstRouteSegment.shippingGatewayConfigId ?: ec.user.getPreference('DefaultShipmentGatewayConfigId')"/>
+
+            <set field="shippingGatewayConfigId" from="firstRouteSegment.shippingGatewayConfigId"/>
+            <if condition="!shippingGatewayConfigId &amp;&amp; shipment?.fromPartyId">
+                <!-- if Shipment.fromPartyId lookup setting there -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="ptySettingOut"
+                        in-map="[partyId:shipment.fromPartyId, partySettingTypeId:'DefaultShipmentGatewayConfigId']"/>
+                <set field="shippingGatewayConfigId" from="ptySettingOut?.settingValue"/>
+            </if>
+            <if condition="!shippingGatewayConfigId">
+                <set field="shippingGatewayConfigId" from="ec.user.getPreference('DefaultShipmentGatewayConfigId')"/></if>
             <if condition="shippingGatewayConfigId"><entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig"/></if>
 
             <!-- get dest ContactMech for trust level -->
@@ -302,7 +311,14 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
                 <set field="routeSegment" from="routeSegmentList[0]"/>
             </else></if>
+
             <set field="shippingGatewayConfigId" from="routeSegment.shippingGatewayConfigId"/>
+            <if condition="!shippingGatewayConfigId &amp;&amp; shipment?.fromPartyId">
+                <!-- if Shipment.fromPartyId lookup setting there -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="ptySettingOut"
+                        in-map="[partyId:shipment.fromPartyId, partySettingTypeId:'DefaultShipmentGatewayConfigId']"/>
+                <set field="shippingGatewayConfigId" from="ptySettingOut?.settingValue"/>
+            </if>
             <if condition="!shippingGatewayConfigId">
                 <set field="shippingGatewayConfigId" from="ec.user.getPreference('DefaultShipmentGatewayConfigId')"/></if>
 
@@ -813,7 +829,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="originFacilityId"/>
             <parameter name="destinationFacilityId"/>
             <parameter name="tryAutoPackage" type="Boolean" default="true"/>
-            <parameter name="shippingGatewayConfigId" default="ec.user.getPreference('DefaultShipmentGatewayConfigId')"/>
+            <parameter name="shippingGatewayConfigId"/>
             <parameter name="entryDate" type="Timestamp" default="ec.user.nowTimestamp"/>
         </in-parameters>
         <out-parameters>
@@ -847,12 +863,23 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
             </if>
 
+            <if condition="!shippingGatewayConfigId &amp;&amp; orderPart.vendorPartyId">
+                <!-- if Shipment.fromPartyId lookup setting there -->
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="ptySettingOut"
+                        in-map="[partyId:orderPart.vendorPartyId, partySettingTypeId:'DefaultShipmentGatewayConfigId']"/>
+                <set field="shippingGatewayConfigId" from="ptySettingOut?.settingValue"/>
+            </if>
+            <if condition="!shippingGatewayConfigId">
+                <set field="shippingGatewayConfigId" from="ec.user.getPreference('DefaultShipmentGatewayConfigId')"/></if>
+
             <!-- create Shipment record, get shipmentId -->
             <service-call name="create#mantle.shipment.Shipment" out-map="context"
                     in-map="[shipmentTypeEnumId:shipmentTypeEnumId, statusId:'ShipInput', entryDate:entryDate,
                         fromPartyId:orderPart.vendorPartyId, toPartyId:orderPart.customerPartyId,
                         systemMessageRemoteId:orderHeader.systemMessageRemoteId, handlingInstructions:orderPart.shippingInstructions,
-                        otherPartyOrderId:orderPart.otherPartyOrderId]"/>
+                        otherPartyOrderId:orderPart.otherPartyOrderId,
+                        shipAfterDate:orderPart.shipAfterDate, shipBeforeDate:orderPart.shipBeforeDate,
+                        estimatedShipDate:orderPart.estimatedShipDate, estimatedArrivalDate:orderPart.estimatedDeliveryDate]"/>
 
             <if condition="createRouteSegment">
                 <service-call name="create#mantle.shipment.ShipmentRouteSegment" out-map="context"
@@ -1149,6 +1176,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shipmentId" required="true"/>
             <parameter name="locationOrderBy" default-value="facilityId,areaId,aisleId,sectionId,levelId,positionId"/>
             <parameter name="productOrderBy" default-value="pseudoId,productName"/>
+            <parameter name="templateSettingSuffix"/>
         </in-parameters>
         <out-parameters>
             <parameter name="shipment" type="Map"/>
@@ -1184,6 +1212,9 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="reservedLocationInfoMap" type="Map"/>
             <parameter name="otherLocationInfoMap" type="Map"/>
             <parameter name="productInfoMap" type="Map"/>
+
+            <parameter name="templateLocation"><description>If templateSettingSuffix specified this is looked up from
+                ProductStoreSetting and if no setting found for store then from PartySetting.</description></parameter>
         </out-parameters>
         <actions>
             <service-call name="mantle.shipment.ShipmentServices.get#ShipmentContactInfo" out-map="context"
@@ -1487,6 +1518,40 @@ along with this software (see the LICENSE.md file). If not, see
                 <script>packageInfoList.add([shipmentPackage:shipmentPackage, shipmentBoxType:shipmentBoxType, weightUom:weightUom,
                                              contentInfoList:contentInfoList])</script>
             </iterate>
+
+            <if condition="templateSettingSuffix">
+                <!-- see if a template is configured by ProductStoreSetting -->
+                <set field="templateLocation" from="null"/>
+                <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" distinct="true">
+                    <econdition field-name="shipmentId"/>
+                    <select-field field-name="orderId"/>
+                </entity-find>
+                <set field="orderIdSet" from="new HashSet(shipmentItemSourceList*.orderId)"/>
+                <if condition="orderIdSet">
+                    <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList" distinct="true">
+                        <econdition field-name="orderId" operator="in" from="orderIdSet"/>
+                        <econdition field-name="productStoreId" operator="is-not-null"/>
+                        <select-field field-name="productStoreId"/>
+                    </entity-find>
+                    <set field="productStoreIdSet" from="new HashSet(orderHeaderList*.productStoreId)"/>
+                    <if condition="productStoreIdSet">
+                        <entity-find entity-name="mantle.product.store.ProductStoreSetting" list="productStoreSettingList" cache="true">
+                            <date-filter/>
+                            <econdition field-name="productStoreId" from="productStoreIdSet.first()"/>
+                            <econdition field-name="settingTypeEnumId" value="Psst${templateSettingSuffix}"/>
+                            <order-by field-name="-fromDate"/>
+                        </entity-find>
+                        <if condition="productStoreSettingList">
+                            <set field="templateLocation" from="productStoreSettingList[0].settingValue"/></if>
+                    </if>
+                </if>
+                <!-- if no template setting for store look for PartySetting on Shipment.fromPartyId -->
+                <if condition="!templateLocation &amp;&amp; shipment.fromPartyId">
+                    <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="ptySettingOut"
+                            in-map="[partyId:shipment.fromPartyId, partySettingTypeId:('Org' + templateSettingSuffix)]"/>
+                    <set field="templateLocation" from="ptySettingOut?.settingValue"/>
+                </if>
+            </if>
         </actions>
     </service>
 
