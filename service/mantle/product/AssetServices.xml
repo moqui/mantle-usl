@@ -984,6 +984,15 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="quantity &gt; assetReservation.quantityNotIssued">
                 <return error="true" message="For reservation ${assetReservation.assetReservationId} tried to issue quantity ${quantity} which is greater than quantity not issued ${assetReservation.quantityNotIssued} for the reservation"/></if>
 
+            <!-- if allow over QOH not allowed check now -->
+            <set field="asset" from="assetReservation.asset"/>
+            <entity-find-one entity-name="mantle.facility.Facility" value-field="facility" cache="true">
+                <field-map field-name="facilityId" from="asset?.facilityId"/></entity-find-one>
+            <if condition="facility?.assetAllowIssueOverQoh != 'Y'">
+                <if condition="quantity &gt; asset.quantityOnHandTotal">
+                    <return error="true" message="For reservation ${assetReservation.assetReservationId} tried to issue quantity ${quantity} which is greater than quantity on hand ${asset.quantityOnHandTotal} for asset ${asset.assetId}"/></if>
+            </if>
+
             <!-- see if there is another issuance we can add to -->
             <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingIssuanceList">
                 <econdition field-name="shipmentId"/>
@@ -1038,25 +1047,28 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="assetId"><entity-find-one entity-name="mantle.product.asset.Asset" value-field="passedAsset"/></if>
             <if condition="quantity == 0.0"><return message="Not issuing zero quantity for shipment ${shipmentId}"/></if>
 
+            <!-- get facilityId from SRS.originFacilityId -->
+            <entity-find entity-name="mantle.shipment.ShipmentRouteSegment" list="srsList" limit="1">
+                <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
+            <if condition="srsList"><set field="facilityId" from="srsList[0].originFacilityId"/></if>
+
             <if condition="orderId &amp;&amp; orderItemSeqId"><then>
                 <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
                 <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/>
-                <set field="productStore" from="orderHeader.'mantle.product.store.ProductStore'"/>
-                <!-- <set field="inventoryFacility" from="productStore?.'Inventory#mantle.facility.Facility'"/> -->
+                <!-- get productId from OrderItem -->
                 <set field="productId" from="orderItem.productId"/>
 
-                <set field="facilityId" from="productStore?.inventoryFacilityId"/>
-                <!-- no ProductStore inventoryFacilityId? look at OrderPart -->
+                <!-- if no facilityId look at OrderPart -->
                 <if condition="!facilityId">
                     <entity-find-related-one value-field="orderItem" relationship-name="mantle.order.OrderPart" to-value-field="orderPart"/>
                     <set field="facilityId" from="orderPart.facilityId"/>
-                    <!-- no OrderPart facilityId? look at ShipmentRouteSegment.originFacilityId -->
-                    <if condition="!facilityId">
-                        <entity-find entity-name="mantle.shipment.ShipmentRouteSegment" list="srsList">
-                            <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
-                        <if condition="srsList"><set field="facilityId" from="srsList[0].originFacilityId"/></if>
-                    </if>
                 </if>
+                <!-- still no facilityId? look at ProductStore.inventoryFacilityId -->
+                <if condition="!facilityId">
+                    <set field="productStore" from="orderHeader.'mantle.product.store.ProductStore'"/>
+                    <set field="facilityId" from="productStore?.inventoryFacilityId"/>
+                </if>
+
                 <if condition="!facilityId"><return error="true" message="Could not find inventory facility for shipment ${shipmentId} and order item ${ec.resource.expand('OrderItemNameTemplate','')}"/></if>
             </then><else>
                 <if condition="passedAsset != null"><then>
@@ -1067,6 +1079,11 @@ along with this software (see the LICENSE.md file). If not, see
                     <return error="true" message="Cannot issue asset for Shipment ${shipmentId} without either assetId or orderId and orderItemSeqId"/>
                 </else></if>
             </else></if>
+
+            <if condition="!productId"><return error="true" message="Could not find product for shipment ${shipmentId} asset ${assetId} order item ${orderId}:${orderItemSeqId}"/></if>
+
+            <entity-find-one entity-name="mantle.facility.Facility" value-field="facility" cache="true"/>
+            <if condition="facility == null"><return error="true" message="Could not find facility to issue asset from for shipment ${shipmentId}"/></if>
 
             <set field="baseMap" from="[orderId:orderId, orderItemSeqId:orderItemSeqId, shipmentId:shipmentId,
                     shipmentItemSourceId:shipmentItemSourceId, productId:productId]"/>
@@ -1096,8 +1113,19 @@ along with this software (see the LICENSE.md file). If not, see
                 <iterate list="assetList" entry="asset">
                     <set field="lastAsset" from="asset"/>
                     <if condition="quantityRemaining &gt; 0.0">
+                        <!-- always check ATP (we don't have a reservation) -->
                         <set field="quantityToIssue" from="asset.availableToPromiseTotal &gt; quantityRemaining ? quantityRemaining : asset.availableToPromiseTotal"/>
                         <if condition="quantityToIssue &lt;= 0.0"><continue/></if>
+
+                        <!-- if not configured to allow also check QOH -->
+                        <if condition="facility.assetAllowIssueOverQoh != 'Y'">
+                            <!-- if no QOH skip this asset -->
+                            <if condition="asset.quantityOnHandTotal &lt;= 0.0"><continue/></if>
+                            <!-- otherwise just reduce to QOH -->
+                            <if condition="quantityToIssue &gt; asset.quantityOnHandTotal">
+                                <set field="quantityToIssue" from="asset.quantityOnHandTotal"/></if>
+                        </if>
+
                         <set field="quantityRemaining" from="quantityRemaining - quantityToIssue"/>
 
                         <!-- see if there is another issuance we can add to -->
@@ -1124,8 +1152,13 @@ along with this software (see the LICENSE.md file). If not, see
                         </else></if>
                     </if>
                 </iterate>
-                <!-- not all issued? issue to last (most recent) Asset -->
-                <if condition="quantityRemaining &gt; 0">
+                <!-- not all issued? issue from last (most recent) Asset -->
+                <if condition="quantityRemaining &gt; 0.0 &amp;&amp; lastAsset != null">
+                    <!-- if not configured to allow stop now because we didn't find on hand inventory -->
+                    <if condition="facility.assetAllowIssueOverQoh != 'Y'">
+                        <return error="true" message="Unable to issue ${quantityRemaining} out of quantity requested ${quantity}, insufficient inventory on hand for shipment ${shipmentId}"/>
+                    </if>
+
                     <!-- see if there is another issuance we can add to -->
                     <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingIssuanceList">
                         <econdition field-name="shipmentId"/>
@@ -1150,6 +1183,11 @@ along with this software (see the LICENSE.md file). If not, see
                     </else></if>
                 </if>
             </then><else>
+                <!-- if not configured to allow stop now because we didn't find on hand inventory -->
+                <if condition="facility.assetAllowIssueOverQoh != 'Y'">
+                    <return error="true" message="No assets found to issue to shipment ${shipmentId} with product ${productId} facility ${facilityId} and owner ${ownerPartyId}"/>
+                </if>
+
                 <!-- no asset... create a shell one to record the issuance and detail against -->
                 <service-call name="create#mantle.product.asset.Asset" out-map="context"
                         in-map="[assetTypeEnumId:'AstTpInventory', hasQuantity:'Y', statusId:'AstAvailable',
@@ -1203,7 +1241,16 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- reserve by availableToPromiseTotal (no reservation here, but respect others) -->
             <if condition="quantity &gt; asset.availableToPromiseTotal">
                 <set field="uomDescription" from="asset?.product?.amountUom?' '+(ec.resource.expand('UomNameTemplate','',asset.product.amountUom)):''"/>
-                <message error="true">Quantity specified (${ec.l10n.format(quantity, '#,##0.00')}${uomDescription}) is greater than the quantity available (${ec.l10n.format(asset.availableToPromiseTotal, '#,##0.00')}${uomDescription})</message></if>
+                <message error="true">Quantity specified (${ec.l10n.format(quantity, '#,##0.00')}${uomDescription}) is greater than the quantity available (${ec.l10n.format(asset.availableToPromiseTotal, '#,##0.00')}${uomDescription})</message>
+            </if>
+
+            <!-- if allow over QOH not allowed check now -->
+            <entity-find-one entity-name="mantle.facility.Facility" value-field="facility" cache="true">
+                <field-map field-name="facilityId" from="asset.facilityId"/></entity-find-one>
+            <if condition="facility?.assetAllowIssueOverQoh != 'Y'">
+                <if condition="quantity &gt; asset.quantityOnHandTotal">
+                    <return error="true" message="For work effort ${workEffortId} tried to issue quantity ${quantity} which is greater than quantity on hand ${asset.quantityOnHandTotal} for asset ${asset.assetId}"/></if>
+            </if>
 
             <!-- check consume product -->
             <entity-find entity-name="mantle.work.effort.WorkEffortProduct" list="consumeProductList">
