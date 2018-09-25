@@ -376,6 +376,19 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find-one>
             <if condition="productStore == null &amp;&amp; orgPartyRole == null"><return/></if>
 
+            <set field="ownerPartyIdSet" from="new HashSet()"/>
+            <script>if (organizationPartyId) ownerPartyIdSet.add(organizationPartyId)</script>
+            <if condition="organizationPartyId &amp;&amp; assetAllowOtherOwner != 'Y'">
+                <!-- look for parent org(s) if any, include assets from parent org too -->
+                <entity-find entity-name="mantle.party.PartyRelationship" list="parentRelList" cache="true">
+                    <date-filter/>
+                    <econdition field-name="relationshipTypeEnumId" value="PrtOrgRollup"/>
+                    <econdition field-name="fromPartyId" from="organizationPartyId"/>
+                    <econdition field-name="toPartyId" operator="is-not-null"/>
+                </entity-find>
+                <script>if (parentRelList) ownerPartyIdSet.addAll(parentRelList*.toPartyId)</script>
+            </if>
+
             <!-- check and lock individual Asset records -->
             <set field="lockedAssetList" from="[]"/>
             <set field="checkQuantityRemaining" from="quantityRemaining"/>
@@ -419,9 +432,6 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="checkQuantityRemaining &gt; 0.0">
                 <set field="baseAssetCond" from="[productId:productId, statusId:'AstAvailable']"/>
                 <if condition="inventoryFacilityId"><set field="baseAssetCond.facilityId" from="inventoryFacilityId"/></if>
-                <if condition="organizationPartyId &amp;&amp; assetAllowOtherOwner != 'Y'">
-                    <set field="baseAssetCond.ownerPartyId" from="organizationPartyId"/></if>
-
                 <!-- TODO 20180503 remove this at some point, added to monitor corner case issue -->
                 <if condition="!baseAssetCond.facilityId"><log level="warn" message="Reserving inventory for order ${orderId} item ${orderItemSeqId} with no facilityId"/></if>
 
@@ -452,6 +462,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- do pre-query to find sufficient lots, or if no sufficient largest lots by order to minimize lots -->
                     <entity-find entity-name="mantle.product.asset.AssetLotSummary" list="lotSummaryList">
                         <econdition-object field="baseAssetCond"/>
+                        <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIdSet" ignore="assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
                         <econdition field-name="expirationDate" operator="greater-equals" from="newerThanExpireDate" ignore-if-empty="true"/>
                         <select-field field-name="lotId,availableToPromiseTotal,manufacturedDate,expirationDate"/>
                         <!-- order to get fewest but sufficient available in a lot -->
@@ -468,6 +479,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <set field="lotRetryOrderBy" from="singleLot ? 'availableToPromiseTotal' : 'expirationDate'"/>
                         <entity-find entity-name="mantle.product.asset.AssetLotSummary" list="lotSummaryList">
                             <econdition-object field="baseAssetCond"/>
+                            <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIdSet" ignore="assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
                             <select-field field-name="lotId,availableToPromiseTotal,manufacturedDate,expirationDate"/>
                             <order-by field-name="${lotRetryOrderBy}"/>
                         </entity-find>
@@ -506,6 +518,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <entity-find entity-name="mantle.product.asset.AssetLocationDetail" list="checkAssetList">
                         <!-- don't lock here, we'll lock records we need individually to avoid contention -->
                         <econdition-object field="baseAssetCond"/>
+                        <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIdSet" ignore="assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
                         <!-- only look for Assets with available quantity, to reduce lock contention we'll create new records for negative ATP -->
                         <econdition field-name="availableToPromiseTotal" operator="greater" from="0.0"/>
                         <econdition field-name="assetId" operator="not-in" from="explicitAssetIdList" ignore-if-empty="true"/>
@@ -540,6 +553,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <entity-find entity-name="mantle.product.asset.AssetLocationDetail" list="checkAssetList">
                         <!-- don't lock here, we'll lock records we need individually to avoid contention -->
                         <econdition-object field="baseAssetCond"/>
+                        <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIdSet" ignore="assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
                         <!-- only look for Assets with available quantity, to reduce lock contention we'll create new records for negative ATP -->
                         <econdition field-name="availableToPromiseTotal" operator="greater" from="0.0"/>
                         <econdition field-name="assetId" operator="not-in" from="explicitAssetIdList" ignore-if-empty="true"/>
@@ -711,11 +725,24 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="facilityId" from="asset.facilityId"/></entity-find-one>
             <set field="assetAllowOtherOwner" from="inventoryFacility?.assetAllowOtherOwner"/>
 
+            <set field="ownerPartyIdSet" from="new HashSet()"/>
+            <script>if (asset.ownerPartyId) ownerPartyIdSet.add(asset.ownerPartyId)</script>
+            <if condition="asset.ownerPartyId &amp;&amp; assetAllowOtherOwner != 'Y'">
+                <!-- look for child org(s) if any, include assets from child org(s) too to pick up reservations against temporary Asset records owned by child orgs -->
+                <entity-find entity-name="mantle.party.PartyRelationship" list="childRelList" cache="true">
+                    <date-filter/>
+                    <econdition field-name="relationshipTypeEnumId" value="PrtOrgRollup"/>
+                    <econdition field-name="toPartyId" from="asset.ownerPartyId"/>
+                    <econdition field-name="fromPartyId" operator="is-not-null"/>
+                </entity-find>
+                <script>if (childRelList) ownerPartyIdSet.addAll(childRelList*.fromPartyId)</script>
+            </if>
+
             <set field="availableRemaining" from="asset.availableToPromiseTotal"/>
             <entity-find entity-name="mantle.product.issuance.AssetAndReservation" list="resList">
                 <econdition field-name="productId" from="asset.productId"/>
                 <econdition field-name="facilityId" from="asset.facilityId"/>
-                <econdition field-name="ownerPartyId" from="asset.ownerPartyId" ignore="assetAllowOtherOwner == 'Y'"/>
+                <econdition field-name="ownerPartyId" from="asset.ownerPartyId" ignore="assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
                 <econdition field-name="quantityNotAvailable" operator="greater" from="0"/>
                 <order-by field-name="priority"/><order-by field-name="reservedDate"/>
             </entity-find>
