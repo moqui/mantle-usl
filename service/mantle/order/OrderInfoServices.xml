@@ -431,6 +431,90 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="get" noun="OrderPartBillingAddress">
+        <description>
+            Find billing address(es) for an OrderPart. Look first for explicitly specified PostalBilling in
+            OrderPartContactMech, then PaymentMethod.postalContactMechId via Payment(s) for OrderPart, then looks for
+            PostalBilling or PostalPrimary address for CustomerBillTo OrderPartParty (if enabled) or for OrderPart.customerPartyId.
+
+            There will usually be a single billing address unless there more than one is explicitly associated with the OrderPart.
+        </description>
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId"><description>Defaults to first part</description></parameter>
+            <parameter name="useCustomerBillTo" type="boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="postalContactMechIdList" type="List"><parameter name="postalContactMechId"/></parameter>
+        </out-parameters>
+        <actions>
+            <set field="postalContactMechIdList" from="[]"/>
+
+            <if condition="!orderPartSeqId">
+                <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                    <econdition field-name="orderId"/>
+                    <select-field field-name="orderPartSeqId"/>
+                    <order-by field-name="orderPartSeqId"/>
+                </entity-find>
+                <set field="orderPartSeqId" from="orderPartList?.first?.orderPartSeqId"/>
+            </if>
+
+            <!-- OrderPartContactMech -->
+            <entity-find entity-name="mantle.order.OrderPartContactMech" list="opcmList">
+                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                <econdition field-name="contactMechPurposeId" value="PostalBilling"/>
+            </entity-find>
+            <if condition="opcmList"><script>postalContactMechIdList.addAll(opcmList*.contactMechId)</script></if>
+
+            <!-- Payment/PaymentMethod -->
+            <if condition="!postalContactMechIdList">
+                <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                    <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                    <econdition field-name="paymentMethodId" operator="is-not-null"/>
+                </entity-find>
+                <if condition="paymentList">
+                    <entity-find entity-name="mantle.account.method.PaymentMethod" list="paymentMethodList">
+                        <econdition field-name="paymentMethodId" operator="in" from="paymentList*.paymentMethodId"/>
+                        <econdition field-name="postalContactMechId" operator="is-not-null"/>
+                    </entity-find>
+                    <script>postalContactMechIdList.addAll(paymentMethodList*.postalContactMechId)</script>
+                </if>
+            </if>
+
+            <!-- if none found get billing address for CustomerBillTo or customerPartyId -->
+            <if condition="!postalContactMechIdList">
+                <if condition="useCustomerBillTo">
+                    <entity-find entity-name="mantle.order.OrderPartParty" list="oppList">
+                        <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                        <econdition field-name="roleTypeId" value="CustomerBillTo"/>
+                    </entity-find>
+                    <if condition="oppList"><set field="billToPartyId" from="oppList[0].partyId"/></if>
+                </if>
+                <if condition="!billToPartyId">
+                    <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
+                    <if condition="orderPart == null"><return error="true" message="Could not find Order Part ${orderId}:${orderPartSeqId}"/></if>
+                    <set field="billToPartyId" from="orderPart.customerPartyId"/>
+                </if>
+                <if condition="billToPartyId">
+                    <entity-find entity-name="mantle.party.contact.PartyContactMech" list="postalPcmList">
+                        <date-filter/><econdition field-name="partyId" from="billToPartyId"/>
+                        <econdition field-name="contactMechPurposeId" value="PostalBilling"/>
+                        <order-by field-name="-fromDate"/>
+                    </entity-find>
+                    <if condition="!postalPcmList">
+                        <entity-find entity-name="mantle.party.contact.PartyContactMech" list="postalPcmList">
+                            <date-filter/><econdition field-name="partyId" from="billToPartyId"/>
+                            <econdition field-name="contactMechPurposeId" value="PostalPrimary"/>
+                            <order-by field-name="-fromDate"/>
+                        </entity-find>
+                        <if condition="postalPcmList"><set field="postalContactMechPurposeId" value="PostalPrimary"/></if>
+                    </if>
+                    <if condition="postalPcmList"><script>postalContactMechIdList.add(postalPcmList[0].contactMechId)</script></if>
+                </if>
+            </if>
+        </actions>
+    </service>
+
     <service verb="check" noun="OrderPreApprove">
         <description>A basic set of checks for possible issues before approving an order. Use an SECA on this service to do
             additional checks, adding to the approveWarnings List as needed.</description>
