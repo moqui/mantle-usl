@@ -118,18 +118,19 @@ class AssetReservationMultipleThreads extends Specification {
             String customerPartyId = ec.user.userAccount.partyId
 
             Map addOut1 = ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
-                    .parameters([productId: 'DEMO_1_1', quantity: 60, customerPartyId: customerPartyId,
-                                 currencyUomId: currencyUomId, productStoreId: productStoreId]).call()
+                    .parameters([productId:'DEMO_1_1', quantity:60, customerPartyId:customerPartyId,
+                                 currencyUomId:currencyUomId, productStoreId:productStoreId, requireInventory:false]).call()
 
             cartOrderId = addOut1.orderId
             // String orderPartSeqId = addOut1.orderPartSeqId
 
             ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
                     .parameters([orderId: cartOrderId, paymentMethodId:'CustJqpCc', paymentInstrumentEnumId:'PiCreditCard',
-                                 shippingPostalContactMechId: 'CustJqpAddr', shippingTelecomContactMechId: 'CustJqpTeln',
-                                 carrierPartyId: '_NA_', shipmentMethodEnumId: 'ShMthGround']).call()
+                                 shippingPostalContactMechId:'CustJqpAddr', shippingTelecomContactMechId:'CustJqpTeln',
+                                 carrierPartyId:'_NA_', shipmentMethodEnumId:'ShMthGround']).call()
             // place#Order triggers the asset reservation
-            ec.service.sync().name("mantle.order.OrderServices.place#Order").parameters([orderId: cartOrderId]).call()
+            ec.service.sync().name("mantle.order.OrderServices.place#Order")
+                    .parameters([orderId:cartOrderId, requireInventory:false]).call()
 
             // logger.info(ec.artifactExecution.printHistory())
 

@@ -117,12 +117,14 @@ class OrderToCashBasicFlow extends Specification {
                 .parameters([orderId:cartOrderId, productId:'DEMO_3_1', quantity:5]).call()
         // with orderPartSeqId
         Map addOut3 = ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
-                .parameters([orderId:cartOrderId, orderPartSeqId:orderPartSeqId, productId:'DEMO_2_1', quantity:7]).call()
+                .parameters([orderId:cartOrderId, orderPartSeqId:orderPartSeqId, productId:'DEMO_2_1', quantity:7, requireInventory:false]).call()
 
         setInfoOut = ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
                 .parameters([orderId:cartOrderId, paymentMethodId:'CustJqpCc', shippingPostalContactMechId:'CustJqpAddr',
                     shippingTelecomContactMechId:'CustJqpTeln', carrierPartyId:'_NA_', shipmentMethodEnumId:'ShMthGround']).call()
-        ec.service.sync().name("mantle.order.OrderServices.place#Order").parameters([orderId:cartOrderId]).call()
+        // place order
+        ec.service.sync().name("mantle.order.OrderServices.place#Order")
+                .parameters([orderId:cartOrderId, requireInventory:false]).call()
 
         ec.user.logoutUser()
 

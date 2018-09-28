@@ -17,6 +17,7 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="get" noun="OrderDisplayInfo">
         <in-parameters>
             <parameter name="orderId" required="true"/>
+            <parameter name="templateSettingSuffix" default-value="TemplateOrderPrint"/>
         </in-parameters>
         <out-parameters>
             <parameter name="orderId"/>
@@ -67,6 +68,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="orderPartList" type="List"><parameter name="orderPart" type="Map">
                 <auto-parameters entity-name="mantle.order.OrderPart"/></parameter></parameter>
             <parameter name="firstPart" type="Map"/>
+            <parameter name="firstPartInfo" type="Map"/>
             <parameter name="orderPartInfoList" type="List"><parameter name="orderPartInfo" type="Map">
                 <parameter name="orderPart" type="Map"><auto-parameters entity-name="mantle.order.OrderPart"/></parameter>
                 <parameter name="partEditable" type="Boolean"/>
@@ -79,6 +81,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <parameter name="newerInventory" type="Boolean"/>
                 <parameter name="shipmentMethodEnum" type="Map">
                     <auto-parameters entity-name="moqui.basic.Enumeration"/></parameter>
+                <parameter name="carrierPartyDetail" type="Map"/>
                 <parameter name="partPaymentList" type="List"><parameter name="partPayment" type="Map">
                     <auto-parameters entity-name="mantle.account.payment.Payment"/></parameter></parameter>
                 <parameter name="partPaymentInfoList" type="List"><parameter name="partPaymentInfo" type="Map">
@@ -133,6 +136,9 @@ along with this software (see the LICENSE.md file). If not, see
                     <auto-parameters entity-name="mantle.shipment.ShipmentItemSource"/></parameter></parameter>
                 <parameter name="partShipmentIdSet" type="Set"><parameter name="partShipmentId"/></parameter>
             </parameter></parameter>
+
+            <parameter name="templateLocation"><description>Looked up from ProductStoreSetting and if no setting found for store or
+                no store is associated with the Order then from PartySetting (for vendorPartyId).</description></parameter>
         </out-parameters>
         <actions>
             <set field="placeWarnings" from="[]"/>
@@ -149,7 +155,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="statusItem" from="orderHeader.status"/>
             <!-- NOTE: these statuses are fairly liberal, may want to restrict more in certain scenarios (such as customer changing an order) -->
             <set field="editableStatusIds" from="new HashSet(['OrderBeingChanged', 'OrderOpen', 'OrderRequested',
-                'OrderProposed', 'OrderPlaced', 'OrderProcessing', 'OrderWishList', 'OrderGiftRegistry', 'OrderAutoReorder'])"/>
+                'OrderProposed', 'OrderPlaced', 'OrderHold', 'OrderProcessing', 'OrderWishList', 'OrderGiftRegistry', 'OrderAutoReorder'])"/>
             <set field="orderEditable" from="editableStatusIds.contains(orderHeader.statusId)"/>
 
             <entity-find-related value-field="orderHeader" relationship-name="mantle.order.OrderItem"
@@ -262,6 +268,8 @@ along with this software (see the LICENSE.md file). If not, see
 
             orderPartInfoList = []
             for (EntityValue orderPart in orderPartList) {
+                EntityValue partStatusItem = (EntityValue) orderPart.status
+
                 EntityList partOrderItemList = orderItemList.findAll({ it.orderPartSeqId == orderPart.orderPartSeqId })
                 EntityList partNoParentOrderItemList = partOrderItemList.findAll({ it.parentItemSeqId == null })
 
@@ -288,6 +296,10 @@ along with this software (see the LICENSE.md file). If not, see
                     newerInventory = "BlY".equals(ec.service.sync().name("mantle.party.PartyServices.get#PartySettingValue")
                             .parameter("partySettingTypeId", "CustomerNewerInventory").parameter("partyId", orderPart.customerPartyId).call()?.get("settingValue"))
                 }
+
+                EntityValue carrierPartyDetail = null
+                if (orderPart.carrierPartyId && orderPart.carrierPartyId != "_NA_")
+                    carrierPartyDetail = ec.entity.find("mantle.party.PartyDetail").condition("partyId", orderPart.carrierPartyId).one()
 
                 def partPaymentList = paymentList.cloneList().filterByAnd([orderPartSeqId:orderPart.orderPartSeqId])
                 def partPaymentInfoList = []
@@ -362,8 +374,10 @@ along with this software (see the LICENSE.md file). If not, see
                         .parameters([orderId:orderPart.orderId, orderPartSeqId:orderPart.orderPartSeqId]).call()
 
                 orderPartInfoList.add([orderPart:orderPart, partEditable:editableStatusIds.contains(orderPart.statusId),
+                        partStatusItem:partStatusItem,
                         partOrderItemList:partOrderItemList, partNoParentOrderItemList:partNoParentOrderItemList,
                         hasShippableItems:hasShippableItems, singleLot:singleLot, newerInventory:newerInventory,
+                        carrierPartyDetail:carrierPartyDetail,
                         shipmentMethodEnum:orderPart."ShipmentMethod#moqui.basic.Enumeration",
                         partPaymentList:partPaymentList, partPaymentInfoList:partPaymentInfoList,
                         paymentsTotal:paymentsTotal, partTotalUnpaid:partTotalUnpaid,
@@ -377,7 +391,28 @@ along with this software (see the LICENSE.md file). If not, see
                         openReturnList:openReturnsResult.openReturnList])
             }
             ]]></script>
+            <set field="firstPartInfo" from="orderPartInfoList ? orderPartInfoList[0] : null"/>
             <!-- <log level="warn" message="======== OrderDisplayInfo orderPartInfoList: ${orderPartInfoList}"/> -->
+
+            <!-- Get templateLocation from settings -->
+            <set field="templateLocation" from="null"/>
+            <!-- see if a template is configured by ProductStoreSetting -->
+            <if condition="orderHeader.productStoreId">
+                <entity-find entity-name="mantle.product.store.ProductStoreSetting" list="productStoreSettingList" cache="true">
+                    <date-filter/>
+                    <econdition field-name="productStoreId" from="orderHeader.productStoreId"/>
+                    <econdition field-name="settingTypeEnumId" value="Psst${templateSettingSuffix}"/>
+                    <order-by field-name="-fromDate"/>
+                </entity-find>
+                <if condition="productStoreSettingList">
+                    <set field="templateLocation" from="productStoreSettingList[0].settingValue"/></if>
+            </if>
+            <!-- if no template setting for store look for PartySetting on Shipment.fromPartyId -->
+            <if condition="!templateLocation &amp;&amp; firstPart.vendorPartyId">
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="ptySettingOut"
+                        in-map="[partyId:firstPart.vendorPartyId, partySettingTypeId:('Org' + templateSettingSuffix)]"/>
+                <set field="templateLocation" from="ptySettingOut?.settingValue"/>
+            </if>
         </actions>
     </service>
     <service verb="get" noun="OrderItemsTotalCount">
@@ -393,6 +428,90 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="!(orderItem.itemTypeEnumId in productItemTypes)"><continue/></if>
                 <set field="itemCount" from="itemCount + orderItem.quantity"/>
             </iterate>
+        </actions>
+    </service>
+
+    <service verb="get" noun="OrderPartBillingAddress">
+        <description>
+            Find billing address(es) for an OrderPart. Look first for explicitly specified PostalBilling in
+            OrderPartContactMech, then PaymentMethod.postalContactMechId via Payment(s) for OrderPart, then looks for
+            PostalBilling or PostalPrimary address for CustomerBillTo OrderPartParty (if enabled) or for OrderPart.customerPartyId.
+
+            There will usually be a single billing address unless there more than one is explicitly associated with the OrderPart.
+        </description>
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId"><description>Defaults to first part</description></parameter>
+            <parameter name="useCustomerBillTo" type="boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="postalContactMechIdList" type="List"><parameter name="postalContactMechId"/></parameter>
+        </out-parameters>
+        <actions>
+            <set field="postalContactMechIdList" from="[]"/>
+
+            <if condition="!orderPartSeqId">
+                <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                    <econdition field-name="orderId"/>
+                    <select-field field-name="orderPartSeqId"/>
+                    <order-by field-name="orderPartSeqId"/>
+                </entity-find>
+                <set field="orderPartSeqId" from="orderPartList?.first?.orderPartSeqId"/>
+            </if>
+
+            <!-- OrderPartContactMech -->
+            <entity-find entity-name="mantle.order.OrderPartContactMech" list="opcmList">
+                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                <econdition field-name="contactMechPurposeId" value="PostalBilling"/>
+            </entity-find>
+            <if condition="opcmList"><script>postalContactMechIdList.addAll(opcmList*.contactMechId)</script></if>
+
+            <!-- Payment/PaymentMethod -->
+            <if condition="!postalContactMechIdList">
+                <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
+                    <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                    <econdition field-name="paymentMethodId" operator="is-not-null"/>
+                </entity-find>
+                <if condition="paymentList">
+                    <entity-find entity-name="mantle.account.method.PaymentMethod" list="paymentMethodList">
+                        <econdition field-name="paymentMethodId" operator="in" from="paymentList*.paymentMethodId"/>
+                        <econdition field-name="postalContactMechId" operator="is-not-null"/>
+                    </entity-find>
+                    <script>postalContactMechIdList.addAll(paymentMethodList*.postalContactMechId)</script>
+                </if>
+            </if>
+
+            <!-- if none found get billing address for CustomerBillTo or customerPartyId -->
+            <if condition="!postalContactMechIdList">
+                <if condition="useCustomerBillTo">
+                    <entity-find entity-name="mantle.order.OrderPartParty" list="oppList">
+                        <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                        <econdition field-name="roleTypeId" value="CustomerBillTo"/>
+                    </entity-find>
+                    <if condition="oppList"><set field="billToPartyId" from="oppList[0].partyId"/></if>
+                </if>
+                <if condition="!billToPartyId">
+                    <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
+                    <if condition="orderPart == null"><return error="true" message="Could not find Order Part ${orderId}:${orderPartSeqId}"/></if>
+                    <set field="billToPartyId" from="orderPart.customerPartyId"/>
+                </if>
+                <if condition="billToPartyId">
+                    <entity-find entity-name="mantle.party.contact.PartyContactMech" list="postalPcmList">
+                        <date-filter/><econdition field-name="partyId" from="billToPartyId"/>
+                        <econdition field-name="contactMechPurposeId" value="PostalBilling"/>
+                        <order-by field-name="-fromDate"/>
+                    </entity-find>
+                    <if condition="!postalPcmList">
+                        <entity-find entity-name="mantle.party.contact.PartyContactMech" list="postalPcmList">
+                            <date-filter/><econdition field-name="partyId" from="billToPartyId"/>
+                            <econdition field-name="contactMechPurposeId" value="PostalPrimary"/>
+                            <order-by field-name="-fromDate"/>
+                        </entity-find>
+                        <if condition="postalPcmList"><set field="postalContactMechPurposeId" value="PostalPrimary"/></if>
+                    </if>
+                    <if condition="postalPcmList"><script>postalContactMechIdList.add(postalPcmList[0].contactMechId)</script></if>
+                </if>
+            </if>
         </actions>
     </service>
 
@@ -727,7 +846,9 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- if email has already been sent (by orderId, emailTypeEnumId) don't send again -->
                     <if condition="!forceByType">
                         <entity-find entity-name="mantle.order.OrderEmailMessageDetail" list="existingMessages">
-                            <econdition field-name="orderId"/><econdition field-name="emailTypeEnumId"/>
+                            <econdition field-name="orderId"/>
+                            <econdition field-name="emailTypeEnumId"/>
+                            <econdition field-name="statusId" operator="in" value="ES_SENT,ES_RECEIVED,ES_VIEWED"/>
                             <select-field field-name="emailMessageId"/>
                         </entity-find>
                         <if condition="existingMessages">
@@ -736,14 +857,16 @@ along with this software (see the LICENSE.md file). If not, see
                         </if>
                     </if>
 
+                    <set field="bccAddresses" from="orderHeader.salesChannelEnumId in ['ScWeb', 'ScWebExternal'] ? storeEmail.webOrderBcc : null"/>
+
                     <!-- simple bodyParameters, let the screen do data prep -->
                     <set field="bodyParameters" from="[orderId:orderId, storeDomain:productStore.storeDomain,
                         profileUrlPath:productStore.profileUrlPath, headerImagePath:storeEmail.headerImagePath,
                         detailLinkPath:storeEmail.detailLinkPath]"/>
 
                     <service-call name="org.moqui.impl.EmailServices.send#EmailTemplate" out-map="sendOut" out-map-add-to-existing="false"
-                            in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId,
-                                toAddresses:toAddresses, bodyParameters:bodyParameters, toUserId:toUserId]"/>
+                            in-map="[emailTemplateId:storeEmail.emailTemplateId, emailTypeEnumId:emailTypeEnumId, toAddresses:toAddresses,
+                                bccAddresses:bccAddresses, bodyParameters:bodyParameters, toUserId:toUserId]"/>
                     <script>if (sendOut.emailMessageId) { ec.service.sync().name("create#mantle.order.OrderEmailMessage").parameter("orderId", orderId)
                         .parameter("emailMessageId", sendOut.emailMessageId).parameter("orderRevision", orderHeader.orderRevision).disableAuthz().call() }</script>
                     <message>Email sent to ${toAddresses}${sendOut.emailMessageId ? ', message ID ' + sendOut.emailMessageId : ''}</message>
