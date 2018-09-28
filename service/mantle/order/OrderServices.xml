@@ -969,15 +969,14 @@ General Order Placement and eCommerce Usage
             </if>
         </actions>
     </service>
-    <service verb="checkComplete" noun="OrderPart">
-        <description>Checks to see if all items in the order part have been shipped and/or digitally (including
-            subscription) fulfilled, and if so complete the order part. Also checks for receipt of purchase order items.</description>
-        <in-parameters><parameter name="orderId" required="true"/><parameter name="orderPartSeqId" required="true"/></in-parameters>
-        <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
-        <actions>
-            <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
-            <if condition="!(orderPart?.statusId in ['OrderApproved', 'OrderSent'])"><return/></if>
 
+    <service verb="isFulfilled" noun="OrderPart">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="isFulfilled" type="Boolean"/></out-parameters>
+        <actions>
             <entity-find entity-name="mantle.product.subscription.Subscription" list="existingSubscriptionList">
                 <econdition field-name="orderId"/></entity-find>
             <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingAssetIssuanceList">
@@ -991,7 +990,7 @@ General Order Placement and eCommerce Usage
             </entity-find>
 
             <!-- set to true, if any found not fulfilled will set to false -->
-            <set field="orderPartComplete" from="true"/>
+            <set field="isFulfilled" from="true"/>
             <iterate list="orderItemList" entry="orderItem"><if condition="orderItem.productId">
                 <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
                     <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
@@ -1006,7 +1005,7 @@ General Order Placement and eCommerce Usage
                             <field-map field-name="subscriptionResourceId" from="productSubscriptionResource.subscriptionResourceId"/>
                         </filter-map-list>
                         <if condition="!currentSubscriptionList">
-                            <set field="orderPartComplete" from="false"/>
+                            <set field="isFulfilled" from="false"/>
                             <break/>
                         </if>
                     </iterate>
@@ -1025,15 +1024,91 @@ General Order Placement and eCommerce Usage
                         <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetReceipt.quantityAccepted"/>
                     </iterate>
                     <if condition="currentQuantityTotal &lt; orderItem.quantity">
-                        <set field="orderPartComplete" from="false"/>
+                        <set field="isFulfilled" from="false"/>
                         <break/>
                     </if>
                 </if>
             </if></iterate>
+        </actions>
+    </service>
+    <service verb="checkComplete" noun="OrderPart">
+        <description>Checks to see if all items in the order part have been shipped and/or digitally (including
+            subscription) fulfilled, and if so complete the order part. Also checks for receipt of purchase order items.</description>
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
+            <if condition="orderPart == null"><return error="true" message="Order Part ${orderId}:${orderPartSeqId} not found"/></if>
+            <if condition="!(orderPart?.statusId in ['OrderApproved', 'OrderSent'])"><return/></if>
 
-            <if condition="orderPartComplete">
+            <service-call name="mantle.order.OrderServices.isFulfilled#OrderPart" out-map="isFulfilledOut"
+                    in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
+
+            <if condition="isFulfilledOut.isFulfilled">
                 <service-call name="mantle.order.OrderServices.complete#OrderPart" out-map="context" in-map="context"/>
             </if>
+        </actions>
+    </service>
+    <service verb="checkStillComplete" noun="Order">
+        <in-parameters><parameter name="orderId"/></in-parameters>
+        <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+            <if condition="orderHeader == null"><return error="true" message="Order ${orderId} not found"/></if>
+            <if condition="orderHeader.statusId != 'OrderCompleted'"><return/></if>
+
+            <set field="statusChanged" from="false"/>
+            <set field="allPartsComplete" from="true"/>
+            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList"><econdition field-name="orderId"/></entity-find>
+            <iterate list="orderPartList" entry="orderPart">
+                <!-- part already not completed? -->
+                <if condition="orderPart.statusId != 'OrderCompleted'">
+                    <set field="allPartsComplete" from="false"/>
+                    <continue/>
+                </if>
+                <!-- part marked as Completed, see if really is still -->
+                <service-call name="mantle.order.OrderServices.isFulfilled#OrderPart" out-map="isFulfilledOut"
+                        in-map="[orderId:orderId, orderPartSeqId:orderPart.orderPartSeqId]"/>
+                <if condition="!isFulfilledOut.isFulfilled">
+                    <service-call name="update#mantle.order.OrderPart"
+                            in-map="[orderId:orderId, orderPartSeqId:orderPart.orderPartSeqId, statusId:'OrderApproved']"/>
+                    <set field="allPartsComplete" from="false"/>
+                </if>
+            </iterate>
+            <if condition="!allPartsComplete">
+                <service-call name="update#mantle.order.OrderHeader" out-map="context"
+                        in-map="[orderId:orderId, statusId:'OrderApproved']"/>
+            </if>
+        </actions>
+    </service>
+    <service verb="checkCancelComplete" noun="Order">
+        <in-parameters><parameter name="orderId"/></in-parameters>
+        <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
+        <actions>
+            <!-- if all parts Cancelled set header Cancelled, if any Completed and all others Completed or Cancelled set header Completed -->
+            <set field="statusChanged" from="false"/>
+            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList"><econdition field-name="orderId"/></entity-find>
+            <set field="allCancelled" from="true"/>
+            <set field="anyCompleted" from="false"/>
+            <set field="allCancelledOrCompleted" from="true"/>
+            <iterate list="orderPartList" entry="curOrderPart">
+                <if condition="curOrderPart.statusId in ['OrderRejected', 'OrderCancelled']"><continue/></if>
+                <if condition="curOrderPart.statusId == 'OrderCompleted'">
+                    <set field="allCancelled" from="false"/>
+                    <set field="anyCompleted" from="true"/>
+                    <continue/>
+                </if>
+                <set field="allCancelled" from="false"/>
+                <set field="allCancelledOrCompleted" from="false"/>
+            </iterate>
+            <if condition="allCancelled"><then>
+                <service-call name="update#mantle.order.OrderHeader" out-map="context" in-map="[orderId:orderId, statusId:'OrderCancelled']"/>
+            </then><else-if condition="anyCompleted &amp;&amp; allCancelledOrCompleted">
+                <service-call name="update#mantle.order.OrderHeader" out-map="context" in-map="[orderId:orderId, statusId:'OrderCompleted']"/>
+            </else-if></if>
         </actions>
     </service>
 
@@ -1093,7 +1168,7 @@ General Order Placement and eCommerce Usage
                 <econdition field-name="orderId"/></entity-find>
             <iterate list="orderItemList" entry="orderItem">
                 <service-call name="mantle.order.OrderServices.cancel#OrderItem" out-map="itemOut" out-map-add-to-existing="false"
-                        in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, orderItem:orderItem,
+                        in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, orderItem:orderItem, checkCancelPart:false,
                             fullAssetIssuanceList:fullAssetIssuanceList, fullShipmentItemSourceList:fullShipmentItemSourceList]"/>
             </iterate>
 
@@ -1128,7 +1203,7 @@ General Order Placement and eCommerce Usage
                 <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/></entity-find>
             <iterate list="orderItemList" entry="orderItem">
                 <service-call name="mantle.order.OrderServices.cancel#OrderItem" out-map="itemOut" out-map-add-to-existing="false"
-                        in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, orderItem:orderItem]"/>
+                        in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, orderItem:orderItem, checkCancelPart:false]"/>
                 <if condition="itemOut.hasIssuedQuantity"><set field="hasIssuedQuantity" from="true"/></if>
             </iterate>
 
@@ -1138,34 +1213,17 @@ General Order Placement and eCommerce Usage
                     in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, statusId:targetStatusId]"/>
 
             <!-- if all parts Cancelled set header Cancelled, if any Completed and all others Completed or Cancelled set header Completed -->
-            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList"><econdition field-name="orderId"/></entity-find>
-            <set field="allCancelled" from="true"/>
-            <set field="anyCompleted" from="false"/>
-            <set field="allCancelledOrCompleted" from="true"/>
-            <iterate list="orderPartList" entry="curOrderPart">
-                <if condition="curOrderPart.statusId in ['OrderRejected', 'OrderCancelled']"><continue/></if>
-                <if condition="curOrderPart.statusId == 'OrderCompleted'">
-                    <set field="allCancelled" from="false"/>
-                    <set field="anyCompleted" from="true"/>
-                    <continue/>
-                </if>
-                <set field="allCancelled" from="false"/>
-                <set field="allCancelledOrCompleted" from="false"/>
-            </iterate>
-            <if condition="allCancelled"><then>
-                <service-call name="update#mantle.order.OrderHeader" in-map="[orderId:orderId, statusId:'OrderCancelled']"/>
-            </then><else-if condition="anyCompleted &amp;&amp; allCancelledOrCompleted">
-                <service-call name="update#mantle.order.OrderHeader" in-map="[orderId:orderId, statusId:'OrderCompleted']"/>
-            </else-if></if>
+            <service-call name="mantle.order.OrderServices.checkCancelComplete#Order" in-map="[orderId:orderId]"/>
         </actions>
     </service>
-    <service verb="cancel" noun="OrderItem">
+    <service verb="cancel" noun="OrderItem" no-tx-cache="true">
         <in-parameters>
             <parameter name="orderId" required="true"/>
             <parameter name="orderItemSeqId" required="true"/>
             <parameter name="orderItem" type="EntityValue"/>
             <parameter name="fullAssetIssuanceList" type="List"><parameter name="assetIssuance" type="EntityValue"/></parameter>
             <parameter name="fullShipmentItemSourceList" type="List"><parameter name="shipmentItemSource" type="EntityValue"/></parameter>
+            <parameter name="checkCancelPart" type="Boolean" default="true"/>
         </in-parameters>
         <out-parameters>
             <parameter name="hasIssuedQuantity" type="Boolean"/>
@@ -1173,6 +1231,7 @@ General Order Placement and eCommerce Usage
         </out-parameters>
         <actions>
             <if condition="orderItem == null"><entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/></if>
+            <if condition="orderItem == null"><return error="true" message="Order Item ${orderId}:${orderItemSeqId} not found"/></if>
 
             <if condition="fullAssetIssuanceList"><then>
                 <filter-map-list list="fullAssetIssuanceList" to-list="itemAssetIssuanceList">
@@ -1226,6 +1285,29 @@ General Order Placement and eCommerce Usage
             <!-- remove OrderItem Reservations -->
             <service-call name="mantle.product.AssetServices.remove#OrderItemReservations"
                     in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId]"/>
+
+            <if condition="checkCancelPart">
+                <!-- first see if all OrderItem in part have quantity 0, if so cancel order -->
+                <entity-find-count entity-name="mantle.order.OrderItem" count-field="partItemQtyOverZeroCount">
+                    <econdition field-name="orderId"/>
+                    <econdition field-name="orderPartSeqId" from="orderItem.orderPartSeqId"/>
+                    <econdition field-name="quantity" operator="greater" from="0.0"/>
+                </entity-find-count>
+                <if condition="partItemQtyOverZeroCount == 0"><then>
+                    <service-call name="update#mantle.order.OrderPart" out-map="context"
+                            in-map="[orderId:orderId, orderPartSeqId:orderItem.orderPartSeqId, statusId:'OrderCancelled']"/>
+                    <!-- if all parts Cancelled set header Cancelled, if any Completed and all others Completed or Cancelled set header Completed -->
+                    <service-call name="mantle.order.OrderServices.checkCancelComplete#Order" in-map="[orderId:orderId]"/>
+                </then><else>
+                    <!-- otherwise call checkComplete#OrderPart -->
+                    <service-call name="mantle.order.OrderServices.checkComplete#OrderPart" out-map="checkPartOut"
+                            in-map="[orderId:orderId, orderPartSeqId:orderItem.orderPartSeqId]"/>
+                    <if condition="checkPartOut.statusChanged">
+                        <!-- if all parts Cancelled set header Cancelled, if any Completed and all others Completed or Cancelled set header Completed -->
+                        <service-call name="mantle.order.OrderServices.checkCancelComplete#Order" in-map="[orderId:orderId]"/>
+                    </if>
+                </else></if>
+            </if>
         </actions>
     </service>
 
