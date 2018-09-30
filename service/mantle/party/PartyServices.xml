@@ -217,31 +217,52 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="filterOrgIds" type="List"><parameter name="userOrgId"/></parameter>
         </out-parameters>
         <actions>
-            <set field="partyId" from="ec.user.userAccount.partyId"/>
+            <set field="partyId" from="ec.user.userAccount?.partyId"/>
             <if condition="!partyId">
                 <log level="warn" message="Cannot setup#UserOrganizationInfo, no user with partyId logged in"/>
                 <return/>
             </if>
 
-            <!-- get user organizations data -->
+            <!-- get user organizations data (agent/employee/member rel from member to org) -->
             <entity-find entity-name="mantle.party.PartyRelationship" list="userOrgRelList" cache="true">
                 <date-filter/>
                 <econdition field-name="relationshipTypeEnumId" operator="in" value="PrtAgent,PrtEmployee,PrtMember"/>
                 <econdition field-name="toRoleTypeId" value="OrgInternal"/>
-                <econdition field-name="fromPartyId" from="ec.user.userAccount.partyId"/>
+                <econdition field-name="fromPartyId" from="partyId"/>
             </entity-find>
             <set field="userOrgList" from="[]"/>
             <set field="userOrgIds" from="[]"/>
             <iterate list="userOrgRelList" entry="userOrgRel">
-                <entity-find-one entity-name="mantle.party.PartyDetail" value-field="userOrg" cache="true">
-                    <field-map field-name="partyId" from="userOrgRel.toPartyId"/></entity-find-one>
-                <script>userOrgList.add(userOrg); userOrgIds.add(userOrgRel.toPartyId)</script>
+                <if condition="!userOrgIds.contains(userOrgRel.toPartyId)">
+                    <entity-find-one entity-name="mantle.party.PartyDetail" value-field="userOrg" cache="true">
+                        <field-map field-name="partyId" from="userOrgRel.toPartyId"/></entity-find-one>
+                    <script>userOrgList.add(userOrg); userOrgIds.add(userOrgRel.toPartyId)</script>
+                    <!-- look for direct child orgs and allow them too (rollup rel from child to parent) -->
+                    <!-- NOTE: consider making this recursive (inline method or other service) to walk down multiple levels -->
+                    <entity-find entity-name="mantle.party.PartyRelationship" list="childRelList" cache="true">
+                        <date-filter/>
+                        <econdition field-name="relationshipTypeEnumId" value="PrtOrgRollup"/>
+                        <econdition field-name="toPartyId" from="userOrgRel.toPartyId"/>
+                        <econdition field-name="fromPartyId" operator="is-not-null"/>
+                    </entity-find>
+                    <iterate list="childRelList" entry="childRel">
+                        <if condition="!userOrgIds.contains(childRel.fromPartyId)">
+                            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="childOrg" cache="true">
+                                <field-map field-name="partyId" from="childRel.fromPartyId"/></entity-find-one>
+                            <script>userOrgList.add(childOrg); userOrgIds.add(childRel.fromPartyId)</script>
+                        </if>
+                    </iterate>
+                </if>
             </iterate>
+            <order-map-list list="userOrgList"><order-by field-name="pseudoId"/></order-map-list>
 
             <!-- active org -->
             <set field="activeOrgId" from="ec.user.getPreference('ACTIVE_ORGANIZATION')"/>
             <!-- if active org is not valid for the user ignore it -->
-            <if condition="!userOrgIds.contains(activeOrgId)"><set field="activeOrgId" from="null"/></if>
+            <if condition="activeOrgId &amp;&amp; !userOrgIds.contains(activeOrgId)">
+                <set field="activeOrgId" from="null"/>
+                <script>ec.user.setPreference('ACTIVE_ORGANIZATION', null)</script>
+            </if>
             <!-- get the active org detail for display, etc -->
             <if condition="activeOrgId"><entity-find-one entity-name="mantle.party.PartyDetail" value-field="activeOrg" cache="true">
                 <field-map field-name="partyId" from="activeOrgId"/></entity-find-one></if>
