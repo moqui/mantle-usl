@@ -192,14 +192,14 @@ class OrderToCashBasicFlow extends Specification {
             <!-- NOTE: before reserve against pick locations first used assetId DEMO_3_1A instead of 55401 -->
             <mantle.product.asset.Asset assetId="DEMO_3_1A" assetTypeEnumId="AstTpInventory" statusId="AstAvailable"
                 ownerPartyId="ORG_ZIZI_RETAIL" productId="DEMO_3_1" hasQuantity="Y" quantityOnHandTotal="5"
-                availableToPromiseTotal="5" receivedDate="1265184000000" facilityId="ZIRET_WH"/>
+                availableToPromiseTotal="0" receivedDate="1265184000000" facilityId="ZIRET_WH"/>
             <mantle.product.asset.Asset assetId="55401" assetTypeEnumId="AstTpInventory" statusId="AstAvailable"
                 ownerPartyId="ORG_ZIZI_RETAIL" productId="DEMO_3_1" hasQuantity="Y" quantityOnHandTotal="100"
-                availableToPromiseTotal="95" facilityId="ZIRET_WH"/>
-            <mantle.product.issuance.AssetReservation assetReservationId="55501" assetId="55401" productId="DEMO_3_1"
+                availableToPromiseTotal="100" facilityId="ZIRET_WH"/>
+            <mantle.product.issuance.AssetReservation assetReservationId="55501" assetId="DEMO_3_1A" productId="DEMO_3_1"
                 orderId="${cartOrderId}" orderItemSeqId="02" reservationOrderEnumId="AsResOrdFifoRec" quantity="5"
                 reservedDate="${effectiveTime}" sequenceNum="0"/>
-            <mantle.product.asset.AssetDetail assetDetailId="55501" assetId="55401" effectiveDate="${effectiveTime}"
+            <mantle.product.asset.AssetDetail assetDetailId="55501" assetId="DEMO_3_1A" effectiveDate="${effectiveTime}"
                 availableToPromiseDiff="-5" assetReservationId="55501" productId="DEMO_3_1"/>
 
             <!-- this is an auto-created Asset based on the inventory issuance -->
@@ -293,12 +293,12 @@ class OrderToCashBasicFlow extends Specification {
                 quantityOnHandDiff="-1" assetReservationId="55500" shipmentId="${shipResult.shipmentId}"
                 productId="DEMO_1_1" assetIssuanceId="55500"/>
 
-            <mantle.product.asset.Asset assetId="DEMO_3_1A" quantityOnHandTotal="5" availableToPromiseTotal="5"/>
-            <mantle.product.asset.Asset assetId="55401" quantityOnHandTotal="95" availableToPromiseTotal="95"/>
-            <mantle.product.issuance.AssetIssuance assetIssuanceId="55501" assetId="55401" assetReservationId="55501"
+            <mantle.product.asset.Asset assetId="DEMO_3_1A" quantityOnHandTotal="0" availableToPromiseTotal="0"/>
+            <mantle.product.asset.Asset assetId="55401" quantityOnHandTotal="100" availableToPromiseTotal="100"/>
+            <mantle.product.issuance.AssetIssuance assetIssuanceId="55501" assetId="DEMO_3_1A" assetReservationId="55501"
                 orderId="${cartOrderId}" orderItemSeqId="02" shipmentId="${shipResult.shipmentId}" productId="DEMO_3_1"
                 quantity="5"/>
-            <mantle.product.asset.AssetDetail assetDetailId="55504" assetId="55401" effectiveDate="${effectiveTime}"
+            <mantle.product.asset.AssetDetail assetDetailId="55504" assetId="DEMO_3_1A" effectiveDate="${effectiveTime}"
                 quantityOnHandDiff="-5" assetReservationId="55501" shipmentId="${shipResult.shipmentId}"
                 productId="DEMO_3_1" assetIssuanceId="55501"/>
 
@@ -339,13 +339,13 @@ class OrderToCashBasicFlow extends Specification {
 
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55501" acctgTransTypeEnumId="AttInventoryIssuance"
                 organizationPartyId="ORG_ZIZI_RETAIL" transactionDate="${effectiveTime}" isPosted="Y"
-                postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" assetId="55401"
+                postedDate="${effectiveTime}" glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" assetId="DEMO_3_1A"
                 assetIssuanceId="55501"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55501" acctgTransEntrySeqId="01" debitCreditFlag="C"
-                amount="22.5" glAccountTypeEnumId="GatInventory" glAccountId="141300000"
+                amount="20" glAccountTypeEnumId="GatInventory" glAccountId="141300000"
                 reconcileStatusId="AterNot" isSummary="N" productId="DEMO_3_1"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55501" acctgTransEntrySeqId="02" debitCreditFlag="D"
-                amount="22.5" glAccountTypeEnumId="GatCogs" glAccountId="512000000"
+                amount="20" glAccountTypeEnumId="GatCogs" glAccountId="512000000"
                 reconcileStatusId="AterNot" isSummary="N" productId="DEMO_3_1"/>
 
             <!-- NOTE: there is no AcctgTrans for assetId 55500, productId DEMO_2_1 because it is auto-created and has
