@@ -144,6 +144,22 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="postalCode">
                 <set field="queryString" from="(queryString ? queryString + ' AND ' : '' ) + 'contactMechs.postalCode:' + postalCode + '*'"/></if>
 
+            <!-- if we have activeOrgId or filterOrgIds see if user has active org or user org filters -->
+            <set field="activeOrgId" from="ec.user.context?.activeOrgId"/>
+            <set field="filterOrgIds" from="ec.user.context?.filterOrgIds"/>
+            <!-- NOTE: using entityFilterSetId is a hack that only works for these 'standard' filter sets, would be
+                better to pick apart filterMap to see what's used, but this is specific to activeOrgId and filterOrgIds anyway -->
+            <set field="findFilters" from="ec.artifactExecution.getFindFiltersForUser('mantle.party.Party')"/>
+            <if condition="findFilters"><set field="entityFilterSetId" from="findFilters[0].entityFilterSetId"/></if>
+            <!-- <log level="warn" message="Doing party search with activeOrgId ${activeOrgId} filterOrgIds ${filterOrgIds} entityFilterSetId ${entityFilterSetId}"/> -->
+            <script><![CDATA[
+                if ('MANTLE_USER_ORG'.equals(entityFilterSetId)) {
+                    queryString = (queryString ? queryString + ' AND ' : '' ) + 'ownerPartyId:(' + (filterOrgIds ? filterOrgIds.join(' OR ') + ' OR ' : '') + '_NA_)'
+                } else if ('MANTLE_ACTIVE_ORG'.equals(entityFilterSetId) && activeOrgId) {
+                    queryString = (queryString ? queryString + ' AND ' : '' ) + 'ownerPartyId:(' + activeOrgId + ' OR _NA_)'
+                }
+            ]]></script>
+
             <set field="orderByFields" from="orderByField ? [orderByField.replace('combinedName', 'combinedName.keyword').replace('username', 'userAccounts.username.keyword')] : null"/>
             <set field="highlightFields" from="['roles.roleTypeId', 'classifications.class', 'pseudoId',
                     'identifications.idValue', 'combinedName', 'firstName', 'lastName', 'organizationName', 'userAccounts.username',
@@ -217,42 +233,61 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="filterOrgIds" type="List"><parameter name="userOrgId"/></parameter>
         </out-parameters>
         <actions>
-
-            <if condition="!ec.user.userAccount">
-                <return/>
-            </if>
-
-            <set field="partyId" from="ec.user.userAccount.partyId"/>
+            <set field="partyId" from="ec.user.userAccount?.partyId"/>
             <if condition="!partyId">
                 <log level="warn" message="Cannot setup#UserOrganizationInfo, no user with partyId logged in"/>
                 <return/>
             </if>
 
-            <!-- get user organizations data -->
+            <!-- get user organizations data (agent/employee/member rel from member to org) -->
             <entity-find entity-name="mantle.party.PartyRelationship" list="userOrgRelList" cache="true">
                 <date-filter/>
                 <econdition field-name="relationshipTypeEnumId" operator="in" value="PrtAgent,PrtEmployee,PrtMember"/>
-                <econdition field-name="toRoleTypeId" value="OrgInternal"/>
-                <econdition field-name="fromPartyId" from="ec.user.userAccount.partyId"/>
+                <!-- don't limit to OrgInteral, useful for other: <econdition field-name="toRoleTypeId" value="OrgInternal"/> -->
+                <econdition field-name="fromPartyId" from="partyId"/>
             </entity-find>
             <set field="userOrgList" from="[]"/>
             <set field="userOrgIds" from="[]"/>
             <iterate list="userOrgRelList" entry="userOrgRel">
-                <entity-find-one entity-name="mantle.party.PartyDetail" value-field="userOrg" cache="true">
-                    <field-map field-name="partyId" from="userOrgRel.toPartyId"/></entity-find-one>
-                <script>userOrgList.add(userOrg); userOrgIds.add(userOrgRel.toPartyId)</script>
+                <if condition="!userOrgIds.contains(userOrgRel.toPartyId)">
+                    <entity-find-one entity-name="mantle.party.PartyDetail" value-field="userOrg" cache="true">
+                        <field-map field-name="partyId" from="userOrgRel.toPartyId"/></entity-find-one>
+                    <script>userOrgList.add(userOrg); userOrgIds.add(userOrgRel.toPartyId)</script>
+                    <!-- look for direct child orgs and allow them too (rollup rel from child to parent) -->
+                    <!-- NOTE: consider making this recursive (inline method or other service) to walk down multiple levels -->
+                    <entity-find entity-name="mantle.party.PartyRelationship" list="childRelList" cache="true">
+                        <date-filter/>
+                        <econdition field-name="relationshipTypeEnumId" value="PrtOrgRollup"/>
+                        <econdition field-name="toPartyId" from="userOrgRel.toPartyId"/>
+                        <econdition field-name="fromPartyId" operator="is-not-null"/>
+                    </entity-find>
+                    <iterate list="childRelList" entry="childRel">
+                        <if condition="!userOrgIds.contains(childRel.fromPartyId)">
+                            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="childOrg" cache="true">
+                                <field-map field-name="partyId" from="childRel.fromPartyId"/></entity-find-one>
+                            <script>userOrgList.add(childOrg); userOrgIds.add(childRel.fromPartyId)</script>
+                        </if>
+                    </iterate>
+                </if>
             </iterate>
+            <order-map-list list="userOrgList"><order-by field-name="pseudoId"/></order-map-list>
 
             <!-- active org -->
             <set field="activeOrgId" from="ec.user.getPreference('ACTIVE_ORGANIZATION')"/>
+            <if condition="activeOrgId != null &amp;&amp; activeOrgId.length() == 0"><set field="activeOrgId" from="null"/></if>
             <!-- if active org is not valid for the user ignore it -->
-            <if condition="!userOrgIds.contains(activeOrgId)"><set field="activeOrgId" from="null"/></if>
+            <if condition="activeOrgId &amp;&amp; !userOrgIds.contains(activeOrgId)">
+                <set field="activeOrgId" from="null"/>
+                <script>ec.user.setPreference('ACTIVE_ORGANIZATION', null)</script>
+            </if>
             <!-- get the active org detail for display, etc -->
             <if condition="activeOrgId"><entity-find-one entity-name="mantle.party.PartyDetail" value-field="activeOrg" cache="true">
                 <field-map field-name="partyId" from="activeOrgId"/></entity-find-one></if>
 
             <!-- get org ids to filter by (for queries, etc) -->
             <set field="filterOrgIds" from="activeOrgId ? [activeOrgId] : userOrgIds"/>
+
+            <!-- <log level="warn" message="activeOrgId ${activeOrgId} (${activeOrgId?.class?.name}) filterOrgIds ${filterOrgIds}"/> -->
 
             <!-- set userOrgIds, filterOrgIds, and activeOrgId in user context -->
             <script>
@@ -303,26 +338,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="emailContactMechId"/>
         </out-parameters>
         <actions>
-            <!-- do this first to get a password validation ASAP -->
-            <if condition="username">
-                <!-- see if username already in use (instead of catching on unique index) -->
-                <entity-find entity-name="moqui.security.UserAccount" list="existingUaList">
-                    <econdition field-name="username"/></entity-find>
-                <if condition="existingUaList"><return error="true" message="Username [${username}] is already in use. Please choose another."/></if>
-                <!-- see if emailAddress already in use (instead of catching on unique index) -->
-                <entity-find entity-name="moqui.security.UserAccount" list="existingUaList">
-                    <econdition field-name="emailAddress"/></entity-find>
-                <if condition="existingUaList"><return error="true" message="Email ${emailAddress} is already in use. Login with username ${existingUaList[0].username}"/></if>
-
-                <set field="userFullName" value="${ec.resource.expand('PartyFullNameTemplate','')}"/>
-                <if condition="newPassword"><then>
-                    <service-call name="org.moqui.impl.UserServices.create#UserAccount" in-map="context" out-map="newUaOut"/>
-                </then><else>
-                    <service-call name="create#moqui.security.UserAccount" in-map="context" out-map="newUaOut"/>
-                </else></if>
-                <set field="userId" from="newUaOut.userId"/>
-            </if>
-
+            <!-- create Party and Person -->
             <service-call name="create#mantle.party.Party" in-map="[partyTypeEnumId:'PtyPerson', disabled:disabled]" out-map="newPartyOut"/>
             <set field="partyId" from="newPartyOut.partyId"/>
             <service-call name="create#mantle.party.Person" in-map="context"/>
@@ -335,8 +351,24 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="emailContactMechId" from="emailOut.contactMechId"/>
 
             <if condition="username">
-                <!-- add the partyId to the UserAccount -->
-                <service-call name="update#moqui.security.UserAccount" in-map="[userId:newUaOut.userId, partyId:newPartyOut.partyId]"/>
+                <!-- see if username already in use (instead of catching on unique index) -->
+                <entity-find entity-name="moqui.security.UserAccount" list="existingUaList">
+                    <econdition field-name="username"/></entity-find>
+                <if condition="existingUaList"><return error="true" message="Username [${username}] is already in use. Please choose another."/></if>
+                <!-- see if emailAddress already in use (instead of catching on unique index) -->
+                <entity-find entity-name="moqui.security.UserAccount" list="existingUaList">
+                    <econdition field-name="emailAddress"/></entity-find>
+                <if condition="existingUaList"><return error="true" message="Email ${emailAddress} is already in use. Login with username ${existingUaList[0].username}"/></if>
+
+                <set field="userFullName" value="${ec.resource.expand('PartyFullNameTemplate','')}"/>
+                <if condition="newPassword"><then>
+                    <!-- NOTE: SECA rule on UserServices.create#UserAccount will create a Party for UserAccount if no partyId, so must call with the partyId after create Party -->
+                    <service-call name="org.moqui.impl.UserServices.create#UserAccount" in-map="context" out-map="newUaOut"/>
+                </then><else>
+                    <service-call name="create#moqui.security.UserAccount" in-map="context" out-map="newUaOut"/>
+                </else></if>
+                <set field="userId" from="newUaOut.userId"/>
+
                 <!-- login the user -->
                 <if condition="loginAfterCreate &amp;&amp; newPassword">
                     <script>ec.user.loginUser(username, newPassword)</script></if>
@@ -917,7 +949,11 @@ along with this software (see the LICENSE.md file). If not, see
         <out-parameters><parameter name="contentLocation"/></out-parameters>
         <actions>
             <set field="filename" from="contentFile.getName()"/>
-            <set field="contentRoot" from="ec.user.getPreference('mantle.content.root') ?: 'dbresource://mantle/content'"/>
+            <if condition="org.moqui.resource.ResourceReference.isTextFilename(filename)"><then>
+                <set field="contentRoot" from="ec.user.getPreference('mantle.content.root') ?: 'dbresource://mantle/content'"/>
+            </then><else>
+                <set field="contentRoot" from="ec.user.getPreference('mantle.content.large.root') ?: 'dbresource://mantle/content'"/>
+            </else></if>
             <set field="contentLocation" value="${contentRoot}/party/${partyId}/content_${partyContentId}/${filename}"/>
 
             <set field="docRr" from="ec.resource.getLocationReference(contentLocation)"/>
