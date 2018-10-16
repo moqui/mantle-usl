@@ -290,11 +290,21 @@ General Order Placement and eCommerce Usage
                 <set field="isProductItem" from="orderItem.itemTypeEnumId in productItemTypes"/>
             </if>
 
-            <!-- if requireInventory check available inventory (for store/facility, product) -->
             <if condition="isProductItem &amp;&amp; quantity">
+                <!-- if requireInventory check available inventory (for store/facility, product) -->
                 <service-call name="mantle.order.OrderServices.check#AvailableInventory"
                         in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId,
                             orderItemSeqId:orderItemSeqId, requireInventory:requireInventory]"/>
+                <!-- don't let quantity go below quantity issued -->
+                <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="itemAssetIssuanceList">
+                    <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
+                <set field="itemQuantityIssued" from="0.0"/>
+                <iterate list="itemAssetIssuanceList" entry="itemAssetIssuance">
+                    <set field="itemQuantityIssued" from="itemQuantityIssued + itemAssetIssuance.quantity"/></iterate>
+                <if condition="quantity &lt; itemQuantityIssued">
+                    <set field="quantity" from="itemQuantityIssued"/>
+                    <message type="warning" public="true">Quantity requested ${quantity} is less than quantity already shipped ${itemQuantityIssued}, setting to quantity shipped</message>
+                </if>
             </if>
 
             <!-- calculate the price based on quantity, etc, -->
@@ -356,7 +366,7 @@ General Order Placement and eCommerce Usage
                                 <field-map field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
                                 <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
                             <set field="newItemQuantity" from="shipmentItem.quantity &gt; quantityReduce ?
-                                    shipmentItem.quantity - quantityReduce : 0"/>
+                                    shipmentItem.quantity - quantityReduce : 0.0"/>
                             <service-call name="update#mantle.shipment.ShipmentItem"
                                     in-map="[shipmentId:shipmentItem.shipmentId, productId:shipmentItem.productId,
                                         quantity:newItemQuantity]"/>
@@ -1220,6 +1230,8 @@ General Order Placement and eCommerce Usage
         <in-parameters>
             <parameter name="orderId" required="true"/>
             <parameter name="orderItemSeqId" required="true"/>
+            <parameter name="cancelQuantity" type="BigDecimal">
+                <description>Defaults to quantity not yet issued, if greater than quantity not issued will be reduced to quantity not issued</description></parameter>
             <parameter name="orderItem" type="EntityValue"/>
             <parameter name="fullAssetIssuanceList" type="List"><parameter name="assetIssuance" type="EntityValue"/></parameter>
             <parameter name="fullShipmentItemSourceList" type="List"><parameter name="shipmentItemSource" type="EntityValue"/></parameter>
@@ -1254,11 +1266,25 @@ General Order Placement and eCommerce Usage
                 <set field="itemQuantityIssued" from="itemQuantityIssued + itemAssetIssuance.quantity"/></iterate>
             <set field="hasIssuedQuantity" from="itemQuantityIssued &gt; 0.0"/>
 
+            <!-- determine quantity to cancel -->
+            <set field="notIssuedQuantity" from="orderItem.quantity - itemQuantityIssued"/>
+            <if condition="cancelQuantity"><then>
+                <if condition="cancelQuantity &gt; notIssuedQuantity"><then>
+                    <set field="quantityCancelled" from="notIssuedQuantity"/>
+                    <message type="warning">Cannot cancel quantity ${cancelQuantity}, only ${notIssuedQuantity} not yet shipped for Order Item ${orderId}:${orderItemSeqId}</message>
+                </then><else>
+                    <set field="quantityCancelled" from="cancelQuantity"/>
+                </else></if>
+            </then><else>
+                <set field="quantityCancelled" from="notIssuedQuantity"/>
+            </else></if>
+
+            <if condition="!quantityCancelled"><return message=""/></if>
+
             <!-- update the OrderItem -->
-            <set field="quantityCancelled" from="orderItem.quantity - itemQuantityIssued"/>
             <service-call name="update#mantle.order.OrderItem" in-map="[orderId:orderId,
                         orderItemSeqId:orderItem.orderItemSeqId, quantityCancelled:quantityCancelled,
-                        quantity:itemQuantityIssued]"/>
+                        quantity:(orderItem.quantity - quantityCancelled)]"/>
 
             <!-- update or remove ShipmentItemSource records -->
             <if condition="fullShipmentItemSourceList"><then>
@@ -1270,12 +1296,18 @@ General Order Placement and eCommerce Usage
             </else></if>
 
             <set field="shipmentItemQuantityReducedMap" from="[:]"/>
+            <set field="shipQuantityRemaining" from="quantityCancelled"/>
             <iterate list="itemShipmentItemSourceList" entry="itemShipmentItemSource">
-                <script>addToBigDecimalInMap(itemShipmentItemSource.shipmentId, itemShipmentItemSource.quantityNotHandled, shipmentItemQuantityReducedMap)</script>
+                <set field="shipQuantityToReduce" from="shipQuantityRemaining &gt; itemShipmentItemSource.quantityNotHandled ?
+                        itemShipmentItemSource.quantityNotHandled : shipQuantityRemaining"/>
+                <if condition="!shipQuantityToReduce"><continue/></if>
+                <script>addToBigDecimalInMap(itemShipmentItemSource.shipmentId, shipQuantityToReduce, shipmentItemQuantityReducedMap)</script>
                 <!-- reduce quantity by quantityNotHandled -->
                 <service-call name="update#mantle.shipment.ShipmentItemSource"
                         in-map="[shipmentItemSourceId:itemShipmentItemSource.shipmentItemSourceId, quantityNotHandled:0,
-                                quantity:(itemShipmentItemSource.quantity - itemShipmentItemSource.quantityNotHandled)]"/>
+                                quantity:(itemShipmentItemSource.quantity - shipQuantityToReduce)]"/>
+
+                <set field="shipQuantityRemaining" from="shipQuantityRemaining - shipQuantityToReduce"/>
             </iterate>
 
             <iterate list="shipmentItemQuantityReducedMap" entry="shipmentItemQuantityReduced" key="shipmentId">
@@ -1301,32 +1333,36 @@ General Order Placement and eCommerce Usage
                 </if>
             </iterate>
 
-            <!-- remove OrderItem Reservations -->
-            <service-call name="mantle.product.AssetServices.remove#OrderItemReservations"
-                    in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId]"/>
+            <if condition="quantityCancelled == notIssuedQuantity"><then>
+                <!-- if quantityCancelled == notIssuedQuantity remove all OrderItem Reservations -->
+                <service-call name="mantle.product.AssetServices.remove#OrderItemReservations"
+                              in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId]"/>
 
-            <if condition="checkCancelPart">
-                <!-- first see if all OrderItem in part have quantity 0, if so cancel order -->
-                <entity-find-count entity-name="mantle.order.OrderItem" count-field="partItemQtyOverZeroCount">
-                    <econdition field-name="orderId"/>
-                    <econdition field-name="orderPartSeqId" from="orderItem.orderPartSeqId"/>
-                    <econdition field-name="quantity" operator="greater" from="0.0"/>
-                </entity-find-count>
-                <if condition="partItemQtyOverZeroCount == 0"><then>
-                    <service-call name="update#mantle.order.OrderPart" out-map="context"
-                            in-map="[orderId:orderId, orderPartSeqId:orderItem.orderPartSeqId, statusId:'OrderCancelled']"/>
-                    <!-- if all parts Cancelled set header Cancelled, if any Completed and all others Completed or Cancelled set header Completed -->
-                    <service-call name="mantle.order.OrderServices.checkCancelComplete#Order" in-map="[orderId:orderId]"/>
-                </then><else>
-                    <!-- otherwise call checkComplete#OrderPart -->
-                    <service-call name="mantle.order.OrderServices.checkComplete#OrderPart" out-map="checkPartOut"
-                            in-map="[orderId:orderId, orderPartSeqId:orderItem.orderPartSeqId]"/>
-                    <if condition="checkPartOut.statusChanged">
+                <if condition="checkCancelPart &amp;&amp; quantityCancelled == notIssuedQuantity">
+                    <!-- first see if all OrderItem in part have quantity 0, if so cancel order -->
+                    <entity-find-count entity-name="mantle.order.OrderItem" count-field="partItemQtyOverZeroCount">
+                        <econdition field-name="orderId"/>
+                        <econdition field-name="orderPartSeqId" from="orderItem.orderPartSeqId"/>
+                        <econdition field-name="quantity" operator="greater" from="0.0"/>
+                    </entity-find-count>
+                    <if condition="partItemQtyOverZeroCount == 0"><then>
+                        <service-call name="update#mantle.order.OrderPart" out-map="context"
+                                      in-map="[orderId:orderId, orderPartSeqId:orderItem.orderPartSeqId, statusId:'OrderCancelled']"/>
                         <!-- if all parts Cancelled set header Cancelled, if any Completed and all others Completed or Cancelled set header Completed -->
                         <service-call name="mantle.order.OrderServices.checkCancelComplete#Order" in-map="[orderId:orderId]"/>
-                    </if>
-                </else></if>
-            </if>
+                    </then><else>
+                        <!-- otherwise call checkComplete#OrderPart -->
+                        <service-call name="mantle.order.OrderServices.checkComplete#OrderPart" out-map="checkPartOut"
+                                      in-map="[orderId:orderId, orderPartSeqId:orderItem.orderPartSeqId]"/>
+                        <if condition="checkPartOut.statusChanged">
+                            <!-- if all parts Cancelled set header Cancelled, if any Completed and all others Completed or Cancelled set header Completed -->
+                            <service-call name="mantle.order.OrderServices.checkCancelComplete#Order" in-map="[orderId:orderId]"/>
+                        </if>
+                    </else></if>
+                </if>
+            </then><else>
+                <!-- reduce OrderItem Reservations by quantityCancelled? no need to, AssetReservation ECA rule will pick it up -->
+            </else></if>
         </actions>
     </service>
 
