@@ -33,6 +33,7 @@ if (partyId) { ef.condition(ec.entity.conditionFactory.makeCondition("partyId", 
 if (pseudoId) { ef.condition(ec.entity.conditionFactory.makeCondition("pseudoId", EntityCondition.LIKE, (leadingWildcard ? "%" : "") + pseudoId + "%").ignoreCase()) }
 if (partyTypeEnumId) { ef.condition("partyTypeEnumId", partyTypeEnumId) }
 if (disabled) { ef.condition("disabled", disabled) }
+if (customerStatusId) { ef.condition("customerStatusId", customerStatusId) }
 if (hasDuplicates) { ef.condition("hasDuplicates", hasDuplicates) }
 if (roleTypeId) { ef.condition("roleTypeId", roleTypeId) }
 if (username) { ef.condition(ec.entity.conditionFactory.makeCondition("username", EntityCondition.LIKE, (leadingWildcard ? "%" : "") + username + "%").ignoreCase()) }
