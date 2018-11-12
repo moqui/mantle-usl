@@ -35,7 +35,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <parameter name="itemTypeEnumId"/>
                 <parameter name="quantity" type="BigDecimal"/>
                 <parameter name="unitAmount" type="BigDecimal"/>
-                <parameter name="discountAmount" type="BigDecimal"/>
+                <parameter name="unitAmountLessDiscounts" type="BigDecimal"/>
+                <parameter name="itemTotal" type="BigDecimal"/>
+                <parameter name="discountTotal" type="BigDecimal"/>
                 <parameter name="productId"/>
                 <parameter name="taxCode"/>
                 <!-- discounts will be another item of type ItemDiscount, so don't do this for now:
@@ -49,7 +51,10 @@ along with this software (see the LICENSE.md file). If not, see
         <out-parameters>
             <parameter name="taxResults" type="List"><parameter name="taxResult" type="Map">
                 <parameter name="itemId"/>
-                <parameter name="taxAmount" type="BigDecimal"/>
+                <parameter name="taxQuantity" type="BigDecimal">
+                    <description>Quantity to apply tax to, defaults to OrderItem.quantity</description></parameter>
+                <parameter name="taxAmount" type="BigDecimal">
+                    <description>Tax amount per quantity, typically derived from unitAmountLessDiscounts or unitAmount</description></parameter>
                 <parameter name="taxRate" type="BigDecimal"/>
                 <parameter name="taxAuthorityId"/>
                 <parameter name="taxName"/>
@@ -109,17 +114,26 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
                 <set field="items" from="[]"/>
                 <iterate list="orderItemList" entry="orderItem">
+                    <set field="combinedQuantity" from="(orderItem.quantity != null ? orderItem.quantity : 1.0) * (orderItem.selectedAmount ?: 1.0)"/>
+                    <if condition="combinedQuantity == 0.0"><continue/></if>
+
                     <set field="product" from="orderItem.'mantle.product.Product'"/>
                     <if condition="!product?.taxable || product?.taxable == 'Y'">
-                        <set field="discountAmount" from="0.0"/>
+                        <!-- NOTE: CurrencyRoundingMarker scale here may vary by currency, make configurable -->
+                        <set field="itemTotal" from="(combinedQuantity * (orderItem.unitAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+
+                        <set field="discountTotal" from="0.0"/>
                         <iterate list="orderItemList" entry="discountItem">
                             <if condition="discountItem.itemTypeEnumId == 'ItemDiscount' &amp;&amp;
                                     discountItem.parentItemSeqId == orderItem.orderItemSeqId &amp;&amp; discountItem.unitAmount">
-                                <set field="discountAmount" from="discountAmount + ((discountItem.quantity ?: 1.0) * discountItem.unitAmount)"/>
+                                <set field="discountTotal" from="discountTotal + ((discountItem.quantity != null ? discountItem.quantity : 1.0) * discountItem.unitAmount)"/>
                             </if>
                         </iterate>
+
+                        <set field="unitAmountLessDiscounts" from="((itemTotal + discountTotal) as BigDecimal).divide(combinedQuantity as BigDecimal, 3, BigDecimal.ROUND_HALF_UP)"/>
                         <script>items.add([itemId:orderItem.orderItemSeqId, itemTypeEnumId:orderItem.itemTypeEnumId,
-                                quantity:orderItem.quantity, unitAmount:orderItem.unitAmount, discountAmount:discountAmount,
+                                quantity:orderItem.quantity, unitAmount:orderItem.unitAmount, unitAmountLessDiscounts:unitAmountLessDiscounts,
+                                itemTotal:itemTotal, discountTotal:discountTotal,
                                 productId:orderItem.productId, taxCode:product?.taxCode])</script>
                     </if>
                 </iterate>
@@ -130,13 +144,19 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- add tax child OrderItems to db -->
                 <iterate list="taxResults" entry="taxResult">
                     <if condition="!taxResult.taxAmount"><continue/></if>
-                    <set field="taxAmount" from="new BigDecimal(taxResult.taxAmount).setScale(3, BigDecimal.ROUND_UP)"/>
+                    <set field="orderItem" from="orderItemList.find({ it.orderItemSeqId == taxResult.itemId })"/>
+                    <if condition="orderItem == null">
+                        <log level="warn" message="In calculate#OrderSalesTax got back entry with invalid orderItemSeqId ${taxResult.itemId} for order ${orderId}, skipping"/>
+                        <continue/>
+                    </if>
+                    <set field="taxAmount" from="(taxResult.taxAmount as BigDecimal).setScale(3, BigDecimal.ROUND_HALF_UP)"/>
                     <entity-find-one entity-name="mantle.other.tax.TaxAuthority" value-field="taxAuthority" cache="true">
                         <field-map field-name="taxAuthorityId" from="taxResult.taxAuthorityId"/></entity-find-one>
                     <set field="itemDescription" value="${taxAuthority?.description ? taxAuthority.description + ' ' : ''}${taxResult.taxName?:''}"/>
                     <service-call name="create#mantle.order.OrderItem" out-map="context"
                             in-map="[orderId:orderId, orderPartSeqId:orderPart.orderPartSeqId, parentItemSeqId:taxResult.itemId,
-                                itemTypeEnumId:'ItemSalesTax', quantity:1, unitAmount:taxAmount, sourcePercentage:(taxResult.taxRate*100.0),
+                                itemTypeEnumId:'ItemSalesTax', quantity:(taxResult.taxQuantity ?: orderItem.quantity),
+                                unitAmount:taxAmount, sourcePercentage:(taxResult.taxRate*100.0),
                                 taxAuthorityId:taxResult.taxAuthorityId, itemDescription:itemDescription]"/>
                 </iterate>
             </iterate>

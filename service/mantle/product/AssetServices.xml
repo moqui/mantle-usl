@@ -655,7 +655,8 @@ along with this software (see the LICENSE.md file). If not, see
         <description>Reduce quantity on AssetReservation, if reduced to zero delete.</description>
         <in-parameters>
             <parameter name="assetReservationId" required="true"/>
-            <parameter name="quantityToDeduct" type="BigDecimal"><description>Defaults to entire quantityNotIssued</description></parameter>
+            <parameter name="quantityToDeduct" type="BigDecimal">
+                <description>Defaults to entire quantityNotIssued, limited to quantityNotIssued</description></parameter>
         </in-parameters>
         <out-parameters><parameter name="quantityDeducted" type="BigDecimal"/></out-parameters>
         <actions>
@@ -671,20 +672,26 @@ along with this software (see the LICENSE.md file). If not, see
             </then><else>
                 <set field="curQuantityToDeduct" from="existingRes.quantityNotIssued &gt; quantityToDeduct ?
                                 quantityToDeduct : existingRes.quantityNotIssued"/>
-                <!-- add to ATP on Asset through a detail record -->
-                <service-call name="create#mantle.product.asset.AssetDetail" in-map="[assetId:existingRes.assetId,
+                <!-- add to ATP on Asset through a detail record, if curQuantityToDeduct not null and not zero -->
+                <if condition="curQuantityToDeduct">
+                    <service-call name="create#mantle.product.asset.AssetDetail" in-map="[assetId:existingRes.assetId,
                             effectiveDate:ec.user.nowTimestamp, availableToPromiseDiff:curQuantityToDeduct,
                             assetReservationId:existingRes.assetReservationId, productId:existingRes.productId,
                             orderId:existingRes.orderId, orderItemSeqId:existingRes.orderItemSeqId]"/>
+                </if>
                 <!-- reduce quantities on AssetReservation -->
                 <set field="existingRes.quantity" from="existingRes.quantity - curQuantityToDeduct"/>
                 <set field="existingRes.quantityNotAvailable"
                         from="existingRes.quantityNotAvailable &gt; curQuantityToDeduct ?
-                                    existingRes.quantityNotAvailable - curQuantityToDeduct : 0"/>
+                                    existingRes.quantityNotAvailable - curQuantityToDeduct : 0.0"/>
                 <set field="existingRes.quantityNotIssued" from="existingRes.quantityNotIssued - curQuantityToDeduct"/>
-                <if condition="existingRes.quantity &lt; 0">
+                <if condition="existingRes.quantity &lt; 0.0">
                     <return error="true" message="In reduce#AssetReservation got negative quantity ${existingRes.quantity}, quantity deducted ${curQuantityToDeduct}"/></if>
-                <entity-update value-field="existingRes"/>
+                <if condition="existingRes.quantity == 0.0 || existingRes.quantityNotIssued == 0.0"><then>
+                    <entity-delete value-field="existingRes"/>
+                </then><else>
+                    <entity-update value-field="existingRes"/>
+                </else></if>
 
                 <set field="quantityDeducted" from="curQuantityToDeduct"/>
             </else></if>
@@ -792,12 +799,12 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="quantityToMove" from="quantity"/>
                 <else>
                     <set field="quantityToMove" from="asset.availableToPromiseTotal &lt; quantity ? asset.availableToPromiseTotal : quantity"/>
-                    <if condition="quantityToMove &lt; 0"><set field="quantityToMove" from="0"/></if>
+                    <if condition="quantityToMove &lt; 0.0"><set field="quantityToMove" from="0.0"/></if>
                 </else>
             </if>
 
             <set field="quantityMoved" from="quantityToMove"/>
-            <if condition="quantityToMove == 0"><return/></if>
+            <if condition="quantityToMove == 0.0"><return/></if>
 
             <if condition="quantityToMove == assetReservation.quantity"><then>
                 <!-- move over the whole reservation -->
@@ -817,20 +824,20 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="assetReservation.assetId" from="assetId"/>
                 <set field="assetReservation.quantityNotAvailable"
                         from="assetReservation.quantityNotAvailable &gt; quantityToMove ?
-                            assetReservation.quantityNotAvailable - quantityToMove : 0"/>
+                            assetReservation.quantityNotAvailable - quantityToMove : 0.0"/>
                 <entity-update value-field="assetReservation"/>
             </then><else>
                 <!-- create a new reservation, split the quantity -->
                 <service-call name="create#mantle.product.issuance.AssetReservation" out-map="newResOut"
                         in-map="assetReservation.getMap() + [assetReservationId:null, assetId:assetId,
-                            quantity:quantityToMove, quantityNotAvailable:0, quantityNotIssued:quantityToMove]"/>
+                            quantity:quantityToMove, quantityNotAvailable:0.0, quantityNotIssued:quantityToMove]"/>
                 <!-- decrement old reservation quantities -->
                 <set field="assetReservation.quantity" from="assetReservation.quantity - quantityToMove"/>
                 <set field="assetReservation.quantityNotAvailable"
                         from="assetReservation.quantityNotAvailable &gt; quantityToMove ?
-                            assetReservation.quantityNotAvailable - quantityToMove : 0"/>
+                            assetReservation.quantityNotAvailable - quantityToMove : 0.0"/>
                 <set field="assetReservation.quantityNotIssued" from="assetReservation.quantityNotIssued - quantityToMove"/>
-                <if condition="assetReservation.quantity &lt; 0">
+                <if condition="assetReservation.quantity &lt; 0.0">
                     <return error="true" message="In move#AssetReservation got negative quantity ${assetReservation.quantity}, quantity to move ${quantityToMove}"/></if>
                 <entity-update value-field="assetReservation"/>
 
@@ -951,6 +958,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="effectiveDate" type="Timestamp" default="ec.user.nowTimestamp"/>
         </in-parameters>
         <actions>
+            <if condition="quantityDiff == 0.0"><return type="warning" message="Not changing quantity for Asset ${assetId}, quantityDiff is zero"/></if>
+
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true">
                 <field-map field-name="assetId"/></entity-find-one>
 
@@ -1018,6 +1027,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="issuedDate" type="Timestamp" default="ec.user.nowTimestamp"/>
         </in-parameters>
         <actions>
+            <if condition="quantity == 0.0"><return type="warning" message="Not issuing zero quantity against AssetReservation ${assetReservation?.assetReservationId}"/></if>
+
             <if condition="quantity &gt; assetReservation.quantityNotIssued">
                 <return error="true" message="For reservation ${assetReservation.assetReservationId} tried to issue quantity ${quantity} which is greater than quantity not issued ${assetReservation.quantityNotIssued} for the reservation"/></if>
 
@@ -1193,6 +1204,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="quantityRemaining &gt; 0.0 &amp;&amp; lastAsset != null">
                     <!-- if not configured to allow stop now because we didn't find on hand inventory -->
                     <if condition="facility.assetAllowIssueOverQoh != 'Y'">
+                        <log level="warn" message="Unable to issue ${quantityRemaining} of ${quantity}, insufficient inventory on hand for shipment ${shipmentId} order ${orderId} asset ${assetId} lastAsset ${lastAsset?.assetId} ${lastAsset?.availableToPromiseTotal}/${lastAsset?.quantityOnHandTotal} stack: ${ec.artifactExecution.getStackNameString()}"/>
                         <return error="true" message="Unable to issue ${quantityRemaining} out of quantity requested ${quantity}, insufficient inventory on hand for shipment ${shipmentId}"/>
                     </if>
 
@@ -1517,6 +1529,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="assetDetailId"/>
         </out-parameters>
         <actions>
+            <if condition="quantity == 0.0"><return type="warning" message="Not receiving zero quantity for Product ${productId}"/></if>
+
             <entity-find-one entity-name="mantle.product.Product" value-field="product"><field-map field-name="productId"/></entity-find-one>
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"><field-map field-name="orderId"/></entity-find-one>
             <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem">

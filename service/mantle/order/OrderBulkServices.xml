@@ -256,4 +256,82 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="orderRevision" from="afterHeader.orderRevision"/>
         </actions>
     </service>
+
+    <service verb="change" noun="OrderPartsStatus">
+        <in-parameters>
+            <parameter name="toStatusId" required="true"/>
+            <parameter name="inputFieldsMap" type="Map" default="ec.web.requestParameters"/>
+        </in-parameters>
+        <actions>
+            <!-- possible from statuses for toStatusId -->
+            <entity-find entity-name="moqui.basic.StatusFlowTransition" list="toTransList">
+                <econdition field-name="toStatusId"/></entity-find>
+            <set field="fromStatusIdSet" from="new HashSet(toTransList*.statusId)"/>
+            <if condition="!fromStatusIdSet"><return error="true" message="No status transitions found going to status ${toStatusId}"/></if>
+
+            <!-- limit query statuses to overlap of partStatusId(s) and fromStatusIdSet -->
+            <set field="partStatusId" from="inputFieldsMap.partStatusId"/>
+            <set field="partStatusIdSet" from="partStatusId instanceof String ? new HashSet(partStatusId.split(',') as List) :
+                        (partStatusId instanceof Collection ? new HashSet(partStatusId) : null)"/>
+            <if condition="partStatusIdSet"><then>
+                <set field="validStatusIdSet" from="new HashSet()"/>
+                <iterate list="partStatusIdSet" entry="partStatusIdCur">
+                    <if condition="fromStatusIdSet.contains(partStatusIdCur)"><script>validStatusIdSet.add(partStatusIdCur)</script></if>
+                </iterate>
+                <set field="partStatusId" from="validStatusIdSet.join(',')"/>
+                <set field="partStatusId_op" value="in"/>
+            </then><else>
+                <set field="partStatusId" from="fromStatusIdSet.join(',')"/>
+                <set field="partStatusId_op" value="in"/>
+            </else></if>
+
+            <log message="Doing bulk OrderPart status change to ${toStatusId} from statuses ${partStatusId}"/>
+
+            <set field="itemTypeEnumId" from="inputFieldsMap.salesItemTypeEnumId ?: inputFieldsMap.purchaseItemTypeEnumId"/>
+            <if condition="!itemTypeEnumId">
+                <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                    <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+                <set field="itemTypeEnumId" from="productItemTypeEgms*.enumId.join(',')"/>
+            </if>
+            <set field="orderType" from="inputFieldsMap.orderType ?: 'Any'"/>
+
+            <entity-find entity-name="mantle.order.OrderPartFindView" list="orderPartList" limit="100">
+                <search-form-inputs input-fields-map="inputFieldsMap"
+                        skip-fields="vendorRoleTypeId,customerRoleTypeId,customerClassificationId,itemTypeEnumId,orderType"/>
+                <date-filter from-field-name="customerClassFromDate" thru-field-name="customerClassThruDate" ignore="!customerClassificationId"/>
+                <econdition field-name="vendorRoleTypeId" value="OrgInternal" ignore="!'sales'.equalsIgnoreCase(orderType)"/>
+                <econdition field-name="customerRoleTypeId" value="OrgInternal" ignore="!'purchase'.equalsIgnoreCase(orderType)"/>
+                <econdition field-name="customerClassificationId" ignore-if-empty="true"/>
+                <econdition field-name="itemTypeEnumId" operator="in" ignore-if-empty="true" or-null="true"/>
+                <econdition field-name="productId" operator="in" from="inputFieldsMap.findProductId" ignore-if-empty="true"/>
+                <econdition field-name="quantity" operator="greater-equals" from="inputFieldsMap.findQuantity_from" ignore-if-empty="true"/>
+                <econdition field-name="quantity" operator="less-equals" from="inputFieldsMap.findQuantity_thru" ignore-if-empty="true"/>
+                <having-econditions>
+                    <econdition field-name="issuedQuantity" operator="greater" from="0.0" ignore="inputFieldsMap.onlyPartlyShipped != 'true'"/>
+                    <econdition field-name="quantityNotAvailable" operator="greater" from="0.0" ignore="inputFieldsMap.onlyInventoryUnavailable != 'true'"/>
+                </having-econditions>
+                <!-- NOTE: always need to select issuedQuantity,quantityNotAvailable if having conditions are used (EntityFindBuilder doesn't yet add these to sub-select automatically) -->
+                <select-field field-name="orderId,orderPartSeqId,issuedQuantity,quantityNotAvailable"/>
+            </entity-find>
+
+            <iterate list="orderPartList" entry="orderPart">
+                <if condition="toStatusId == 'OrderPlaced'"><then>
+                    <service-call name="mantle.order.OrderServices.place#Order"
+                            in-map="[orderId:orderPart.orderId, orderPartSeqId:orderPart.orderPartSeqId, requireInventory:false]"/>
+                </then><else-if condition="toStatusId == 'OrderApproved'">
+                    <service-call name="mantle.order.OrderServices.approve#Order"
+                            in-map="[orderId:orderPart.orderId, orderPartSeqId:orderPart.orderPartSeqId]"/>
+                </else-if><else-if condition="toStatusId == 'OrderCompleted'">
+                    <service-call name="mantle.order.OrderServices.complete#OrderPart"
+                            in-map="[orderId:orderPart.orderId, orderPartSeqId:orderPart.orderPartSeqId]"/>
+                </else-if><else-if condition="toStatusId == 'OrderCancelled'">
+                    <service-call name="mantle.order.OrderServices.cancel#OrderPart"
+                            in-map="[orderId:orderPart.orderId, orderPartSeqId:orderPart.orderPartSeqId]"/>
+                </else-if><else>
+                    <service-call name="mantle.order.OrderServices.update#OrderStatus"
+                            in-map="[orderId:orderId, statusId:toStatusId]"/>
+                </else></if>
+            </iterate>
+        </actions>
+    </service>
 </services>

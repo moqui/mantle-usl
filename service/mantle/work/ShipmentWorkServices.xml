@@ -49,7 +49,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shipmentId" required="true"/>
             <parameter name="workEffortId" required="true"/>
             <parameter name="binLocationNumber" type="Long"/>
-            <parameter name="allowBulkLocations" type="Boolean" default="false"/>
+            <parameter name="allowBulkLocations" type="Boolean" default="true"/>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
@@ -92,10 +92,10 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="orderPartSeqId" required="true"/>
             <parameter name="workEffortId" required="true"/>
             <parameter name="binLocationNumber" type="Long"/>
-            <parameter name="allowBulkLocations" type="Boolean" default="false"/>
+            <parameter name="allowBulkLocations" type="Boolean" default="true"/>
         </in-parameters>
         <out-parameters>
-            <parameter name="shipmentId"/>
+            <parameter name="shipmentIdList"/>
         </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
@@ -109,7 +109,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.shipment.ShipmentAndItemSource" list="shipmentItemSourceList" distinct="true">
                 <econdition field-name="orderId"/>
                 <econdition field-name="orderItemSeqId" operator="in" from="orderItemSeqIdList"/>
-                <econdition field-name="shipmentStatusId" operator="not-in" value="ShipRejected,ShipCancelled"/>
+                <econdition field-name="shipmentStatusId" operator="in" value="ShipInput,ShipScheduled"/>
                 <econdition field-name="statusId" operator="not-equals" value="SisCancelled"/>
                 <select-field field-name="shipmentId"/>
             </entity-find>
@@ -128,6 +128,95 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.work.ShipmentWorkServices.add#ShipmentToShipmentLoad" in-map="[shipmentId:shipmentId,
                         workEffortId:workEffortId, binLocationNumber:binLocationNumber, allowBulkLocations:allowBulkLocations]"/>
             </iterate>
+        </actions>
+    </service>
+
+    <service verb="create" noun="ShipmentLoadsForOrders" transaction-timeout="600">
+        <in-parameters>
+            <parameter name="facilityId" required="true"/>
+            <parameter name="workEffortName" required="true"/>
+            <parameter name="estimatedStartDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="allowBulkLocations" type="Boolean" default="true"/>
+
+            <parameter name="ordersPerPicklist" type="Long" required="true"/>
+            <parameter name="orderByField"/>
+
+            <parameter name="inputFieldsMap" type="Map" default="ec.web.requestParameters"/>
+            <parameter name="excludeOnPicklist"/>
+            <parameter name="excludeNotPickLoc"/>
+            <parameter name="onlyPartlyShipped"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="picklistsCreated" type="Long"/>
+            <parameter name="workEffortIdList" type="List"><parameter name="workEffortId"/></parameter>
+        </out-parameters>
+        <actions>
+            <set field="excludeOnPicklist" from="excludeOnPicklist ?: inputFieldsMap.excludeOnPicklist ?: 'true'"/>
+            <set field="excludeNotPickLoc" from="excludeNotPickLoc ?: inputFieldsMap.excludeNotPickLoc ?: 'true'"/>
+            <set field="onlyPartlyShipped" from="onlyPartlyShipped ?: inputFieldsMap.onlyPartlyShipped ?: 'false'"/>
+
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="itemTypeEnumIdList" from="productItemTypeEgms*.enumId"/>
+
+            <entity-find entity-name="mantle.order.OrderPartFindView" list="orderPartList" limit="500">
+                <search-form-inputs default-order-by="${orderByField}"
+                        paginate="false" input-fields-map="inputFieldsMap"
+                        skip-fields="vendorRoleTypeId,customerRoleTypeId,customerClassificationId,itemTypeEnumId,orderType,facilityId,workEffortId"/>
+                <econdition field-name="partStatusId" value="OrderApproved"/>
+                <econdition field-name="vendorRoleTypeId" value="OrgInternal"/>
+                <econdition field-name="itemTypeEnumId" operator="in" from="itemTypeEnumIdList"/>
+                <econdition field-name="facilityId" ignore-if-empty="true"/>
+                <econdition field-name="customerClassificationId" from="inputFieldsMap.customerClassificationId" ignore-if-empty="true"/>
+                <date-filter from-field-name="customerClassFromDate" thru-field-name="customerClassThruDate" ignore="!inputFieldsMap.customerClassificationId"/>
+                <econdition field-name="productId" operator="in" from="inputFieldsMap.findProductId" ignore-if-empty="true"/>
+                <econdition field-name="quantity" operator="greater-equals" from="inputFieldsMap.findQuantity_from" ignore-if-empty="true"/>
+                <econdition field-name="quantity" operator="less-equals" from="inputFieldsMap.findQuantity_thru" ignore-if-empty="true"/>
+                <econdition field-name="shipWorkEffortId" operator="is-null" ignore="excludeOnPicklist == 'false'"/>
+                <econdition field-name="locationTypeEnumId" value="FltPick"/>
+                <having-econditions>
+                    <econdition field-name="quantityTotal" to-field-name="resQuantity" ignore="excludeNotPickLoc == 'false'"/>
+                    <!-- useless when filtering by pick locations: <econdition field-name="quantityNotAvailable" operator="greater" from="0.0" ignore="onlyInventoryUnavailable != 'true'"/> -->
+                    <econdition field-name="issuedQuantity" operator="greater" from="0.0" ignore="onlyPartlyShipped != 'true'"/>
+                </having-econditions>
+                <!-- NOTE: always need to select resQuantity,issuedQuantity if having conditions are used (EntityFindBuilder doesn't yet add these to sub-select automatically) -->
+                <select-field field-name="orderId,orderPartSeqId,quantityTotal,resQuantity,issuedQuantity"/>
+            </entity-find>
+
+            <!-- <log level="warn" message="orderPartList_xafind: ${orderPartList_xafind}"/> -->
+
+            <set field="picklistsCreated" from="0"/>
+            <set field="workEffortIdList" from="[]"/>
+            <set field="curWorkEffortId" from="null"/>
+            <set field="curBinLocationNumber" from="1"/>
+
+            <iterate list="orderPartList" entry="orderPart">
+                <!-- NOTE any validation needed per OrderPart? -->
+
+                <!-- create a picklist (shipment load WorkEffort) if none active -->
+                <if condition="!curWorkEffortId">
+                    <set field="picklistsCreated" from="picklistsCreated + 1"/>
+                    <service-call name="mantle.work.ShipmentWorkServices.create#ShipmentLoadShip"
+                            out-map="createShipLoadOut" out-map-add-to-existing="false"
+                            in-map="[facilityId:facilityId, estimatedStartDate:estimatedStartDate, workEffortName:(workEffortName + ' ' + picklistsCreated)]"/>
+                    <set field="curWorkEffortId" from="createShipLoadOut.workEffortId"/>
+                    <set field="curBinLocationNumber" from="1"/>
+                </if>
+
+                <!-- add order to picklist -->
+                <service-call name="mantle.work.ShipmentWorkServices.add#OrderPartToShipmentLoad"
+                        in-map="[orderId:orderPart.orderId, orderPartSeqId:orderPart.orderPartSeqId, workEffortId:curWorkEffortId,
+                            binLocationNumber:curBinLocationNumber, allowBulkLocations:allowBulkLocations]"/>
+                <set field="curBinLocationNumber" from="curBinLocationNumber + 1"/>
+
+                <!-- if curBinLocationNumber greater than ordersPerPicklist clear curWorkEffortId to create new for next order -->
+                <if condition="curBinLocationNumber &gt; ordersPerPicklist">
+                    <set field="curWorkEffortId" from="null"/>
+                    <set field="curBinLocationNumber" from="1"/>
+                </if>
+            </iterate>
+
+            <message type="success">Created ${picklistsCreated} picklists for ${orderPartList.size()} orders</message>
         </actions>
     </service>
 </services>

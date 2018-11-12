@@ -68,9 +68,13 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shippingGatewayConfig" type="Map"/>
             <parameter name="hasAllLabels" type="Boolean"/><parameter name="hasAnyLabels" type="Boolean"/>
             <parameter name="destContactMechValid" type="Boolean"/>
+
             <parameter name="curCarrierDetail" type="Map"/>
             <parameter name="curShipmentMethodEnum" type="Map"/>
             <parameter name="curCarrierShipmentMethod" type="Map"/>
+            <parameter name="orderCarrierDetail" type="Map"/>
+            <parameter name="orderShipmentMethodEnum" type="Map"/>
+            <parameter name="orderCarrierShipmentMethod" type="Map"/>
         </out-parameters>
         <actions>
             <service-call name="mantle.shipment.ShipmentServices.get#ShipmentContactInfo" out-map="context" in-map="[shipmentId:shipmentId]"/>
@@ -166,14 +170,42 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <set field="destContactMechValid" from="destContactMech != null &amp;&amp; destContactMech.trustLevelEnumId in ['CmtlValid', 'CmtlVerified']"/>
 
-            <entity-find-one entity-name="mantle.party.PartyDetail" value-field="curCarrierDetail" cache="true">
-                <field-map field-name="partyId" from="firstRouteSegment.carrierPartyId"/></entity-find-one>
+            <if condition="firstRouteSegment.carrierPartyId &amp;&amp; firstRouteSegment.carrierPartyId != '_NA_'">
+                <entity-find-one entity-name="mantle.party.PartyDetail" value-field="curCarrierDetail" cache="true">
+                    <field-map field-name="partyId" from="firstRouteSegment.carrierPartyId"/></entity-find-one>
+            </if>
             <entity-find-one entity-name="moqui.basic.Enumeration" value-field="curShipmentMethodEnum">
                 <field-map field-name="enumId" from="firstRouteSegment.shipmentMethodEnumId"/></entity-find-one>
             <entity-find-one entity-name="mantle.shipment.carrier.CarrierShipmentMethod" value-field="curCarrierShipmentMethod">
                 <field-map field-name="carrierPartyId" from="firstRouteSegment.carrierPartyId"/>
                 <field-map field-name="shipmentMethodEnumId" from="firstRouteSegment.shipmentMethodEnumId"/>
             </entity-find-one>
+
+            <!-- get order carrier and method info -->
+            <entity-find entity-name="mantle.shipment.ShipmentItemSourceOrderItem" list="sisOrderItemList" distinct="true">
+                <econdition field-name="shipmentId"/>
+                <econdition field-name="orderId" operator="is-not-null"/>
+                <econdition field-name="orderPartSeqId" operator="is-not-null"/>
+                <select-field field-name="orderId,orderPartSeqId"/>
+            </entity-find>
+            <if condition="sisOrderItemList">
+                <entity-find-one entity-name="mantle.order.OrderPart" value-field="firstOrderPart">
+                    <field-map field-name="orderId" from="sisOrderItemList[0].orderId"/>
+                    <field-map field-name="orderPartSeqId" from="sisOrderItemList[0].orderPartSeqId"/>
+                </entity-find-one>
+                <if condition="firstOrderPart != null">
+                    <if condition="firstOrderPart.carrierPartyId &amp;&amp; firstOrderPart.carrierPartyId != '_NA_'">
+                        <entity-find-one entity-name="mantle.party.PartyDetail" value-field="orderCarrierDetail" cache="true">
+                            <field-map field-name="partyId" from="firstOrderPart.carrierPartyId"/></entity-find-one>
+                    </if>
+                    <entity-find-one entity-name="moqui.basic.Enumeration" value-field="orderShipmentMethodEnum">
+                        <field-map field-name="enumId" from="firstOrderPart.shipmentMethodEnumId"/></entity-find-one>
+                    <entity-find-one entity-name="mantle.shipment.carrier.CarrierShipmentMethod" value-field="orderCarrierShipmentMethod">
+                        <field-map field-name="carrierPartyId" from="firstOrderPart.carrierPartyId"/>
+                        <field-map field-name="shipmentMethodEnumId" from="firstOrderPart.shipmentMethodEnumId"/>
+                    </entity-find-one>
+                </if>
+            </if>
         </actions>
     </service>
     <service verb="get" noun="ShipmentContactInfo">
@@ -299,6 +331,7 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
             <parameter name="shipmentRouteSegmentSeqId"/>
+            <parameter name="carrierPartyIdList" type="List"><parameter name="carrierPartyId"/></parameter>
             <parameter name="getRates" type="Boolean" default="false"/>
         </in-parameters>
         <out-parameters>
@@ -330,8 +363,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="shippingGatewayConfigId" from="ec.user.getPreference('DefaultShipmentGatewayConfigId')"/></if>
 
             <!-- include all CarrierShipmentMethod records -->
-            <entity-find entity-name="mantle.shipment.carrier.CarrierShipmentMethod" list="shipOptionList" cache="true">
-                <order-by field-name="carrierPartyId,sequenceNum"/></entity-find>
+            <if condition="carrierPartyIdList"><then>
+                <entity-find entity-name="mantle.shipment.carrier.CarrierShipmentMethod" list="shipOptionList" cache="false">
+                    <econdition field-name="carrierPartyId" operator="in" from="carrierPartyIdList"/>
+                    <order-by field-name="carrierPartyId,sequenceNum"/>
+                </entity-find>
+            </then><else>
+                <entity-find entity-name="mantle.shipment.carrier.CarrierShipmentMethod" list="shipOptionList" cache="true">
+                    <order-by field-name="carrierPartyId,sequenceNum"/></entity-find>
+            </else></if>
             <!-- get rates -->
             <entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig" cache="true">
                 <field-map field-name="shippingGatewayConfigId"/></entity-find-one>
@@ -1796,7 +1836,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.product.issuance.AssetReservation" list="assetReservationList">
                     <econdition field-name="orderId" from="shipmentItemSource.orderId"/>
                     <econdition field-name="orderItemSeqId" from="shipmentItemSource.orderItemSeqId"/>
-                    <econdition field-name="quantityNotIssued" operator="not-equals" from="0"/>
+                    <econdition field-name="quantityNotIssued" operator="not-equals" from="0.0"/>
                     <econdition field-name="assetId" ignore-if-empty="true"/>
                     <order-by field-name="assetId"/>
                 </entity-find>
@@ -1825,7 +1865,7 @@ along with this software (see the LICENSE.md file). If not, see
                         </if>
                     </if>
 
-                    <if condition="assetReservation.quantityNotIssued &lt; 0">
+                    <if condition="assetReservation.quantityNotIssued &lt; 0.0">
                         <return error="true" message="In pack ShipmentItemSource found AssetReservation ${assetReservation.assetReservationId} with invalid (negative) quantityNotIssued ${assetReservation.quantityNotIssued}"/></if>
                     <set field="quantityToIssue" from="assetReservation.quantityNotIssued > quantityRemaining ?
                         quantityRemaining : assetReservation.quantityNotIssued"/>
@@ -1849,10 +1889,10 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- no reservation? issue from specified asset (if there is one) -->
             <if condition="quantityRemaining &amp;&amp; asset">
-                <set field="quantityToIssue" from="asset.quantityOnHandTotal > quantityRemaining ?
+                <set field="quantityToIssue" from="asset.quantityOnHandTotal &gt; quantityRemaining ?
                     quantityRemaining : asset.quantityOnHandTotal"/>
-                <set field="quantityRemaining" from="quantityRemaining > asset.quantityOnHandTotal ?
-                    (quantityRemaining - asset.quantityOnHandTotal) : 0"/>
+                <set field="quantityRemaining" from="quantityRemaining &gt; asset.quantityOnHandTotal ?
+                    (quantityRemaining - asset.quantityOnHandTotal) : 0.0"/>
 
                 <!-- do a non-reservation asset issuance -->
                 <service-call name="mantle.product.AssetServices.issue#Asset"
@@ -2370,7 +2410,10 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="cancel" noun="Shipment">
         <!-- TODO: consider changing most of this to always run on through SECA on update#mantle.shipment.Shipment with statusId changed to ShipCancelled -->
-        <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="undoIssueReceive" type="Boolean" default="true"/>
+        </in-parameters>
         <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
@@ -2406,21 +2449,23 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <set field="orderIdList" from="sisOrderList*.orderId"/>
 
-            <!-- unpack/unissue issuances -->
-            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList">
-                <econdition field-name="shipmentId"/><econdition field-name="quantity" operator="greater" from="0.0"/></entity-find>
-            <iterate list="assetIssuanceList" entry="assetIssuance">
-                <service-call name="mantle.shipment.ShipmentServices.unpack#ShipmentItemIssuance"
-                        in-map="[assetIssuanceId:assetIssuance.assetIssuanceId]"/>
-            </iterate>
+            <if condition="undoIssueReceive">
+                <!-- unpack/unissue issuances -->
+                <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList">
+                    <econdition field-name="shipmentId"/><econdition field-name="quantity" operator="greater" from="0.0"/></entity-find>
+                <iterate list="assetIssuanceList" entry="assetIssuance">
+                    <service-call name="mantle.shipment.ShipmentServices.unpack#ShipmentItemIssuance"
+                            in-map="[assetIssuanceId:assetIssuance.assetIssuanceId]"/>
+                </iterate>
 
-            <!-- un-receive receipts (zero out) -->
-            <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList">
-                <econdition field-name="shipmentId"/><econdition field-name="quantityAccepted" operator="greater" from="0.0"/></entity-find>
-            <iterate list="assetReceiptList" entry="assetReceipt">
-                <service-call name="mantle.product.AssetServices.update#AssetAndReceipt" in-map="[assetId:assetReceipt.assetId,
+                <!-- un-receive receipts (zero out) -->
+                <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList">
+                    <econdition field-name="shipmentId"/><econdition field-name="quantityAccepted" operator="greater" from="0.0"/></entity-find>
+                <iterate list="assetReceiptList" entry="assetReceipt">
+                    <service-call name="mantle.product.AssetServices.update#AssetAndReceipt" in-map="[assetId:assetReceipt.assetId,
                         assetReceiptId:assetReceipt.assetReceiptId, shipmentId:shipmentId, quantityAccepted:0.0, quantityRejected:0.0]"/>
-            </iterate>
+                </iterate>
+            </if>
 
             <!-- NOTE: cancel/refund labels? NO: warn that need to be refunded -->
             <!-- NOTE: check Payment auth/delivered and warn that won't cancel/refund payment -->
@@ -2475,6 +2520,26 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="shipmentItem.quantity != quantityHandled">
                     <service-call name="mantle.shipment.ShipmentServices.update#ShipmentItem"
                             in-map="[shipmentId:shipmentId, productId:shipmentItem.productId, quantity:quantityHandled]"/>
+
+                    <!-- reduce ShipmentPackageContent quantity as needed, mostly to undo auto packaging -->
+                    <entity-find entity-name="mantle.shipment.ShipmentPackageContent" list="packageContentList">
+                        <econdition field-name="shipmentId"/>
+                        <econdition field-name="productId" from="shipmentItem.productId"/>
+                    </entity-find>
+                    <set field="quantityHandledRem" from="quantityHandled"/>
+                    <iterate list="packageContentList" entry="packageContent">
+                        <if condition="quantityHandledRem &lt; packageContent.quantity"><then>
+                            <if condition="quantityHandledRem == 0.0"><then>
+                                <entity-delete value-field="packageContent"/>
+                            </then><else>
+                                <set field="packageContent.quantity" from="quantityHandledRem"/>
+                                <entity-update value-field="packageContent"/>
+                                <set field="quantityHandledRem" from="0.0"/>
+                            </else></if>
+                        </then><else>
+                            <set field="quantityHandledRem" from="quantityHandledRem - packageContent.quantity"/>
+                        </else></if>
+                    </iterate>
                 </if>
             </iterate>
         </actions>

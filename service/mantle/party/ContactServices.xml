@@ -785,18 +785,26 @@ along with this software (see the LICENSE.md file). If not, see
     <!-- ========== TelecomNumber Services ========== -->
 
     <service verb="clean" noun="TelecomNumber">
-        <in-parameters><parameter name="countryCode"/><parameter name="areaCode"/><parameter name="contactNumber"/>
-            <parameter name="extension"/></in-parameters>
-        <out-parameters><parameter name="countryCode"/><parameter name="areaCode"/><parameter name="contactNumber"/>
-            <parameter name="extension"/></out-parameters>
+        <in-parameters>
+            <parameter name="countryCode"/><parameter name="areaCode"/>
+            <parameter name="contactNumber"/><parameter name="extension"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="countryCode"/><parameter name="areaCode"/>
+            <parameter name="contactNumber"/><parameter name="extension"/>
+            <parameter name="isValid" type="Boolean">
+                <description>Null if unknown. Does basic validation of areaCode and contactNumber based on countryCode.</description></parameter>
+        </out-parameters>
         <actions><script><![CDATA[
             // countryCode, areaCode, and extension should contain only digits
-            if (countryCode) countryCode = countryCode.replaceAll(/\D/, "")
-            if (areaCode) areaCode = areaCode.replaceAll(/\D/, "")
-            if (extension) extension = extension.replaceAll(/\D/, "")
+            if (countryCode) countryCode = countryCode.trim().replaceAll(/\D/, "")
+            if (areaCode) areaCode = areaCode.trim().replaceAll(/\D/, "")
+            if (extension) extension = extension.trim().replaceAll(/\D/, "")
             if (contactNumber) {
+                // trim to make sure
+                contactNumber = contactNumber.trim()
                 // if contactNumber contains spaces change them to dashes
-                contactNumber = contactNumber.trim().replaceAll(/\s/, "-")
+                contactNumber = contactNumber.replaceAll(/\s/, "-")
                 // contactNumber should only contain digits, and '.' or '-'
                 contactNumber = contactNumber.replaceAll(/[^\d\.-]/, "")
                 // if contains dot and dash replace all dot with dash
@@ -806,6 +814,30 @@ along with this software (see the LICENSE.md file). If not, see
                 if (!contactNumber.contains('-') && !contactNumber.contains('.') && contactNumber.length() == 7)
                     contactNumber = contactNumber.substring(0, 3) + '-' + contactNumber.substring(3)
             }
+            // validation by country codes, see https://en.wikipedia.org/wiki/List_of_country_calling_codes
+            if (countryCode == '1' || countryCode == '+1') {
+                // North America Numbering Plan (USA, Canada, etc) - 3 digit areaCode, 7 digit contactNumber
+                // see https://en.wikipedia.org/wiki/North_American_Numbering_Plan
+                isValid = true
+                if (areaCode.length() != 3) {
+                    isValid = false
+                    ec.message.addMessage("Area code ${areaCode} not valid for North America, should be 3 digits", "warning")
+                }
+                if (areaCode.charAt(0) == '0' as char || areaCode.charAt(0) == '1' as char) {
+                    isValid = false
+                    ec.message.addMessage("Area code ${areaCode} not valid for North America, should not start with 0 or 1", "warning")
+                }
+                String contactNumberOnly = contactNumber.trim().replaceAll(/\D/, "")
+                if (contactNumberOnly.length() != 7) {
+                    isValid = false
+                    ec.message.addMessage("Contact number ${contactNumber} not valid for North America, should be 7 digits", "warning")
+                }
+                if (contactNumberOnly.charAt(0) == '0' as char || contactNumberOnly.charAt(0) == '1' as char) {
+                    isValid = false
+                    ec.message.addMessage("Contact number ${contactNumber} not valid for North America, should not start with 0 or 1", "warning")
+                }
+            }
+            // TODO: add validation for other countryCode values
         ]]></script></actions>
     </service>
     <service verb="create" noun="TelecomNumber">
@@ -824,12 +856,14 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="contactMechId" required="true"/>
+            <parameter name="trustLevelEnumId"/>
         </out-parameters>
         <actions>
             <service-call name="mantle.party.ContactServices.clean#TelecomNumber" in-map="context" out-map="context"/>
+            <set field="trustLevelEnumId" from="isValid != null &amp;&amp; !isValid ? 'CmtlInvalid' : 'CmtlNew'"/>
 
             <entity-make-value entity-name="mantle.party.contact.ContactMech" value-field="contactMech"
-                    map="[contactMechTypeEnumId:'CmtTelecomNumber', trustLevelEnumId:'CmtlNew']"/>
+                    map="[contactMechTypeEnumId:'CmtTelecomNumber', trustLevelEnumId:trustLevelEnumId]"/>
             <entity-sequenced-id-primary value-field="contactMech"/>
             <entity-create value-field="contactMech"/>
             <set field="contactMechId" from="contactMech.contactMechId"/>
@@ -867,9 +901,11 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters>
             <parameter name="contactMechId" required="true"/>
+            <parameter name="trustLevelEnumId"/>
         </out-parameters>
         <actions>
             <service-call name="mantle.party.ContactServices.clean#TelecomNumber" in-map="context" out-map="context"/>
+            <set field="trustLevelEnumId" from="isValid != null &amp;&amp; !isValid ? 'CmtlInvalid' : 'CmtlNew'"/>
 
             <entity-find-one entity-name="mantle.party.contact.TelecomNumber" value-field="origTelecomNumber"/>
             <script>newTelecomNumber = origTelecomNumber.cloneValue()</script>
@@ -914,7 +950,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="newContactMech.replacesContactMechId" from="newContactMech.contactMechId"/>
             <set field="newContactMech.contactMechId" from="null"/>
             <set field="newContactMech.gatewayCimId" from="null"/>
-            <set field="newContactMech.trustLevelEnumId" value="CmtlNew"/>
+            <set field="newContactMech.trustLevelEnumId" from="trustLevelEnumId"/>
             <set field="newContactMech.validateMessage" from="null"/>
             <set field="newContactMech.paymentFraudEvidenceId" from="null"/>
             <entity-sequenced-id-primary value-field="newContactMech"/>
@@ -1149,5 +1185,20 @@ along with this software (see the LICENSE.md file). If not, see
             if (contactMechPurposeId) ef.condition("contactMechPurposeId", contactMechPurposeId)
             ef.updateAll([thruDate: ec.user.getNowTimestamp()])
         ]]></script></actions>
+    </service>
+    <service verb="undelete" noun="PartyContactMech">
+        <description>Un-delete any type of ContactMech from a Party, removes thruDate from PartyContactMech record</description>
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="contactMechId" required="true"/>
+            <parameter name="contactMechPurposeId" required="true"/>
+            <parameter name="fromDate" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.party.contact.PartyContactMech" value-field="partyContactMech"/>
+            <if condition="partyContactMech == null"><return error="true" message="Contact info ${contactMechId} for party ${partyId} not found"/></if>
+            <set field="partyContactMech.thruDate" from="null"/>
+            <entity-update value-field="partyContactMech"/>
+        </actions>
     </service>
 </services>
