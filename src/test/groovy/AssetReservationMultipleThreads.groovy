@@ -117,12 +117,23 @@ class AssetReservationMultipleThreads extends Specification {
             String currencyUomId = productStore.defaultCurrencyUomId
             String customerPartyId = ec.user.userAccount.partyId
 
+            List productIds = ['DEMO_1_1', 'DEMO_UNIT']
+            int firstIdx = threadNum % 2
+            int secondIdx = firstIdx == 0 ? 1 : 0
+
+            // first item, create order
             Map addOut1 = ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
-                    .parameters([productId:'DEMO_1_1', quantity:60, customerPartyId:customerPartyId,
-                                 currencyUomId:currencyUomId, productStoreId:productStoreId, requireInventory:false]).call()
+                    .parameters([productId:productIds[firstIdx], quantity:60, customerPartyId:customerPartyId,
+                        currencyUomId:currencyUomId, productStoreId:productStoreId, requireInventory:false]).call()
 
             cartOrderId = addOut1.orderId
-            // String orderPartSeqId = addOut1.orderPartSeqId
+            String orderPartSeqId = addOut1.orderPartSeqId
+
+            // second item, add to order
+            ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
+                    .parameters([orderId:cartOrderId, orderPartSeqId:orderPartSeqId ,
+                        productId:productIds[secondIdx], quantity:60, customerPartyId:customerPartyId,
+                        currencyUomId:currencyUomId, productStoreId:productStoreId, requireInventory:false]).call()
 
             ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
                     .parameters([orderId: cartOrderId, paymentMethodId:'CustJqpCc', paymentInstrumentEnumId:'PiCreditCard',
