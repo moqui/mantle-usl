@@ -247,16 +247,33 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="productStore.reservationOrderEnumId == 'AsResOrdNoRes'"><return/></if>
             </else></if>
 
-            <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
-                <econdition field-name="orderId"/>
-                <econdition field-name="productId" operator="is-not-null"/>
-                <!-- order by productId to avoid deadlocks -->
-                <order-by field-name="productId"/>
-            </entity-find>
-            <iterate list="orderItemList" entry="orderItem">
-                <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
-                        in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, productStore:productStore]"/>
+            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                <econdition field-name="orderId"/><order-by field-name="orderPartSeqId"/></entity-find>
+
+            <iterate list="orderPartList" entry="orderPart">
+                <!-- check OrderPart.reservationAutoEnumId vs current status -->
+                <set field="reservationAutoEnumId" from="orderPart.reservationAutoEnumId ?: productStore?.reservationAutoEnumId ?: 'AsResAutoPlaced'"/>
+                <if condition="reservationAutoEnumId == 'AsResAutoNone'"><continue/></if>
+                <if condition="reservationAutoEnumId == 'AsResAutoApproved'"><then>
+                    <set field="resStatusList" from="['OrderApproved', 'OrderSent']"/>
+                </then><else>
+                    <set field="resStatusList" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderHold']"/>
+                </else></if>
+                <if condition="!(orderHeader.statusId in resStatusList) || !(orderPart.statusId in resStatusList)"><continue/></if>
+
+                <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
+                    <econdition field-name="orderId"/>
+                    <econdition field-name="orderPartSeqId" from="orderPart.orderPartSeqId"/>
+                    <econdition field-name="productId" operator="is-not-null"/>
+                    <!-- order by productId to avoid deadlocks -->
+                    <order-by field-name="productId"/>
+                </entity-find>
+                <iterate list="orderItemList" entry="orderItem">
+                    <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
+                            in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, productStore:productStore]"/>
+                </iterate>
             </iterate>
+
         </actions>
     </service>
     <service verb="checkReserve" noun="AssetForOrderItem">
@@ -272,9 +289,18 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="orderHeader == null"><return error="true" message="Order ${orderId} not found"/></if>
 
             <entity-find-related-one value-field="orderItem" relationship-name="mantle.order.OrderPart" to-value-field="orderPart"/>
+
             <!-- only do this automatically if order placed or later but not completed/cancelled/etc -->
-            <set field="resStatusList" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderHold']"/>
+            <!-- check OrderPart.reservationAutoEnumId vs current status -->
+            <set field="reservationAutoEnumId" from="orderPart.reservationAutoEnumId ?: productStore?.reservationAutoEnumId ?: 'AsResAutoPlaced'"/>
+            <if condition="reservationAutoEnumId == 'AsResAutoNone'"><return/></if>
+            <if condition="reservationAutoEnumId == 'AsResAutoApproved'"><then>
+                <set field="resStatusList" from="['OrderApproved', 'OrderSent']"/>
+            </then><else>
+                <set field="resStatusList" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderHold']"/>
+            </else></if>
             <if condition="!(orderHeader.statusId in resStatusList) || !(orderPart.statusId in resStatusList)"><return/></if>
+
             <!-- reserve assets, or update reservations as needed -->
             <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem" in-map="context"/>
         </actions>
