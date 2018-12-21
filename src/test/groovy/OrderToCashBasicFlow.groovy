@@ -478,7 +478,7 @@ class OrderToCashBasicFlow extends Specification {
         EntityList afterResList = ec.entity.find("mantle.product.issuance.AssetReservation")
                 .condition("orderId", orderId).orderBy("assetId").list()
         // should be only DEMO_1_1A and DEMO_UNITA
-        // for (EntityValue res in afterResList) logger.warn("Res after: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
+        for (EntityValue res in afterResList) logger.info("Res after: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
 
         then:
         afterResList.size() == 2
