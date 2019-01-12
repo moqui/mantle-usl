@@ -912,6 +912,10 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="invoiceIdByOrderPartIdMap" from="[:]"/>
             <set field="invoiceDate" from="invoiceDate ?: shipment.packedDate ?: ec.user.nowTimestamp"/>
 
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList" for-update="true">
                 <econdition field-name="shipmentId"/>
                 <econdition field-name="orderId" operator="not-equals" from="null"/><!-- only include item sources from orders -->
@@ -923,8 +927,9 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
                 <set field="orderItem" from="shipmentItemSource.'mantle.order.OrderItem'"/>
                 <if condition="orderItem == null"><continue/></if>
+                <set field="orderItemQty" from="(orderItem.quantity != null ? orderItem.quantity : 1.0) * (orderItem.selectedAmount ?: 1.0)"/>
                 <!-- invoice even if unitAmount is zero, otherwise no record of sales for inventory/etc purposes (sales invoice analysis)
-                <set field="itemAmount" from="(orderItem.unitAmount ?: 0) * (orderItem.quantity ?: 0)"/>
+                <set field="itemAmount" from="(orderItem.unitAmount ?: 0) * (orderItemQty)"/>
                 <if condition="itemAmount == 0"><continue/></if>
                 -->
 
@@ -945,7 +950,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="orderHeader" from="shipmentItemSource.'mantle.order.OrderHeader'"/>
                     <script>orderHeaderMap.put(shipmentItemSource.orderId, orderHeader)</script>
                 </if>
-                <set field="invoiceId" from="invoiceIdByOrderPartIdMap[orderItem.orderId + ':' + orderItem.orderPartSeqId]"/>
+                <set field="invoiceId" from="invoiceIdByOrderPartIdMap.get(orderItem.orderId + ':' + orderItem.orderPartSeqId)"/>
 
                 <if condition="!invoiceId">
                     <!-- find the OrderPart for the from/toPartyId, etc -->
@@ -1050,8 +1055,7 @@ along with this software (see the LICENSE.md file). If not, see
                         spite of the name handle these too -->
                     <if condition="handleReceipts">
                         <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList" for-update="true">
-                            <econdition-object field="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
-                                shipmentId:shipmentId]"/>
+                            <econdition-object field="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId, shipmentId:shipmentId]"/>
                             <order-by field-name="orderItemSeqId"/>
                         </entity-find>
                         <iterate list="assetReceiptList" entry="assetReceipt">
@@ -1099,10 +1103,9 @@ along with this software (see the LICENSE.md file). If not, see
                     </if>
 
                     <!-- there should not be any quantity left over after issuance/receipt records, but just make sure -->
-                    <set field="mainIiOut" from="null"/>
                     <if condition="quantityNotBilled &gt; 0">
                         <!-- NOTE: in this case we don't have an assetId -->
-                        <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="mainIiOut"
+                        <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="mainIiOut" out-map-add-to-existing="false"
                                 in-map="[invoiceId:invoiceId, itemTypeEnumId:orderItem.itemTypeEnumId ?: 'ItemProduct',
                                     amount:orderItem.unitAmount, description:orderItem.itemDescription,
                                     quantity:quantityNotBilled, quantityUomId:orderItem.quantityUomId,
@@ -1131,27 +1134,41 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="childOrderItemList" from="orderItem.'Child#mantle.order.OrderItem'"/>
                     <order-map-list list="childOrderItemList"><order-by field-name="orderItemSeqId"/></order-map-list>
                     <iterate list="childOrderItemList" entry="childOrderItem">
-                        <!-- only ship if no productId, that should be shipped before invoiced -->
-                        <if condition="!childOrderItem.productId">
-                            <set field="oibBaseMap" from="[orderId:childOrderItem.orderId,
-                                orderItemSeqId:childOrderItem.orderItemSeqId]"/>
-                            <entity-find entity-name="mantle.order.OrderItemBilling" list="childItemBillingList">
-                                <econdition field-name="orderId" from="childOrderItem.orderId"/>
-                                <econdition field-name="orderItemSeqId" from="childOrderItem.orderItemSeqId"/>
-                            </entity-find>
-                            <if condition="!childItemBillingList">
-                                <!-- TODO: is prorate by quantity needed? bill quantity not billed, prorated by cur vs OrderItem quantity -->
-                                <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="childIiOut"
-                                        in-map="[invoiceId:invoiceId, itemTypeEnumId:(childOrderItem.itemTypeEnumId ?: 'ItemSales'),
-                                            parentItemSeqId:parentInvoiceItemSeqId, amount:childOrderItem.unitAmount,
-                                            description:childOrderItem.itemDescription,
-                                            quantity:((childOrderItem.quantity ?: 1) * (childOrderItem.selectedAmount ?: 1)),
-                                            quantityUomId:childOrderItem.quantityUomId]"/>
-                                <service-call name="create#mantle.order.OrderItemBilling"
-                                        in-map="oibBaseMap + [invoiceId:invoiceId, invoiceItemSeqId:childIiOut.invoiceItemSeqId,
-                                            shipmentId:shipmentId, amount:childOrderItem.unitAmount,
-                                            quantity:((childOrderItem.quantity ?: 1) * (childOrderItem.selectedAmount ?: 1))]"/>
-                            </if>
+                        <!-- only ship if not a product item, that should be shipped before invoiced -->
+                        <if condition="childOrderItem.itemTypeEnumId in productItemTypes">
+                            <log message="Not invoicing child item ${childOrderItemList.orderId}:${childOrderItemList.orderItemSeqId}, has product item type ${childOrderItem.itemTypeEnumId}"/>
+                            <continue/>
+                        </if>
+
+                        <entity-find entity-name="mantle.order.OrderItemBilling" list="childItemBillingList">
+                            <econdition field-name="orderId" from="childOrderItem.orderId"/>
+                            <econdition field-name="orderItemSeqId" from="childOrderItem.orderItemSeqId"/>
+                            <select-field field-name="quantity"/>
+                        </entity-find>
+                        <set field="childBilledQuantity" from="childItemBillingList*.quantity.sum()"/>
+
+                        <set field="childQty" from="(childOrderItem.quantity != null ? childOrderItem.quantity : 1.0) * (childOrderItem.selectedAmount ?: 1.0)"/>
+                        <set field="childQuantityNotBilled" from="childQty - childBilledQuantity"/>
+                        <if condition="childQuantityNotBilled &gt; 0.0">
+                            <!-- prorate by quantity: bill quantity not billed, prorated by cur vs OrderItem quantity -->
+                            <!-- TODO: what about product item with qty > 1 and child item with qty = 1? get into pro-rating by amount??? -->
+                            <!-- TODO: what about multiple child items of the same type, group them for billing? maybe not for discount, etc... -->
+                            <!-- if childQuantityNotBilled greater than item quantityNotBilled then reduce to qty shipped UNLESS full order item qty now shipped (last shipment) -->
+                            <if condition="orderItemQty == allShippedQuantity"><then>
+                                <set field="childQtyToBill" from="childQuantityNotBilled &gt; quantityNotBilled ? quantityNotBilled : childQuantityNotBilled"/>
+                            </then><else>
+                                <set field="childQtyToBill" from="childQuantityNotBilled"/>
+                            </else></if>
+
+                            <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="childIiOut"
+                                    in-map="[invoiceId:invoiceId, itemTypeEnumId:(childOrderItem.itemTypeEnumId ?: 'ItemSales'),
+                                        parentItemSeqId:parentInvoiceItemSeqId, amount:childOrderItem.unitAmount,
+                                        description:childOrderItem.itemDescription, quantity:childQtyToBill,
+                                        quantityUomId:childOrderItem.quantityUomId]"/>
+                            <service-call name="create#mantle.order.OrderItemBilling"
+                                    in-map="[orderId:childOrderItem.orderId, orderItemSeqId:childOrderItem.orderItemSeqId,
+                                        invoiceId:invoiceId, invoiceItemSeqId:childIiOut.invoiceItemSeqId,
+                                        shipmentId:shipmentId, amount:childOrderItem.unitAmount, quantity:childQtyToBill]"/>
                         </if>
                     </iterate>
                 </if>
@@ -1159,9 +1176,6 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- for each order invoice uninvoiced, non-Product OrderItems such as shipping charges, etc... -->
             <!-- do all on first invoice (all unbilled on each shipment for each order)... in the future consider prorating by total on this shipment versus order total -->
-            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
-                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
-            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
             <iterate list="invoiceIdByOrderPartIdMap.entrySet()" entry="invoiceIdByOrderIdEntry">
                 <set field="orderAndPartId" from="invoiceIdByOrderIdEntry.key"/>
                 <set field="orderId" from="orderAndPartId.substring(0, orderAndPartId.indexOf(':'))"/>
@@ -1180,49 +1194,57 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
                 <iterate list="otherOrderItemList" entry="otherOrderItem">
                     <set field="parentInvoiceItemSeqId" from="null"/>
+                    <!-- TODO: handle partial quantity billed, bill remaining qty -->
                     <entity-find entity-name="mantle.order.OrderItemBilling" list="otherItemBillingList">
                         <econdition field-name="orderId" from="otherOrderItem.orderId"/>
                         <econdition field-name="orderItemSeqId" from="otherOrderItem.orderItemSeqId"/>
                     </entity-find>
                     <if condition="!otherItemBillingList">
-                        <!-- is prorate by quantity needed? -->
+                        <set field="otherItemQty" from="(otherOrderItem.quantity != null ? otherOrderItem.quantity : 1.0) * (otherOrderItem.selectedAmount ?: 1.0)"/>
+                        <!-- TODO is prorate by quantity needed? for example pro-rate order level shipping for partial shipment -->
                         <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="iiOut"
                                 in-map="[invoiceId:invoiceId, itemTypeEnumId:otherOrderItem.itemTypeEnumId ?: 'ItemSales',
                                     amount:otherOrderItem.unitAmount, description:otherOrderItem.itemDescription,
-                                    quantity:((otherOrderItem.quantity ?: 1) * (otherOrderItem.selectedAmount ?: 1)),
-                                    quantityUomId:otherOrderItem.quantityUomId]"/>
+                                    quantity:otherItemQty, quantityUomId:otherOrderItem.quantityUomId]"/>
                         <set field="parentInvoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
                         <service-call name="create#mantle.order.OrderItemBilling"
                                 in-map="[orderId:otherOrderItem.orderId, orderItemSeqId:otherOrderItem.orderItemSeqId,
                                     invoiceId:invoiceId, invoiceItemSeqId:iiOut.invoiceItemSeqId,
-                                    shipmentId:shipmentId, amount:otherOrderItem.unitAmount,
-                                    quantity:((otherOrderItem.quantity ?: 1) * (otherOrderItem.selectedAmount ?: 1))]"/>
+                                    shipmentId:shipmentId, amount:otherOrderItem.unitAmount, quantity:otherItemQty]"/>
                     </if>
                     <!-- also invoice child OrderItems (adjustments, etc) -->
                     <set field="childOrderItemList" from="orderItem.'Child#mantle.order.OrderItem'"/>
                     <order-map-list list="childOrderItemList"><order-by field-name="orderItemSeqId"/></order-map-list>
                     <iterate list="childOrderItemList" entry="childOrderItem">
-                        <!-- only ship if no productId, that should be shipped before invoiced -->
-                        <if condition="!childOrderItem.productId">
-                            <set field="oibBaseMap" from="[]"/>
-                            <entity-find entity-name="mantle.order.OrderItemBilling" list="childItemBillingList">
-                                <econdition field-name="orderId" from="childOrderItem.orderId"/>
-                                <econdition field-name="orderItemSeqId" from="childOrderItem.orderItemSeqId"/>
-                            </entity-find>
-                            <if condition="!childItemBillingList">
-                                <!-- TODO: is prorate by quantity needed? bill quantity not billed, prorated by cur vs OrderItem quantity -->
-                                <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="childIiOut"
-                                        in-map="[invoiceId:invoiceId, itemTypeEnumId:(childOrderItem.itemTypeEnumId ?: 'ItemSales'),
+                        <!-- only ship if not a product item, that should be shipped before invoiced -->
+                        <if condition="childOrderItem.itemTypeEnumId in productItemTypes">
+                            <log message="Not invoicing child item ${childOrderItemList.orderId}:${childOrderItemList.orderItemSeqId}, has product item type ${childOrderItem.itemTypeEnumId}"/>
+                            <continue/>
+                        </if>
+
+                        <set field="oibBaseMap" from="[]"/>
+                        <entity-find entity-name="mantle.order.OrderItemBilling" list="childItemBillingList">
+                            <econdition field-name="orderId" from="childOrderItem.orderId"/>
+                            <econdition field-name="orderItemSeqId" from="childOrderItem.orderItemSeqId"/>
+                            <select-field field-name="quantity"/>
+                        </entity-find>
+                        <set field="childBilledQuantity" from="childItemBillingList*.quantity.sum()"/>
+
+                        <set field="childQty" from="(childOrderItem.quantity != null ? childOrderItem.quantity : 1.0) * (childOrderItem.selectedAmount ?: 1.0)"/>
+                        <set field="quantityNotBilled" from="childQty - childBilledQuantity"/>
+                        <if condition="quantityNotBilled &gt; 0.0">
+                            <!-- TODO: is prorate by quantity needed? maybe not because we'll billing the whole item -->
+                            <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="childIiOut"
+                                    in-map="[invoiceId:invoiceId, itemTypeEnumId:(childOrderItem.itemTypeEnumId ?: 'ItemSales'),
                                             parentItemSeqId:parentInvoiceItemSeqId, amount:childOrderItem.unitAmount,
                                             description:childOrderItem.itemDescription,
-                                            quantity:((childOrderItem.quantity ?: 1) * (childOrderItem.selectedAmount ?: 1)),
+                                            quantity:quantityNotBilled,
                                             quantityUomId:childOrderItem.quantityUomId]"/>
-                                <service-call name="create#mantle.order.OrderItemBilling"
-                                        in-map="[orderId:childOrderItem.orderId, orderItemSeqId:childOrderItem.orderItemSeqId,
+                            <service-call name="create#mantle.order.OrderItemBilling"
+                                    in-map="[orderId:childOrderItem.orderId, orderItemSeqId:childOrderItem.orderItemSeqId,
                                             invoiceId:invoiceId, invoiceItemSeqId:childIiOut.invoiceItemSeqId,
                                             shipmentId:shipmentId, amount:childOrderItem.unitAmount,
-                                            quantity:((childOrderItem.quantity ?: 1) * (childOrderItem.selectedAmount ?: 1))]"/>
-                            </if>
+                                            quantity:quantityNotBilled]"/>
                         </if>
                     </iterate>
                 </iterate>
