@@ -177,11 +177,16 @@ along with this software (see the LICENSE.md file). If not, see
                 <parameter name="orderId"/>
                 <parameter name="orderItemSeqId"/>
                 <parameter name="itemTypeEnumId"/>
+                <parameter name="isProductItemType" type="Boolean"/>
                 <parameter name="productId"/>
-                <parameter name="orderQuantity" type="BigDecimal"/>
+
                 <parameter name="invoiceQuantity" type="BigDecimal"/>
-                <parameter name="returnQuantity" type="BigDecimal"/>
+                <parameter name="returnedQuantity" type="BigDecimal"/>
                 <parameter name="returnableQuantity" type="BigDecimal"/>
+
+                <parameter name="invoiceTotal" type="BigDecimal"/>
+                <parameter name="returnedTotal" type="BigDecimal"/>
+                <parameter name="returnableTotal" type="BigDecimal"/>
             </parameter></parameter>
         </out-parameters>
         <actions>
@@ -192,32 +197,51 @@ along with this software (see the LICENSE.md file). If not, see
                 lookBackTs = new java.sql.Timestamp(lookBackCal.getTimeInMillis())
             </script>
 
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
             <!-- Match customerPartyId, vendorPartyId (to OrderPart), include (invoiced items (physical shipped or not); shipped items/quantities), exclude returned -->
             <entity-find entity-name="mantle.order.return.ReturnableOrderItemView" list="returnableItems">
                 <econdition field-name="customerPartyId" from="returnHeader.customerPartyId"/>
                 <econdition field-name="vendorPartyId" from="returnHeader.vendorPartyId"/>
                 <econdition field-name="placedDate" operator="greater-equals" from="lookBackTs"/>
-                <select-field field-name="orderId"/><select-field field-name="orderItemSeqId"/>
-                <select-field field-name="itemTypeEnumId"/><select-field field-name="productId"/>
-                <select-field field-name="quantity"/><select-field field-name="invoiceQuantity"/>
-                <order-by field-name="orderId"/><order-by field-name="orderItemSeqId"/>
+                <select-field field-name="orderId,orderItemSeqId,itemTypeEnumId,productId,quantity,invoiceQuantity,invoiceAmount"/>
+                <order-by field-name="orderId,orderItemSeqId"/>
             </entity-find>
 
             <set field="orderItemInfoList" from="[]"/>
-            <iterate list="returnableItems" entry="returnableItem">
+            <iterate list="returnableItems" entry="item">
+                <if condition="item.invoiceQuantity == 0.0"><continue/></if>
+
+                <set field="isProductItemType" from="item.itemTypeEnumId in productItemTypes"/>
+
+                <set field="returnedQuantity" from="0.0"/>
+                <set field="returnedTotal" from="0.0"/>
                 <entity-find entity-name="mantle.order.return.ReturnItemQuantity" list="riqList">
-                    <econdition field-name="orderId" from="returnableItem.orderId"/>
-                    <econdition field-name="orderItemSeqId" from="returnableItem.orderItemSeqId"/>
+                    <econdition field-name="orderId" from="item.orderId"/>
+                    <econdition field-name="orderItemSeqId" from="item.orderItemSeqId"/>
                     <econdition field-name="statusId" operator="not-equals" value="ReturnCancelled"/>
-                    <select-field field-name="returnQuantity"/>
+                    <select-field field-name="returnQuantity,responseAmount"/>
                 </entity-find>
-                <set field="returnQuantity" from="(riqList ? (riqList[0].returnQuantity ?: 0) : 0) as BigDecimal"/>
-                <set field="returnableQuantity" from="(returnableItem.invoiceQuantity ?: 0) - returnQuantity"/>
-                <if condition="returnableQuantity > 0">
-                    <script>orderItemInfoList.add([orderId:returnableItem.orderId, orderItemSeqId:returnableItem.orderItemSeqId,
-                                itemTypeEnumId:returnableItem.itemTypeEnumId, productId:returnableItem.productId,
-                                orderQuantity:returnableItem.quantity, invoiceQuantity:returnableItem.invoiceQuantity,
-                                returnQuantity:returnQuantity, returnableQuantity:returnableQuantity])</script>
+                <iterate list="riqList" entry="riq">
+                    <set field="retQuantity" from="riq.returnQuantity != null ? riq.returnQuantity : 1.0"/>
+                    <set field="returnedQuantity" from="returnedQuantity + retQuantity"/>
+                    <set field="returnedTotal" from="returnedTotal + (retQuantity * (riq.responseAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                </iterate>
+
+                <set field="invoiceQuantity" from="item.invoiceQuantity != null ? item.invoiceQuantity : 1.0"/>
+                <set field="returnableQuantity" from="invoiceQuantity - returnedQuantity"/>
+
+                <set field="invoiceTotal" from="(invoiceQuantity * (item.invoiceAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <set field="returnableTotal" from="invoiceTotal - returnedTotal"/>
+
+                <if condition="returnableQuantity &gt; 0.0 || (!isProductItemType &amp;&amp; returnableTotal &gt; 0.0)">
+                    <script>orderItemInfoList.add([orderId:item.orderId, orderItemSeqId:item.orderItemSeqId,
+                            itemTypeEnumId:item.itemTypeEnumId, isProductItemType:isProductItemType, productId:item.productId,
+                            invoiceQuantity:invoiceQuantity, invoiceTotal:invoiceTotal,
+                            returnedQuantity:returnedQuantity, returnableQuantity:returnableQuantity,
+                            returnedTotal:returnedTotal, returnableTotal:returnableTotal])</script>
                 </if>
             </iterate>
         </actions>
@@ -227,27 +251,60 @@ along with this software (see the LICENSE.md file). If not, see
         <description>Calculate returnable quantity for an OrderItem with pre-queried OrderItemBilling and ReturnItem
             lists, which can be lists for an entire order (ie filtered before calc) and if are null are queried here.</description>
         <in-parameters>
-            <parameter name="orderId" required="true"/><parameter name="orderItemSeqId" required="true"/>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderItemSeqId" required="true"/>
+            <parameter name="orderItem" type="Map"/>
             <parameter name="orderItemBillingList" type="List"><parameter name="oib" type="Map"/></parameter>
             <parameter name="returnItemList" type="List"><parameter name="returnItem" type="Map"/></parameter>
         </in-parameters>
         <out-parameters>
+            <parameter name="isProductItemType" type="Boolean"/>
+
+            <parameter name="orderQuantity" type="BigDecimal"/>
             <parameter name="invoiceQuantity" type="BigDecimal"/>
-            <parameter name="returnQuantity" type="BigDecimal"/>
+            <parameter name="returnedQuantity" type="BigDecimal"/>
             <parameter name="returnableQuantity" type="BigDecimal"/>
+
+            <parameter name="orderTotal" type="BigDecimal"/>
+            <parameter name="invoiceTotal" type="BigDecimal"/>
+            <parameter name="returnedTotal" type="BigDecimal"/>
+            <parameter name="returnableTotal" type="BigDecimal"/>
         </out-parameters>
         <actions>
+            <if condition="orderItem == null"><entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/></if>
+            <if condition="orderItem == null"><return error="true" message="Could not find Order Item ${orderId}:${orderItemSeqId}"/></if>
+
+            <set field="orderQuantity" from="orderItem.quantity != null ? orderItem.quantity : 1.0"/>
+            <set field="orderTotal" from="(orderQuantity * (orderItem.unitAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+            <set field="isProductItemType" from="orderItem.itemTypeEnumId in productItemTypes"/>
+
             <set field="invoiceQuantity" from="0"/>
+            <set field="invoiceTotal" from="0.0"/>
             <if condition="orderItemBillingList == null">
                 <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
                     <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
             </if>
             <iterate list="orderItemBillingList" entry="oib">
+                <!-- check for when orderItemBillingList is passed in -->
                 <if condition="oib.orderId != orderId || oib.orderItemSeqId != orderItemSeqId"><continue/></if>
-                <set field="invoiceQuantity" from="invoiceQuantity + oib.quantity"/>
+                <if condition="oib.quantity == 0.0"><continue/></if>
+
+                <set field="invQuantity" from="oib.quantity != null ? oib.quantity : 1.0"/>
+                <set field="invoiceQuantity" from="invoiceQuantity + invQuantity"/>
+
+                <entity-find-one entity-name="mantle.account.invoice.InvoiceItem" value-field="invoiceItem">
+                    <field-map field-name="invoiceId" from="oib.invoiceId"/>
+                    <field-map field-name="invoiceItemSeqId" from="oib.invoiceItemSeqId"/>
+                </entity-find-one>
+                <set field="invoiceTotal" from="invoiceTotal + (invQuantity * (invoiceItem?.amount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
             </iterate>
 
-            <set field="returnQuantity" from="0"/>
+            <set field="returnedQuantity" from="0.0"/>
+            <set field="returnedTotal" from="0.0"/>
             <if condition="returnItemList == null">
                 <entity-find entity-name="mantle.order.return.ReturnItem" list="returnItemList">
                     <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/>
@@ -256,11 +313,16 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
             </if>
             <iterate list="returnItemList" entry="returnItem">
+                <!-- check for when orderItemBillingList is passed in -->
                 <if condition="returnItem.orderId != orderId || returnItem.orderItemSeqId != orderItemSeqId"><continue/></if>
-                <set field="returnQuantity" from="returnQuantity + returnItem.returnQuantity"/>
+
+                <set field="retQuantity" from="riq.returnQuantity != null ? riq.returnQuantity : 1.0"/>
+                <set field="returnedQuantity" from="returnedQuantity + retQuantity"/>
+                <set field="returnedTotal" from="returnedTotal + (retQuantity * (riq.responseAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
             </iterate>
 
-            <set field="returnableQuantity" from="invoiceQuantity - returnQuantity"/>
+            <set field="returnableQuantity" from="invoiceQuantity - returnedQuantity"/>
+            <set field="returnableTotal" from="invoiceTotal - returnedTotal"/>
         </actions>
     </service>
     <service verb="add" noun="OrderItemToReturn">
@@ -272,31 +334,31 @@ along with this software (see the LICENSE.md file). If not, see
                 <exclude field-name="statusId"/><exclude field-name="itemTypeEnumId"/><exclude field-name="productId"/>
                 <exclude field-name="returnQuantity"/><exclude field-name="receivedQuantity"/>
                 <exclude field-name="replacementOrderId"/><exclude field-name="refundPaymentId"/>
-                <exclude field-name="finAccountTransId"/>
-                <exclude field-name="responseAmount"/><exclude field-name="responseDate"/></auto-parameters>
+                <exclude field-name="finAccountTransId"/><exclude field-name="responseDate"/></auto-parameters>
             <parameter name="statusId" default-value="ReturnCreated"/>
             <parameter name="returnQuantity" type="BigDecimal" required="true"/>
             <parameter name="returnReasonEnumId" required="true"/>
             <parameter name="returnResponseEnumId" required="true"/>
+            <parameter name="responseAmount"><description>If specified and OrderItem is not a product item checks returnable against
+                total amount (quantity * amount), otherwise checks against quantity only</description></parameter>
         </in-parameters>
         <out-parameters><parameter name="returnItemSeqId"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/>
-            <if condition="!orderItem"><return error="true" message="Could not find Order Item [${orderId}:${orderItemSeqId}]"/></if>
+            <if condition="orderItem == null"><return error="true" message="Could not find Order Item ${orderId}:${orderItemSeqId}"/></if>
 
-            <!-- make sure returnQuantity is not greater than returnable amount -->
-            <entity-find entity-name="mantle.order.OrderItemBillingQuantity" list="oibqList">
-                <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/><select-field field-name="quantity"/></entity-find>
-            <set field="billedQuantity" from="oibqList?.getAt(0)?.quantity ?: 0.0"/>
-            <entity-find entity-name="mantle.order.return.ReturnItemQuantity" list="riqList">
-                <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/>
-                <econdition field-name="statusId" operator="not-equals" value="ReturnCancelled"/>
-                <select-field field-name="returnQuantity"/>
-            </entity-find>
-            <set field="returnedQuantity" from="riqList ? (riqList[0].returnQuantity ?: 0) : 0"/>
+            <service-call name="mantle.order.ReturnServices.calculate#OrderItemReturnable" in-map="context" out-map="context"/>
 
-            <if condition="(returnedQuantity + returnQuantity) &gt; billedQuantity">
-                <return error="true" message="Tried to return more than is returnable; quantity billed: ${billedQuantity}, already returned: ${returnedQuantity}, tried to return: ${returnQuantity}"/></if>
+            <if condition="isProductItemType"><then>
+                <!-- make sure returnQuantity + returnedQuantity is not greater than invoiceQuantity -->
+                <if condition="(returnedQuantity + returnQuantity) &gt; invoiceQuantity">
+                    <return error="true" message="Tried to return more than is returnable; quantity billed ${invoiceQuantity}, already returned ${returnedQuantity}, tried to return ${returnQuantity}"/></if>
+            </then><else>
+                <!-- make sure returnTotal + returnedTotal is not greater than invoiceTotal -->
+                <set field="returnTotal" from="((returnQuantity != null ? returnQuantity : 1.0) * (responseAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <if condition="(returnedTotal + returnTotal) &gt; invoiceTotal">
+                    <return error="true" message="Tried to return total more than is returnable for non-product item; total billed ${ec.l10n.format(invoiceTotal, '#,##0.00')}, already returned ${ec.l10n.format(returnedTotal, '#,##0.00')}, tried to return ${ec.l10n.format(returnTotal, '#,##0.00')}"/></if>
+            </else></if>
 
             <set field="itemTypeEnumId" from="orderItem.itemTypeEnumId"/>
             <set field="productId" from="orderItem.productId"/>
