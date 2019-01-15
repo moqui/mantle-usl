@@ -348,6 +348,7 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="orderItem == null"><return error="true" message="Could not find Order Item ${orderId}:${orderItemSeqId}"/></if>
 
             <service-call name="mantle.order.ReturnServices.calculate#OrderItemReturnable" in-map="context" out-map="context"/>
+            <set field="returnTotal" from="((returnQuantity != null ? returnQuantity : 1.0) * (responseAmount ?: orderItem.unitAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
 
             <if condition="isProductItemType"><then>
                 <!-- make sure returnQuantity + returnedQuantity is not greater than invoiceQuantity -->
@@ -355,16 +356,58 @@ along with this software (see the LICENSE.md file). If not, see
                     <return error="true" message="Tried to return more than is returnable; quantity billed ${invoiceQuantity}, already returned ${returnedQuantity}, tried to return ${returnQuantity}"/></if>
             </then><else>
                 <!-- make sure returnTotal + returnedTotal is not greater than invoiceTotal -->
-                <set field="returnTotal" from="((returnQuantity != null ? returnQuantity : 1.0) * (responseAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                 <if condition="(returnedTotal + returnTotal) &gt; invoiceTotal">
                     <return error="true" message="Tried to return total more than is returnable for non-product item; total billed ${ec.l10n.format(invoiceTotal, '#,##0.00')}, already returned ${ec.l10n.format(returnedTotal, '#,##0.00')}, tried to return ${ec.l10n.format(returnTotal, '#,##0.00')}"/></if>
             </else></if>
 
+            <!-- set some general fields, create the ReturnItem -->
             <set field="itemTypeEnumId" from="orderItem.itemTypeEnumId"/>
             <set field="productId" from="orderItem.productId"/>
             <if condition="!description"><set field="description" from="orderItem.itemDescription"/></if>
-
             <service-call name="create#mantle.order.return.ReturnItem" in-map="context" out-map="context"/>
+
+            <!-- create prorated return items for non-product order child items -->
+            <!-- do this even if current item is a non-product item to handle things like tax on shipping -->
+            <set field="childOrderItemList" from="orderItem.'Child#mantle.order.OrderItem'"/>
+            <order-map-list list="childOrderItemList"><order-by field-name="orderItemSeqId"/></order-map-list>
+
+            <iterate list="childOrderItemList" entry="childOrderItem">
+                <service-call name="mantle.order.ReturnServices.calculate#OrderItemReturnable" out-map="childOut"
+                        in-map="[orderId:childOrderItem.orderId, orderItemSeqId:childOrderItem.orderItemSeqId, orderItem:childOrderItem]"/>
+                <!-- only add child to return if not a product item -->
+                <if condition="childOut.isProductItemType"><continue/></if>
+
+                <!-- if parent is a product item prorate on quantity, otherwise prorate on total amount -->
+                <!-- NOTE what if OrderItem not fully invoiced? for that reason prorate based on invoice values -->
+                <set field="childRetAmount" from="0.0"/>
+                <if condition="isProductItemType"><then>
+                    <if condition="returnQuantity &gt;= (invoiceQuantity - returnedQuantity)"><then>
+                        <!-- all returned, use remaining child item amount -->
+                        <set field="childRetAmount" from="childOut.returnableTotal"/>
+                    </then><else>
+                        <set field="parentRatio" from="(returnQuantity as BigDecimal).divide(invoiceQuantity as BigDecimal, 6, BigDecimal.ROUND_HALF_EVEN)"/>
+                        <set field="childRetAmount" from="(childOut.invoiceTotal * parentRatio).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                    </else></if>
+                </then><else>
+                    <!-- NOTE that quantities should always be positive but amounts are negative for discounts so totals may be negative -->
+                    <if condition="returnTotal.abs() &gt;= (invoiceTotal - returnedTotal).abs()"><then>
+                        <!-- all returned, use remaining child item amount -->
+                        <set field="childRetAmount" from="childOut.returnableTotal"/>
+                    </then><else>
+                        <set field="parentRatio" from="(returnTotal as BigDecimal).divide(invoiceTotal as BigDecimal, 6, BigDecimal.ROUND_HALF_EVEN).abs()"/>
+                        <set field="childRetAmount" from="(childOut.invoiceTotal * parentRatio).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                    </else></if>
+                </else></if>
+
+                <!-- if there is a child item return amount (negative or positive) create a ReturnItem for it -->
+                <if condition="childRetAmount != 0.0">
+                    <service-call name="create#mantle.order.return.ReturnItem" in-map="[returnId:returnId,
+                            statusId:statusId, returnReasonEnumId:returnReasonEnumId, returnResponseEnumId:returnResponseEnumId,
+                            orderId:childOrderItem.orderId, orderItemSeqId:childOrderItem.orderItemSeqId,
+                            itemTypeEnumId:childOrderItem.itemTypeEnumId, description:orderItem.itemDescription,
+                            returnQuantity:1.0, responseAmount:childRetAmount]"/>
+                </if>
+            </iterate>
         </actions>
     </service>
 
