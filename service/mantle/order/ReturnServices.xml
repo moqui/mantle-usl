@@ -318,7 +318,7 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <set field="retQuantity" from="returnItem.returnQuantity != null ? returnItem.returnQuantity : 1.0"/>
                 <set field="returnedQuantity" from="returnedQuantity + retQuantity"/>
-                <set field="returnedTotal" from="returnedTotal + (retQuantity * (returnItem.responseAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <set field="returnedTotal" from="returnedTotal + (retQuantity * (returnItem.returnPrice ?: orderItem.unitAmount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
             </iterate>
 
             <set field="returnableQuantity" from="invoiceQuantity - returnedQuantity"/>
@@ -333,8 +333,8 @@ along with this software (see the LICENSE.md file). If not, see
             <auto-parameters entity-name="mantle.order.return.ReturnItem" include="nonpk">
                 <exclude field-name="statusId"/><exclude field-name="itemTypeEnumId"/><exclude field-name="productId"/>
                 <exclude field-name="returnQuantity"/><exclude field-name="receivedQuantity"/>
-                <exclude field-name="replacementOrderId"/><exclude field-name="refundPaymentId"/>
-                <exclude field-name="finAccountTransId"/><exclude field-name="responseDate"/></auto-parameters>
+                <exclude field-name="replacementOrderId"/><exclude field-name="refundPaymentId"/><exclude field-name="finAccountTransId"/>
+                <exclude field-name="responseAmount"/><exclude field-name="responseDate"/></auto-parameters>
             <parameter name="statusId" default-value="ReturnCreated"/>
             <parameter name="returnQuantity" type="BigDecimal" required="true"/>
             <parameter name="returnReasonEnumId" required="true"/>
@@ -346,8 +346,8 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="orderItem == null"><return error="true" message="Could not find Order Item ${orderId}:${orderItemSeqId}"/></if>
 
             <service-call name="mantle.order.ReturnServices.calculate#OrderItemReturnable" in-map="context" out-map="context"/>
-            <set field="responseAmount" from="responseAmount ?: orderItem.unitAmount ?: 0.0"/>
-            <set field="returnTotal" from="((returnQuantity != null ? returnQuantity : 1.0) * responseAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+            <set field="returnPrice" from="returnPrice ?: orderItem.unitAmount ?: 0.0"/>
+            <set field="returnTotal" from="((returnQuantity != null ? returnQuantity : 1.0) * returnPrice).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
 
             <if condition="isProductItemType"><then>
                 <!-- make sure returnQuantity + returnedQuantity is not greater than invoiceQuantity -->
@@ -400,11 +400,11 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <!-- if there is a child item return amount (negative or positive) create a ReturnItem for it -->
                 <if condition="childRetAmount != 0.0">
-                    <service-call name="create#mantle.order.return.ReturnItem" in-map="[returnId:returnId,
+                    <service-call name="create#mantle.order.return.ReturnItem" in-map="[returnId:returnId, parentItemSeqId:returnItemSeqId,
                             statusId:statusId, returnReasonEnumId:returnReasonEnumId, returnResponseEnumId:returnResponseEnumId,
                             orderId:childOrderItem.orderId, orderItemSeqId:childOrderItem.orderItemSeqId,
-                            itemTypeEnumId:childOrderItem.itemTypeEnumId, description:orderItem.itemDescription,
-                            returnQuantity:1.0, responseAmount:childRetAmount]"/>
+                            itemTypeEnumId:childOrderItem.itemTypeEnumId, description:childOrderItem.itemDescription,
+                            returnQuantity:1.0, returnPrice:childRetAmount]"/>
                 </if>
             </iterate>
         </actions>
@@ -591,7 +591,8 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="customerOrgInternal"><return message="Cannot process return responses for supplier purchase return"/></if>
 
             <entity-find entity-name="mantle.order.return.ReturnItem" list="returnItemList" for-update="true">
-                <econdition field-name="returnId"/><econdition field-name="returnItemSeqId" ignore-if-empty="true"/>
+                <econdition field-name="returnId"/>
+                <econdition field-name="returnItemSeqId" ignore-if-empty="true"/>
             </entity-find>
             <!-- These more complex conditions won't work with transaction cache, so filter manually after find:
                 <econdition field-name="responseDate" from="null"/>
@@ -622,14 +623,16 @@ along with this software (see the LICENSE.md file). If not, see
                     (returnItem.responseImmediate == 'Y' &amp;&amp; returnItem.statusId in ['ReturnApproved', 'ReturnShipped'])"/>
                 <if condition="!validStatus"><continue/></if>
 
+                <!-- TODO: if only partial quantity received (receivedQuantity < returnQuantity) then prorate product item amounts and child item amounts -->
+
                 <!-- see if the invoice for returned order item is not yet paid, if so cancel/credit instead of credit or refund -->
                 <if condition="returnItem.returnResponseEnumId in ['RrspCredit', 'RrspRefund']">
                     <entity-find-related-one value-field="returnItem" relationship-name="orderItem" to-value-field="orderItem"/>
                     <set field="itemQuantity" from="returnItem.receivedQuantity ?: returnItem.returnQuantity"/>
-                    <set field="amountRemaining" from="returnItem.responseAmount ?: (itemQuantity ?: 0) * (orderItem?.unitAmount ?: 0)"/>
+                    <set field="amountRemaining" from="returnItem.responseAmount ?: ((itemQuantity ?: 0.0) * (returnItem.returnPrice ?: orderItem?.unitAmount ?: 0.0))"/>
                     <if condition="!amountRemaining">
                         <message>Return Item ${returnId}:${returnItem.returnItemSeqId} has no amount, not processing credit response</message>
-                        <script>remainingAmountBySeqId.put(returnItem.returnItemSeqId, 0)</script>
+                        <script>remainingAmountBySeqId.put(returnItem.returnItemSeqId, 0.0)</script>
                         <continue/>
                     </if>
 
@@ -638,13 +641,13 @@ along with this software (see the LICENSE.md file). If not, see
                         <econdition field-name="orderItemSeqId" from="returnItem.orderItemSeqId"/></entity-find>
                     <iterate list="oibList" entry="oib">
                         <set field="invoiceItem" from="oib.invoiceItem"/>
-                        <set field="iiTotal" from="(oib.quantity ?: 0) * (invoiceItem.amount ?: 0)"/>
-                        <if condition="iiTotal == 0"><continue/></if>
+                        <set field="iiTotal" from="(oib.quantity ?: 0.0) * (invoiceItem.amount ?: 0.0)"/>
+                        <if condition="iiTotal == 0.0"><continue/></if>
                         <set field="adjustAmount" from="amountRemaining &gt; iiTotal ? iiTotal : amountRemaining"/>
 
                         <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal"
                                 out-map="invTotal" out-map-add-to-existing="false" in-map="[invoiceId:oib.invoiceId]"/>
-                        <if condition="invTotal.unpaidTotal &gt; 0">
+                        <if condition="invTotal.unpaidTotal &gt; 0.0">
                             <!-- adjust by full oib/ii total if unpaidTotal is enough, otherwise just by unpaid total -->
                             <set field="adjustAmount" from="invTotal.unpaidTotal &gt; adjustAmount ? adjustAmount : invTotal.unpaidTotal"/>
                             <!-- call invoice adjust, subtract adjustAmount -->
@@ -655,7 +658,7 @@ along with this software (see the LICENSE.md file). If not, see
                                         parentInvoiceItemSeqId:oib.invoiceItemSeqId, itemTypeEnumId:'ItemReturnAdjust']"/>
                             <!-- reduce amountRemaining -->
                             <set field="amountRemaining" from="amountRemaining - adjustAmount"/>
-                            <if condition="amountRemaining == 0"><break/></if>
+                            <if condition="amountRemaining == 0.0"><break/></if>
                         </if>
                     </iterate>
 
@@ -676,7 +679,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- Customer Credit (Financial Account Transaction); do one TX for each item -->
             <iterate list="creditItemList" entry="returnItem">
                 <set field="itemAmount" from="remainingAmountBySeqId.get(returnItem.returnItemSeqId)"/>
-                <if condition="itemAmount == 0"><continue/></if>
+                <if condition="itemAmount == 0.0"><continue/></if>
 
                 <set field="finAccountId" from="returnHeader.finAccountId"/>
                 <if condition="!finAccountId">
@@ -699,11 +702,11 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- Refund (Payment); consolidate for checks -->
             <if condition="refundItemList">
-                <set field="checkAmount" from="0"/>
+                <set field="checkAmount" from="0.0"/>
                 <set field="checkItemList" from="[]"/>
                 <iterate list="refundItemList" entry="returnItem">
                     <set field="itemAmount" from="remainingAmountBySeqId.get(returnItem.returnItemSeqId)"/>
-                    <if condition="itemAmount == 0"><continue/></if>
+                    <if condition="itemAmount == 0.0"><continue/></if>
 
                     <!-- TODO: handle CC refunds, other paymentInstrumentEnumId based on original payment method or ReturnHeader.paymentMethodId -->
                     <set field="checkAmount" from="checkAmount + itemAmount"/>
@@ -749,7 +752,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="itemQuantity" from="returnItem.receivedQuantity ?: returnItem.returnQuantity"/>
 
                     <service-call name="mantle.order.OrderServices.add#OrderProductQuantity"
-                            in-map="[orderId:orderId, productId:returnItem.productId, quantity:itemQuantity, unitAmount:0]"/>
+                            in-map="[orderId:orderId, productId:returnItem.productId, quantity:itemQuantity, unitAmount:0.0]"/>
 
                     <set field="returnItem.replacementOrderId" from="orderId"/>
                     <set field="returnItem.responseDate" from="ec.user.nowTimestamp"/>
