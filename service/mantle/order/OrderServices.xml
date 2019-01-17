@@ -70,6 +70,7 @@ General Order Placement and eCommerce Usage
                 <set field="currencyUomId" from="currencyUomId ?: productStore?.defaultCurrencyUomId"/>
                 <set field="salesChannelEnumId" from="salesChannelEnumId ?: productStore?.defaultSalesChannelEnumId"/>
                 <set field="facilityId" from="facilityId ?: productStore?.inventoryFacilityId"/>
+                <set field="reservationAutoEnumId" from="reservationAutoEnumId ?: productStore?.reservationAutoEnumId"/>
 
                 <!-- Customer - Bill To: set from store if set there, special case for drop-ship channel stores -->
                 <entity-find entity-name="mantle.product.store.ProductStoreParty" list="storeBillToList">
@@ -108,6 +109,14 @@ General Order Placement and eCommerce Usage
                     <entity-find-one entity-name="mantle.party.Party" value-field="customerParty">
                         <field-map field-name="partyId" from="customerPartyId"/></entity-find-one>
                     <set field="shippingInstructions" from="customerParty?.shippingInstructions"/>
+                </if>
+
+                <!-- if customer has a CustomerRequireSign setting use that for OrderPart.signatureRequiredEnumId -->
+                <if condition="!signatureRequiredEnumId">
+                    <set field="signReqSettingValue" from="ec.service.sync().name('mantle.party.PartyServices.get#PartySettingValue')
+                        .parameter('partySettingTypeId', 'CustomerRequireSign').parameter('partyId', customerPartyId).call()?.get('settingValue')"/>
+                    <if condition="signReqSettingValue &amp;&amp; signReqSettingValue != 'PsrNone'">
+                        <set field="signatureRequiredEnumId" from="signReqSettingValue"/></if>
                 </if>
             </if>
 
@@ -885,7 +894,9 @@ General Order Placement and eCommerce Usage
                 <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
                     <econdition field-name="orderId"/>
                     <econdition field-name="orderPartSeqId" ignore-if-empty="true"/>
-                    <order-by field-name="orderItemSeqId"/>
+                    <econdition field-name="productId" operator="is-not-null"/>
+                    <!-- order by productId to avoid deadlocks -->
+                    <order-by field-name="productId"/>
                 </entity-find>
 
                 <set field="allInventoryAvailable" from="true"/>
@@ -1264,7 +1275,9 @@ General Order Placement and eCommerce Usage
             <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
                 <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
             <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
-            <if condition="!(orderItem.itemTypeEnumId in productItemTypes)"><return/></if>
+            <if condition="!(orderItem.itemTypeEnumId in productItemTypes)">
+                <return type="warning" message="Item ${orderItemSeqId} is not a product type item, not cancelling"/>
+            </if>
 
             <!-- check quantity issued -->
             <if condition="fullAssetIssuanceList"><then>
@@ -1281,7 +1294,8 @@ General Order Placement and eCommerce Usage
             <set field="hasIssuedQuantity" from="itemQuantityIssued &gt; 0.0"/>
 
             <!-- determine quantity to cancel -->
-            <set field="notIssuedQuantity" from="orderItem.quantity - itemQuantityIssued"/>
+            <set field="itemQuantity" from="orderItem.quantity != null ? orderItem.quantity : 1.0"/>
+            <set field="notIssuedQuantity" from="itemQuantity - itemQuantityIssued"/>
             <if condition="cancelQuantity"><then>
                 <if condition="cancelQuantity &gt; notIssuedQuantity"><then>
                     <set field="quantityCancelled" from="notIssuedQuantity"/>
@@ -1293,12 +1307,37 @@ General Order Placement and eCommerce Usage
                 <set field="quantityCancelled" from="notIssuedQuantity"/>
             </else></if>
 
-            <if condition="!quantityCancelled"><return message=""/></if>
+            <if condition="!quantityCancelled"><return/></if>
 
             <!-- update the OrderItem -->
             <service-call name="update#mantle.order.OrderItem" in-map="[orderId:orderId,
                         orderItemSeqId:orderItem.orderItemSeqId, quantityCancelled:quantityCancelled,
-                        quantity:(orderItem.quantity - quantityCancelled)]"/>
+                        quantity:(itemQuantity - quantityCancelled)]"/>
+
+            <!-- adjust child items (usually discount and tax) for new quantity -->
+            <!-- NOTE this is simpler than other prorating because it is only done once, then the item is either completed if partially filled or cancelled otherwise -->
+            <!-- NOTE skip discounts if isPromo=Y? those will be handled by order update triggers, if enabled; maybe best to calc here and disable promo calc (are disabled by default for orders Approved, etc) -->
+            <if condition="itemQuantity == quantityCancelled"><then>
+                <set field="childCancelRatio" from="1.0"/>
+            </then><else>
+                <set field="childCancelRatio" from="(quantityCancelled as BigDecimal).divide(itemQuantity as BigDecimal, 6, BigDecimal.ROUND_HALF_EVEN)"/>
+            </else></if>
+            <set field="childOrderItemList" from="orderItem.'Child#mantle.order.OrderItem'"/>
+            <order-map-list list="childOrderItemList"><order-by field-name="orderItemSeqId"/></order-map-list>
+            <iterate list="childOrderItemList" entry="childOrderItem">
+                <if condition="childOrderItem.quantity == 0.0 || childOrderItem.unitAmount == 0.0"><continue/></if>
+                <if condition="childOrderItem.quantity == itemQuantity"><then>
+                    <!-- if child qty == parent qty no need to prorate, just adjust quantities to match -->
+                    <service-call name="update#mantle.order.OrderItem" in-map="[orderId:orderId,
+                        orderItemSeqId:childOrderItem.orderItemSeqId, quantityCancelled:quantityCancelled,
+                        quantity:(itemQuantity - quantityCancelled)]"/>
+                </then><else>
+                    <!-- quantity doesn't match, leave quantity alone and prorate unitAmount -->
+                    <set field="newUnitAmount" from="childOrderItem.unitAmount - (childCancelRatio as BigDecimal * childOrderItem.unitAmount as BigDecimal).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                    <service-call name="update#mantle.order.OrderItem" in-map="[orderId:orderId,
+                        orderItemSeqId:childOrderItem.orderItemSeqId, unitAmount:newUnitAmount]"/>
+                </else></if>
+            </iterate>
 
             <!-- update or remove ShipmentItemSource records -->
             <if condition="fullShipmentItemSourceList"><then>
@@ -1357,6 +1396,7 @@ General Order Placement and eCommerce Usage
                     <entity-find-count entity-name="mantle.order.OrderItem" count-field="partItemQtyOverZeroCount">
                         <econdition field-name="orderId"/>
                         <econdition field-name="orderPartSeqId" from="orderItem.orderPartSeqId"/>
+                        <econdition field-name="itemTypeEnumId" operator="in" from="productItemTypes"/>
                         <econdition field-name="quantity" operator="greater" from="0.0"/>
                     </entity-find-count>
                     <if condition="partItemQtyOverZeroCount == 0"><then>
@@ -1600,10 +1640,12 @@ General Order Placement and eCommerce Usage
 
             <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/></if>
             <if condition="orderHeader.productStoreId">
+                <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart" for-update="true"/>
+                <if condition="orderPart.statusId in ['OrderApproved', 'OrderSent', 'OrderCompleted', 'OrderRejected', 'OrderCancelled']">
+                    <return type="warning" message="Not updating promotions, shipping, or tax for order in status ${orderPart.status?.description}"/></if>
+
                 <!-- set flag in context root to avoid recursive triggers -->
                 <script>ec.context.getSharedMap().put(sharedFlagKey, true)</script>
-
-                <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart" for-update="true"/>
 
                 <!-- Apply Promotions -->
                 <if condition="!'Y'.equals(orderPart.disablePromotions)">

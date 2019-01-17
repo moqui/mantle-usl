@@ -247,14 +247,33 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="productStore.reservationOrderEnumId == 'AsResOrdNoRes'"><return/></if>
             </else></if>
 
-            <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
-                <econdition field-name="orderId"/>
-                <order-by field-name="orderItemSeqId"/>
-            </entity-find>
-            <iterate list="orderItemList" entry="orderItem">
-                <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
-                        in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, productStore:productStore]"/>
+            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                <econdition field-name="orderId"/><order-by field-name="orderPartSeqId"/></entity-find>
+
+            <iterate list="orderPartList" entry="orderPart">
+                <!-- check OrderPart.reservationAutoEnumId vs current status -->
+                <set field="reservationAutoEnumId" from="orderPart.reservationAutoEnumId ?: productStore?.reservationAutoEnumId ?: 'AsResAutoPlaced'"/>
+                <if condition="reservationAutoEnumId == 'AsResAutoNone'"><continue/></if>
+                <if condition="reservationAutoEnumId == 'AsResAutoApproved'"><then>
+                    <set field="resStatusList" from="['OrderApproved', 'OrderSent']"/>
+                </then><else>
+                    <set field="resStatusList" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderHold']"/>
+                </else></if>
+                <if condition="!(orderHeader.statusId in resStatusList) || !(orderPart.statusId in resStatusList)"><continue/></if>
+
+                <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
+                    <econdition field-name="orderId"/>
+                    <econdition field-name="orderPartSeqId" from="orderPart.orderPartSeqId"/>
+                    <econdition field-name="productId" operator="is-not-null"/>
+                    <!-- order by productId to avoid deadlocks -->
+                    <order-by field-name="productId"/>
+                </entity-find>
+                <iterate list="orderItemList" entry="orderItem">
+                    <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
+                            in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, productStore:productStore]"/>
+                </iterate>
             </iterate>
+
         </actions>
     </service>
     <service verb="checkReserve" noun="AssetForOrderItem">
@@ -270,9 +289,23 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="orderHeader == null"><return error="true" message="Order ${orderId} not found"/></if>
 
             <entity-find-related-one value-field="orderItem" relationship-name="mantle.order.OrderPart" to-value-field="orderPart"/>
-            <!-- only do this automatically if order placed or later but not completed/cancelled/etc -->
-            <set field="resStatusList" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderHold']"/>
-            <if condition="!(orderHeader.statusId in resStatusList) || !(orderPart.statusId in resStatusList)"><return/></if>
+
+            <!-- regardless of settings only skip reservation update if there are no reservations (if reservations update for quantity changes, etc) -->
+            <entity-find entity-name="mantle.product.issuance.AssetReservation" list="existingResList">
+                <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
+            <if condition="!existingResList">
+                <!-- only do this automatically if order placed or later but not completed/cancelled/etc -->
+                <!-- check OrderPart.reservationAutoEnumId vs current status -->
+                <set field="reservationAutoEnumId" from="orderPart.reservationAutoEnumId ?: productStore?.reservationAutoEnumId ?: 'AsResAutoPlaced'"/>
+                <if condition="reservationAutoEnumId == 'AsResAutoNone'"><return/></if>
+                <if condition="reservationAutoEnumId == 'AsResAutoApproved'"><then>
+                    <set field="resStatusList" from="['OrderApproved', 'OrderSent']"/>
+                </then><else>
+                    <set field="resStatusList" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderHold']"/>
+                </else></if>
+                <if condition="!(orderHeader.statusId in resStatusList) || !(orderPart.statusId in resStatusList)"><return/></if>
+            </if>
+
             <!-- reserve assets, or update reservations as needed -->
             <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem" in-map="context"/>
         </actions>
@@ -290,7 +323,10 @@ along with this software (see the LICENSE.md file). If not, see
                 <parameter name="assetId"/>
             </parameter>
             <parameter name="resetReservations" type="Boolean" default="false"><description>If true remove existing reservations before reserving.</description></parameter>
-            <parameter name="skipAssetIds" type="Collection"><description>Don't reserve to this Asset, for displace/etc</description></parameter>
+            <parameter name="skipAssetIds" type="Collection">
+                <description>Don't reserve to this Asset, for displace/etc</description>
+                <parameter name="assetId"/>
+            </parameter>
         </in-parameters>
         <actions>
             <set field="nowTimestamp" from="ec.user.nowTimestamp"/>
@@ -1698,6 +1734,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="oldAtp" from="asset.availableToPromiseTotal"/>
             <set field="oldQoh" from="asset.quantityOnHandTotal"/>
             <set field="oldAcquireCost" from="asset.acquireCost"/>
+            <set field="oldReceivedDate" from="asset.receivedDate"/>
 
             <!-- update the AssetReceipt -->
             <if condition="!assetReceiptId"><then>
@@ -1749,11 +1786,11 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
             </else-if></if>
 
-            <!-- update AssetReceipt -->
-            <service-call name="update#mantle.product.receipt.AssetReceipt" in-map="context" out-map="context"/>
-
             <if condition="!receivedDate &amp;&amp; statusId &amp;&amp; statusId != 'AstIncoming'">
                 <set field="receivedDate" from="ec.user.nowTimestamp"/></if>
+
+            <!-- update AssetReceipt -->
+            <service-call name="update#mantle.product.receipt.AssetReceipt" in-map="context" out-map="context"/>
 
             <!-- update the Asset record -->
             <service-call name="update#mantle.product.asset.Asset" in-map="context" out-map="context"/>
@@ -1774,7 +1811,8 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if acquireCost is updated adjust the GL, if set from null do GL posting -->
             <!-- if quantityAccepted is updated and GL entry exists adjust the GL! -->
             <if condition="(acquireCost != null &amp;&amp; acquireCost != oldAcquireCost) ||
-                    (quantityAccepted != null &amp;&amp; quantityAccepted != originalAssetReceipt.quantityAccepted)">
+                    (quantityAccepted != null &amp;&amp; quantityAccepted != originalAssetReceipt.quantityAccepted) ||
+                    (receivedDate != null &amp;&amp; oldReceivedDate != receivedDate)">
                 <service-call name="mantle.ledger.AssetAutoPostServices.repost#Asset" in-map="[assetId:assetId]"/>
             </if>
         </actions>
@@ -1819,6 +1857,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="toLocationSeqId"/>
             <parameter name="toContainerId"><description>May be actual containerId or serialNumber</description></parameter>
             <parameter name="toScanLocation"><description>May be locationSeqId within facility, containerId, or container serialNumber</description></parameter>
+            <parameter name="createContainerId"/>
+            <parameter name="containerTypeEnumId" default-value="CtBinShelf"/>
         </in-parameters>
         <out-parameters>
             <parameter name="assetIdList" type="List"><parameter name="assetId"/></parameter>
@@ -1834,7 +1874,23 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!locationSeqId &amp;&amp; !containerId">
                 <message>No location or container specified, moving only assets with no location</message></if>
             <if condition="!toLocationSeqId &amp;&amp; !toContainerId">
-                <return type="warning" message="No location or container specified to move to"/></if>
+                <return type="warning" message="Not moving, no valid location or container found to move to"/></if>
+
+            <if condition="createContainerId">
+                <if condition="toContainerId"><return type="warning" message="Create Container ID and to Container ID both specified, not creating container or moving assets"/></if>
+                <if condition="!toLocationSeqId">
+                    <if condition="toScanLocation"><then>
+                        <return type="warning" message="Create Container ID specified but scanned location ${toScanLocation} not a known location"/>
+                    </then><else>
+                        <return type="warning" message="Create Container ID specified but no location specified, must specify location to create a container and move to"/>
+                    </else></if>
+                </if>
+
+                <service-call name="create#mantle.product.asset.Container" out-map="createContOut"
+                        in-map="[serialNumber:createContainerId, containerTypeEnumId:containerTypeEnumId, facilityId:facilityId, locationSeqId:toLocationSeqId]"/>
+                <set field="toContainerId" from="createContOut.containerId"/>
+                <message type="success">Created container with serial number ${createContainerId} (internal ID ${toContainerId})</message>
+            </if>
 
             <if condition="containerId">
                 <if condition="container == null">
@@ -1902,10 +1958,19 @@ along with this software (see the LICENSE.md file). If not, see
                     <field-map field-name="facilityId"/>
                     <field-map field-name="locationSeqId" from="scanLocation"/>
                 </entity-find-one>
-                <if condition="checkFacLoc != null">
+                <if condition="checkFacLoc != null"><then>
                     <set field="locationSeqId" from="checkFacLoc.locationSeqId"/>
                     <set field="scanLocation" from="null"/>
-                </if>
+                </then><else>
+                    <entity-find-one entity-name="mantle.facility.FacilityLocation" value-field="checkFacLoc">
+                        <field-map field-name="facilityId"/>
+                        <field-map field-name="description" from="scanLocation"/>
+                    </entity-find-one>
+                    <if condition="checkFacLoc != null">
+                        <set field="locationSeqId" from="checkFacLoc.locationSeqId"/>
+                        <set field="scanLocation" from="null"/>
+                    </if>
+                </else></if>
             </if>
             <!-- see if scanLocation is a containerId -->
             <if condition="scanLocation">
@@ -2045,7 +2110,10 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="comments"/>
             <parameter name="varianceReasonEnumId"/>
         </in-parameters>
-        <out-parameters><parameter name="physicalInventoryId"/></out-parameters>
+        <out-parameters>
+            <parameter name="physicalInventoryId"/>
+            <parameter name="quantityChange" type="BigDecimal"/>
+        </out-parameters>
         <actions>
             <if condition="physicalInventoryCountId">
                 <service-call name="update#mantle.product.asset.PhysicalInventoryCount"
