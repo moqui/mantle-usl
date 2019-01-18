@@ -365,6 +365,9 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!description"><set field="description" from="orderItem.itemDescription"/></if>
             <service-call name="create#mantle.order.return.ReturnItem" in-map="context" out-map="context"/>
 
+            <!-- =========== from here down handling of child items, skip for replace response since no refund/credit/etc -->
+            <if condition="returnResponseEnumId == 'RrspReplace'"><return/></if>
+
             <!-- create prorated return items for non-product order child items -->
             <!-- do this even if current item is a non-product item to handle things like tax on shipping -->
             <set field="childOrderItemList" from="orderItem.'Child#mantle.order.OrderItem'"/>
@@ -776,47 +779,91 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="cancel" noun="Return">
-        <description>Cancel items not received/sent, if all items cancelled then cancel header</description>
+        <description>Try to cancel all items, if all items cancelled then cancel header otherwise return error</description>
         <in-parameters><parameter name="returnId" required="true"/></in-parameters>
         <out-parameters><parameter name="statusId"/><parameter name="oldStatusId"/>
             <parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.order.return.ReturnHeader" value-field="returnHeader"/>
+            <if condition="returnHeader.statusId == 'ReturnCancelled'">
+                <set field="statusId" value="ReturnCancelled"/><set field="oldStatusId" value="ReturnCancelled"/>
+                <set field="statusChanged" from="false"/>
+                <return/>
+            </if>
+
             <entity-find entity-name="mantle.order.return.ReturnItem" list="returnItemList">
-                <econdition field-name="returnId"/></entity-find>
-            <set field="allCancelled" from="true"/>
+                <econdition field-name="returnId"/>
+                <econdition field-name="parentItemSeqId" operator="is-null"/>
+            </entity-find>
             <iterate list="returnItemList" entry="returnItem">
                 <service-call name="mantle.order.ReturnServices.cancel#ReturnItem" out-map="itemOut"
                         in-map="[returnId:returnId, returnItemSeqId:returnItem.returnItemSeqId]"/>
-                <if condition="itemOut.statusId != 'ReturnCancelled'"><set field="allCancelled" from="false"/></if>
             </iterate>
-            <if condition="allCancelled"><then>
-                <set field="statusId" value="ReturnCancelled"/>
-                <service-call name="update#mantle.order.return.ReturnHeader" out-map="context"
-                        in-map="[returnId:returnId, statusId:statusId]"/>
-            </then><else>
-                <entity-find-one entity-name="mantle.order.return.ReturnHeader" value-field="returnHeader"/>
-                <set field="statusId" from="returnHeader.statusId"/>
-                <set field="oldStatusId" from="returnHeader.statusId"/>
-                <set field="statusChanged" from="false"/>
-            </else></if>
+
+            <set field="statusId" value="ReturnCancelled"/>
+            <service-call name="update#mantle.order.return.ReturnHeader" out-map="context"
+                    in-map="[returnId:returnId, statusId:statusId]"/>
         </actions>
     </service>
     <service verb="cancel" noun="ReturnItem">
-        <description>Cancel item if not received/sent, otherwise do nothing</description>
+        <description>Cancel a ReturnItem, first cancelling all child items; returns error on invalid status transition</description>
         <in-parameters><parameter name="returnId" required="true"/><parameter name="returnItemSeqId" required="true"/></in-parameters>
         <out-parameters><parameter name="statusId"/><parameter name="oldStatusId"/>
             <parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.order.return.ReturnItem" value-field="returnItem"/>
-            <if condition="returnItem.statusId in ['ReturnCreated', 'ReturnRequested', 'ReturnApproved']"><then>
-                <set field="statusId" value="ReturnCancelled"/>
-                <service-call name="update#mantle.order.return.ReturnItem" out-map="context"
-                        in-map="[returnId:returnId, returnItemSeqId:returnItemSeqId, statusId:statusId]"/>
-            </then><else>
-                <set field="statusId" from="returnItem.statusId"/>
-                <set field="oldStatusId" from="returnItem.statusId"/>
+            <if condition="returnItem.statusId == 'ReturnCancelled'">
+                <set field="statusId" value="ReturnCancelled"/><set field="oldStatusId" value="ReturnCancelled"/>
                 <set field="statusChanged" from="false"/>
-            </else></if>
+                <return/>
+            </if>
+            <if condition="!(returnItem.statusId in ['ReturnCreated', 'ReturnRequested', 'ReturnApproved'])">
+                <return error="true" message="Return item in status ${returnItem.status?.description} cannot be cancelled"/></if>
+
+            <set field="statusId" value="ReturnCancelled"/>
+
+            <!-- cancel child items first -->
+            <entity-find entity-name="mantle.order.return.ReturnItem" list="childItemList">
+                <econdition field-name="returnId"/>
+                <econdition field-name="parentItemSeqId" from="returnItemSeqId"/>
+            </entity-find>
+            <iterate list="childItemList" entry="childItem">
+                <service-call name="mantle.order.ReturnServices.cancel#ReturnItem" out-map="itemOut"
+                        in-map="[returnId:returnId, returnItemSeqId:childItem.returnItemSeqId]"/>
+            </iterate>
+
+            <!-- cancel this item -->
+            <service-call name="update#mantle.order.return.ReturnItem" out-map="context"
+                    in-map="[returnId:returnId, returnItemSeqId:returnItemSeqId, statusId:statusId]"/>
+        </actions>
+    </service>
+    <service verb="delete" noun="ReturnItem">
+        <in-parameters>
+            <parameter name="returnId" required="true"/>
+            <parameter name="returnItemSeqId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.return.ReturnItem" value-field="returnItem"/>
+            <if condition="returnItem == null"><return error="true" message="Return item ${returnId}:${returnItemSeqId} not found"/></if>
+            <if condition="!(returnItem.statusId in ['ReturnCreated', 'ReturnRequested'])">
+                <return error="true" message="Items may be deleted only when item is in Created and Requested statuses"/></if>
+
+            <entity-find-one entity-name="mantle.order.return.ReturnHeader" value-field="returnHeader"/>
+            <if condition="!(returnHeader.statusId in ['ReturnCreated', 'ReturnRequested'])">
+                <return error="true" message="Items may be deleted only when return is in Created and Requested statuses"/></if>
+
+            <!-- delete child items first -->
+            <entity-find entity-name="mantle.order.return.ReturnItem" list="childItemList">
+                <econdition field-name="returnId"/>
+                <econdition field-name="parentItemSeqId" from="returnItemSeqId"/>
+            </entity-find>
+            <iterate list="childItemList" entry="childItem">
+                <service-call name="mantle.order.ReturnServices.delete#ReturnItem"
+                        in-map="[returnId:returnId, returnItemSeqId:childItem.returnItemSeqId]"/>
+            </iterate>
+
+            <!-- delete the item -->
+            <service-call name="delete#mantle.order.return.ReturnItem" in-map="[returnId:returnId, returnItemSeqId:returnItemSeqId]"/>
         </actions>
     </service>
 
