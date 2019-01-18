@@ -464,26 +464,32 @@ class OrderToCashBasicFlow extends Specification {
         when:
         // NOTE: orders used here are from AssetReservationMultipleThreads (base id 53000)
         // use asset DEMO_1_1A with 0 ATP at this point (90 QOH, 2 reservations for orders)
-        // use orders with 60 currently reserved against asset 55400
+        // use order with 60 currently reserved against asset 55400
 
         EntityList beforeResList = ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("assetId", "DEMO_1_1A").orderBy("assetId").list()
+        for (EntityValue res in beforeResList) logger.warn("Res before: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity} - QOH:${res.asset.quantityOnHandTotal}")
+
+        beforeResList = ec.entity.find("mantle.product.issuance.AssetReservation")
                 .condition("assetId", "55400").orderBy("assetId").list()
-        // for (EntityValue res in beforeResList) logger.warn("Res before: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
-        EntityValue beforeRes = beforeResList[0]
+        for (EntityValue res in beforeResList) logger.warn("Res before: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
+
+        EntityValue beforeRes = beforeResList.find({it.quantity == 60})
         String orderId = beforeRes.orderId
+        String orderItemSeqId = beforeRes.orderItemSeqId
 
         ec.service.sync().name("mantle.product.AssetServices.reserve#AssetForOrderItem")
-                .parameters([orderId:orderId, orderItemSeqId:"01", assetId:"DEMO_1_1A", resetReservations:true]).call()
+                .parameters([orderId:orderId, orderItemSeqId:orderItemSeqId, assetId:"DEMO_1_1A", resetReservations:true]).call()
 
         EntityList afterResList = ec.entity.find("mantle.product.issuance.AssetReservation")
-                .condition("orderId", orderId).orderBy("assetId").list()
-        // should be only DEMO_1_1A and DEMO_UNITA, sometimes randomly gets 55400 instead...
+                .condition("orderId", orderId).condition("orderItemSeqId", orderItemSeqId).orderBy("assetId").list()
         for (EntityValue res in afterResList) logger.info("Res after: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
+        EntityValue afterRes = afterResList.find({it.assetId == "DEMO_1_1A"})
 
         then:
-        afterResList.size() == 2
-        afterResList[0].assetId in ["DEMO_1_1A", "DEMO_UNITA", "55400"]
-        afterResList[0].quantity == 60.0
+        afterRes != null
+        afterRes?.assetId == "DEMO_1_1A"
+        afterRes?.quantity == 60.0
     }
 
     /* ========== Business Customer Order, Credit Memo, Overpay/Refund, etc ========== */
