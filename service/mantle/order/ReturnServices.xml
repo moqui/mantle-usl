@@ -387,7 +387,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <!-- all returned, use remaining child item amount -->
                         <set field="childRetAmount" from="childOut.returnableTotal"/>
                     </then><else>
-                        <set field="parentRatio" from="(returnQuantity as BigDecimal).divide(invoiceQuantity as BigDecimal, 6, BigDecimal.ROUND_HALF_EVEN)"/>
+                        <set field="parentRatio" from="(returnQuantity as BigDecimal).divide(invoiceQuantity as BigDecimal, 6, BigDecimal.ROUND_HALF_UP)"/>
                         <set field="childRetAmount" from="(childOut.invoiceTotal * parentRatio).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                     </else></if>
                 </then><else>
@@ -396,7 +396,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <!-- all returned, use remaining child item amount -->
                         <set field="childRetAmount" from="childOut.returnableTotal"/>
                     </then><else>
-                        <set field="parentRatio" from="(returnTotal as BigDecimal).divide(invoiceTotal as BigDecimal, 6, BigDecimal.ROUND_HALF_EVEN).abs()"/>
+                        <set field="parentRatio" from="(returnTotal as BigDecimal).divide(invoiceTotal as BigDecimal, 6, BigDecimal.ROUND_HALF_UP).abs()"/>
                         <set field="childRetAmount" from="(childOut.invoiceTotal * parentRatio).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                     </else></if>
                 </else></if>
@@ -535,12 +535,30 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
-            <entity-find-one entity-name="mantle.order.return.ReturnItem" value-field="returnItem"/>
+            <if condition="receivedQuantity == 0.0"><return/></if>
+            <entity-find-one entity-name="mantle.order.return.ReturnItem" value-field="returnItem" for-update="true"/>
 
             <if condition="returnItem.receivedQuantity">
                 <set field="receivedQuantity" from="receivedQuantity + returnItem.receivedQuantity"/></if>
+            <set field="curReceivedRatio" from="returnItem.returnQuantity &amp;&amp; returnItem.returnQuantity != receivedQuantity ?
+                    (receivedQuantity as BigDecimal).divide(returnItem.returnQuantity, 6, BigDecimal.ROUND_HALF_UP) : 1.0"/>
+
+            <!-- record receivedQuantity and if all received update status to Received -->
             <service-call name="update#mantle.order.return.ReturnItem" out-map="context" in-map="[returnId:returnId,
-                    returnItemSeqId:returnItemSeqId, statusId:'ReturnReceived', receivedQuantity:receivedQuantity]"/>
+                    returnItemSeqId:returnItemSeqId, receivedQuantity:receivedQuantity,
+                    statusId:(returnItem.returnQuantity == receivedQuantity ? 'ReturnReceived' : returnItem.statusId)]"/>
+
+            <!-- update receivedQuantity, possibly prorated, on non-product child items -->
+            <entity-find entity-name="mantle.order.return.ReturnItem" list="childItemList">
+                <econdition field-name="returnId"/>
+                <econdition field-name="parentItemSeqId" from="returnItemSeqId"/>
+            </entity-find>
+            <iterate list="childItemList" entry="childItem">
+                <set field="childReceivedQty" from="curReceivedRatio * (childItem.returnQuantity ?: 1.0)"/>
+                <service-call name="update#mantle.order.return.ReturnItem" out-map="context" in-map="[returnId:returnId,
+                        returnItemSeqId:childItem.returnItemSeqId, receivedQuantity:childReceivedQty,
+                        statusId:(childItem.returnQuantity == childReceivedQty ? 'ReturnReceived' : childItem.statusId)]"/>
+            </iterate>
 
             <!-- if all items received update header status to Received -->
             <service-call name="mantle.order.ReturnServices.checkUpdate#ReturnHeaderStatus" in-map="[returnId:returnId,
@@ -690,9 +708,15 @@ along with this software (see the LICENSE.md file). If not, see
                             in-map="[finAccountTypeId:'CustomerCredit', ownerPartyId:returnHeader.customerPartyId,
                                 organizationPartyId:returnHeader.vendorPartyId]" out-map="context"/>
                 </if>
-                <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="context"
-                        in-map="[finAccountId:finAccountId, reasonEnumId:'FatrCsCredit', amount:itemAmount]"/>
-                <set field="returnItem.finAccountTransId" from="finAccountTransId"/>
+                <if condition="itemAmount &gt; 0.0"><then>
+                    <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="faTxOut"
+                            in-map="[finAccountId:finAccountId, reasonEnumId:'FatrCsCredit', amount:itemAmount]"/>
+                    <set field="returnItem.finAccountTransId" from="faTxOut.finAccountTransId"/>
+                </then><else>
+                    <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" out-map="faTxOut"
+                            in-map="[finAccountId:finAccountId, reasonEnumId:'FatrCsCredit', amount:-itemAmount]"/>
+                    <set field="returnItem.finAccountTransId" from="faTxOut.finAccountTransId"/>
+                </else></if>
 
                 <set field="returnItem.responseAmount" from="itemAmount"/>
                 <set field="returnItem.responseDate" from="ec.user.nowTimestamp"/>
