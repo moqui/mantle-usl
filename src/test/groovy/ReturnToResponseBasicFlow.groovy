@@ -141,7 +141,7 @@ class ReturnToResponseBasicFlow extends Specification {
                 <items returnItemSeqId="02" orderId="55500" orderItemSeqId="02" returnReasonEnumId="RrsnDefective"
                     returnQuantity="2" productId="DEMO_3_1" description="Demo Product Three-One" itemTypeEnumId="ItemProduct"
                     statusId="ReturnRequested" returnResponseEnumId="RrspRefund"/>
-                <items returnItemSeqId="03" orderId="55500" orderItemSeqId="03" returnReasonEnumId="RrsnDidNotWant"
+                <items returnItemSeqId="05" orderId="55500" orderItemSeqId="03" returnReasonEnumId="RrsnDidNotWant"
                     returnQuantity="3" productId="DEMO_2_1" description="Demo Product Two-One" itemTypeEnumId="ItemProduct"
                     statusId="ReturnRequested" returnResponseEnumId="RrspCredit"/>
             </returns>
@@ -241,7 +241,7 @@ class ReturnToResponseBasicFlow extends Specification {
                         availableToPromiseDiff="2" shipmentId="55700" assetReceiptId="55702" effectiveDate="${effectiveTime}"
                         quantityOnHandDiff="2"/>
                 </items>
-                <items returnItemSeqId="03" finAccountTransId="55700" statusId="ReturnCompleted" responseAmount="36.36"
+                <items returnItemSeqId="05" finAccountTransId="55700" statusId="ReturnCompleted" responseAmount="36.36"
                         receivedQuantity="3">
                     <receipts assetReceiptId="55701" productId="DEMO_2_1" quantityAccepted="3"
                         acctgTransResultEnumId="AtrNoAcquireCost" quantityRejected="0" assetId="55701" shipmentId="55700"
