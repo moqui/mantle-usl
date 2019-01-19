@@ -29,27 +29,20 @@ import java.sql.Timestamp
  */
 
 class ReturnToResponseBasicFlow extends Specification {
-    @Shared
-    protected final static Logger logger = LoggerFactory.getLogger(ReturnToResponseBasicFlow.class)
-    @Shared
-    ExecutionContext ec
-    @Shared
-    String returnId = null, originalOrderId = "55500", returnShipmentId
-    @Shared
-    Map replaceShipResult
-    @Shared
-    long effectiveTime = System.currentTimeMillis()
-    @Shared
-    long totalFieldsChecked = 0
-    @Shared
-    boolean kieEnabled = false
+    @Shared protected final static Logger logger = LoggerFactory.getLogger(ReturnToResponseBasicFlow.class)
+    @Shared ExecutionContext ec
+    @Shared String returnId = null, originalOrderId = "55500", returnShipmentId
+    @Shared Map replaceShipResult
+    @Shared long effectiveTime = System.currentTimeMillis()
+    @Shared long totalFieldsChecked = 0
+    // no longer needed: @Shared boolean kieEnabled = false
 
     def setupSpec() {
         // init the framework, get the ec
         ec = Moqui.getExecutionContext()
         // set an effective date so data check works, etc
         ec.user.setEffectiveTime(new Timestamp(effectiveTime))
-        kieEnabled = ec.factory.getToolFactory("KIE") != null
+        // no longer needed: kieEnabled = ec.factory.getToolFactory("KIE") != null
 
         ec.entity.tempSetSequencedIdPrimary("mantle.account.invoice.Invoice", 55700, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.account.financial.FinancialAccount", 55700, 10)
@@ -185,6 +178,7 @@ class ReturnToResponseBasicFlow extends Specification {
 
         // receive Return Shipment
         // triggers SECA rules to receive ReturnItems
+        // TODO: change to partial return receipt for at least 1 item to test prorating of responses
         ec.service.sync().name("mantle.shipment.ShipmentServices.receive#EntireShipment")
                 .parameters([shipmentId:returnShipmentId, statusId:'AstOnHold']).call()
 
@@ -198,7 +192,7 @@ class ReturnToResponseBasicFlow extends Specification {
                 </items>
                 <items quantity="3" productId="DEMO_2_1">
                     <sources shipmentItemSourceId="55702" quantity="3" statusId="SisReceived" quantityNotHandled="0"
-                        returnId="55700" returnItemSeqId="03"/>
+                        returnId="55700" returnItemSeqId="05"/>
                 </items>
                 <items quantity="2" productId="DEMO_3_1">
                     <sources shipmentItemSourceId="55701" quantity="2" statusId="SisReceived" quantityNotHandled="0"
@@ -293,7 +287,7 @@ class ReturnToResponseBasicFlow extends Specification {
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <payments paymentId="55700" fromPartyId="ORG_ZIZI_RETAIL" toPartyId="CustJqp" amountUomId="USD"
-                paymentTypeEnumId="PtRefund" toPaymentMethodId="CustJqpCc" amount="15.54" reconcileStatusId="PmtrNot"
+                paymentTypeEnumId="PtRefund" toPaymentMethodId="CustJqpCc" amount="14.0" reconcileStatusId="PmtrNot"
                 statusId="PmntPromised" paymentInstrumentEnumId="PiCompanyCheck"/>
         </entity-facade-xml>""").check(dataCheckErrors)
         // NOTE: for Promised payment no effectiveDate so don't validate
@@ -311,8 +305,8 @@ class ReturnToResponseBasicFlow extends Specification {
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.account.financial.FinancialAccount finAccountId="55700" finAccountTypeId="CustomerCredit" isRefundable="Y"
-                    availableBalance="36.36" ownerPartyId="CustJqp" currencyUomId="USD" statusId="FaActive"
-                    finAccountName="Joe Public Customer Credit" actualBalance="36.36" organizationPartyId="ORG_ZIZI_RETAIL">
+                    availableBalance="34.60" ownerPartyId="CustJqp" currencyUomId="USD" statusId="FaActive"
+                    finAccountName="Joe Public Customer Credit" actualBalance="34.60" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.account.financial.FinancialAccountTrans finAccountTransId="55700" fromPartyId="ORG_ZIZI_RETAIL"
                         finAccountTransTypeEnumId="FattDeposit" reasonEnumId="FatrCsCredit" amount="36.36"
                         entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess" transactionDate="${effectiveTime}"
@@ -396,7 +390,7 @@ class ReturnToResponseBasicFlow extends Specification {
                     assetReservationId="55700" acctgTransResultEnumId="AtrSuccess">
                 <mantle.ledger.transaction.AcctgTrans postedDate="${effectiveTime}" amountUomId="USD" isPosted="Y"
                         assetId="55400" acctgTransTypeEnumId="AttInventoryIssuance" glFiscalTypeEnumId="GLFT_ACTUAL"
-                        transactionDate="${effectiveTime}" acctgTransId="55701" organizationPartyId="ORG_ZIZI_RETAIL">
+                        transactionDate="${effectiveTime}" acctgTransId="55703" organizationPartyId="ORG_ZIZI_RETAIL">
                     <mantle.ledger.transaction.AcctgTransEntry amount="8" productId="DEMO_1_1" glAccountId="141300000"
                             reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatInventory"
                             debitCreditFlag="C" assetId="55400" acctgTransEntrySeqId="01"/>
@@ -454,42 +448,42 @@ class ReturnToResponseBasicFlow extends Specification {
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
-            <financialAccounts finAccountId="55700" negativeBalanceLimit="0" availableBalance="${kieEnabled ? '22.59' : '28.59'}"
-                    actualBalance="${kieEnabled ? '22.59' : '28.59'}" ownerPartyId="CustJqp" organizationPartyId="ORG_ZIZI_RETAIL">
+            <financialAccounts finAccountId="55700" negativeBalanceLimit="0" availableBalance="26.83"
+                    actualBalance="26.83" ownerPartyId="CustJqp" organizationPartyId="ORG_ZIZI_RETAIL">
                 <!-- NOTE: expireDate is set to now when payment is captured, so not in the future as when created -->
-                <mantle.account.financial.FinancialAccountAuth finAccountAuthId="55700" amount="${kieEnabled ? '13.77' : '7.77'}" paymentId="55701"
+                <mantle.account.financial.FinancialAccountAuth finAccountAuthId="55700" amount="7.77" paymentId="55701"
                         authorizationDate="${effectiveTime}" expireDate="${effectiveTime}"/>
                 <mantle.account.method.PaymentGatewayResponse paymentGatewayResponseId="55700"
                         paymentGatewayConfigId="FinancialAccountLocal" amountUomId="USD" paymentId="55701"
-                        paymentOperationEnumId="PgoAuthorize" amount="${kieEnabled ? '13.77' : '7.77'}" resultDeclined="N" resultError="N"
+                        paymentOperationEnumId="PgoAuthorize" amount="7.77" resultDeclined="N" resultError="N"
                         transactionDate="${effectiveTime}" resultNsf="N" referenceNum="55700" resultSuccess="Y"/>
-                <mantle.account.financial.FinancialAccountTrans finAccountTransId="55701" fromPartyId="CustJqp"
+                <mantle.account.financial.FinancialAccountTrans finAccountTransId="55703" fromPartyId="CustJqp"
                         toPartyId="ORG_ZIZI_RETAIL" finAccountTransTypeEnumId="FattWithdraw" reasonEnumId="FatrDisbursement"
-                        amount="${kieEnabled ? '-13.77' : '-7.77'}" entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"
-                        transactionDate="${effectiveTime}" postBalance="${kieEnabled ? '22.59' : '28.59'}" finAccountAuthId="55700" performedByUserId="EX_JOHN_DOE"/>
-                <acctgTrans acctgTransId="55705" otherPartyId="CustJqp" amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttFinancialWithdrawal"
+                        amount="-7.77" entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"
+                        transactionDate="${effectiveTime}" postBalance="26.83" finAccountAuthId="55700" performedByUserId="EX_JOHN_DOE"/>
+                <acctgTrans acctgTransId="55707" otherPartyId="CustJqp" amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttFinancialWithdrawal"
                         glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                     <entries acctgTransEntrySeqId="01" amount="7.77" glAccountId="258200000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
                     <entries acctgTransEntrySeqId="02" amount="7.77" glAccountId="251100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
                 </acctgTrans>
-                <mantle.account.method.PaymentGatewayResponse approvalCode="55701" paymentGatewayConfigId="FinancialAccountLocal"
-                        responseCode="success" amountUomId="USD" resultDeclined="N" paymentGatewayResponseId="55701" paymentId="55701"
-                        paymentOperationEnumId="PgoCapture" amount="${kieEnabled ? '13.77' : '7.77'}" resultError="N" resultNsf="N" referenceNum="55701"
+                <mantle.account.method.PaymentGatewayResponse paymentGatewayResponseId="55701" paymentGatewayConfigId="FinancialAccountLocal"
+                        responseCode="success" amountUomId="USD" resultDeclined="N" paymentId="55701" paymentOperationEnumId="PgoCapture" 
+                        amount="7.77" resultError="N" resultNsf="N" referenceNum="55703" approvalCode="55703"
                         resultSuccess="Y" transactionDate="${effectiveTime}"/>
                 <mantle.account.payment.Payment paymentId="55701" fromPartyId="CustJqp" paymentGatewayConfigId="FinancialAccountLocal"
-                        amountUomId="USD" paymentTypeEnumId="PtInvoicePayment" finAccountTransId="55701" amount="${kieEnabled ? '13.77' : '7.77'}"
+                        amountUomId="USD" paymentTypeEnumId="PtInvoicePayment" finAccountTransId="55703" amount="7.77"
                         reconcileStatusId="PmtrNot" acctgTransResultEnumId="AtrSuccess" finAccountAuthId="55700" statusId="PmntDelivered"
                         paymentInstrumentEnumId="PiFinancialAccount" toPartyId="ORG_ZIZI_RETAIL" orderId="55701" orderPartSeqId="01">
-                    <mantle.ledger.transaction.AcctgTrans acctgTransId="55706" otherPartyId="CustJqp" postedDate="${effectiveTime}"
+                    <mantle.ledger.transaction.AcctgTrans acctgTransId="55708" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                             amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttIncomingPayment" glFiscalTypeEnumId="GLFT_ACTUAL"
                             transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
-                        <entries acctgTransEntrySeqId="01" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="121000000" reconcileStatusId="AterNot"
+                        <entries acctgTransEntrySeqId="01" amount="7.77" glAccountId="121000000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="GatAccountsReceivable" debitCreditFlag="C"/>
-                        <entries acctgTransEntrySeqId="02" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="258200000" reconcileStatusId="AterNot"
+                        <entries acctgTransEntrySeqId="02" amount="7.77" glAccountId="258200000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="" debitCreditFlag="D"/>
                     </mantle.ledger.transaction.AcctgTrans>
                     <!-- NOTE: not checking acctgTransResultEnumId, could be success or payment not posted depending on if payment or application posts first -->
-                    <applications amountApplied="${kieEnabled ? '13.77' : '7.77'}" appliedDate="${effectiveTime}"
+                    <applications amountApplied="7.77" appliedDate="${effectiveTime}"
                             paymentApplicationId="55700" invoiceId="55701"/>
                 </mantle.account.payment.Payment>
             </financialAccounts>
