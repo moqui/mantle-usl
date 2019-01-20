@@ -542,11 +542,18 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="receivedQuantity" from="receivedQuantity + returnItem.receivedQuantity"/></if>
             <set field="curReceivedRatio" from="returnItem.returnQuantity &amp;&amp; returnItem.returnQuantity != receivedQuantity ?
                     (receivedQuantity as BigDecimal).divide(returnItem.returnQuantity, 6, BigDecimal.ROUND_HALF_UP) : 1.0"/>
+            <set field="allReceived" from="returnItem.returnQuantity == receivedQuantity"/>
+            <set field="hasResponse" from="returnItem.responseDate != null"/>
 
             <!-- record receivedQuantity and if all received update status to Received -->
-            <service-call name="update#mantle.order.return.ReturnItem" out-map="context" in-map="[returnId:returnId,
-                    returnItemSeqId:returnItemSeqId, receivedQuantity:receivedQuantity,
-                    statusId:(returnItem.returnQuantity == receivedQuantity ? 'ReturnReceived' : returnItem.statusId)]"/>
+            <!-- if !allReceived:
+                if hasResponse record partial qty received and leave open
+                if !hasResponse reduce returnQuantity to receivedQuantity and close item, process response (on child items too)
+            -->
+            <service-call name="update#mantle.order.return.ReturnItem" out-map="context"
+                    in-map="[returnId:returnId, returnItemSeqId:returnItemSeqId, receivedQuantity:receivedQuantity,
+                        returnQuantity:(hasResponse ? returnItem.returnQuantity : receivedQuantity),
+                        statusId:(allReceived || !hasResponse ? 'ReturnReceived' : returnItem.statusId)]"/>
 
             <!-- update receivedQuantity, possibly prorated, on non-product child items -->
             <entity-find entity-name="mantle.order.return.ReturnItem" list="childItemList">
@@ -555,9 +562,11 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <iterate list="childItemList" entry="childItem">
                 <set field="childReceivedQty" from="curReceivedRatio * (childItem.returnQuantity ?: 1.0)"/>
+                <set field="childHasResponse" from="childItem.responseDate != null"/>
                 <service-call name="update#mantle.order.return.ReturnItem" out-map="context" in-map="[returnId:returnId,
                         returnItemSeqId:childItem.returnItemSeqId, receivedQuantity:childReceivedQty,
-                        statusId:(childItem.returnQuantity == childReceivedQty ? 'ReturnReceived' : childItem.statusId)]"/>
+                        returnQuantity:(childHasResponse ? childItem.returnQuantity : childReceivedQty),
+                        statusId:(allReceived || !childHasResponse ? 'ReturnReceived' : childItem.statusId)]"/>
             </iterate>
 
             <!-- if all items received update header status to Received -->
@@ -573,7 +582,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- if response already processed (responseDate set) status to ReturnCompleted, and on header too -->
-            <if condition="returnItem.responseDate">
+            <if condition="hasResponse">
                 <service-call name="mantle.order.ReturnServices.complete#ReturnItem"
                         in-map="[returnId:returnId, returnItemSeqId:returnItemSeqId]"/>
             </if>
