@@ -298,7 +298,7 @@ class ReturnToResponseBasicFlow extends Specification {
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <payments paymentId="55700" fromPartyId="ORG_ZIZI_RETAIL" toPartyId="CustJqp" amountUomId="USD"
                 paymentTypeEnumId="PtRefund" toPaymentMethodId="CustJqpCc" amount="14.0" reconcileStatusId="PmtrNot"
-                statusId="PmntPromised" paymentInstrumentEnumId="PiCompanyCheck"/>
+                statusId="PmntPromised" paymentInstrumentEnumId="PiCreditCard"/>
         </entity-facade-xml>""").check(dataCheckErrors)
         // NOTE: for Promised payment no effectiveDate so don't validate
         totalFieldsChecked += fieldsChecked
