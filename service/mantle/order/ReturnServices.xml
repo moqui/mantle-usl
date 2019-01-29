@@ -615,6 +615,9 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.order.return.ReturnHeader" value-field="returnHeader"/>
 
+            <!-- NOTE: may be better date for this, like maybe Shipment receipt date/time -->
+            <set field="responseDate" from="ec.user.nowTimestamp"/>
+
             <!-- make sure customer is not an internal org, ie this is a sales return and not a purchase return -->
             <entity-find-one entity-name="mantle.party.PartyRole" value-field="customerOrgInternal">
                 <field-map field-name="partyId" from="returnHeader.customerPartyId"/>
@@ -648,27 +651,48 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="refundItemList" from="[]"/>
             <set field="replaceItemList" from="[]"/>
             <set field="remainingAmountBySeqId" from="[:]"/>
+            <set field="returnInvoiceId" from="null"/>
             <iterate list="returnItemList" entry="returnItem">
-                <if condition="returnItem.responseDate"><continue/></if>
+                <if condition="returnItem.responseDate != null"><continue/></if>
                 <set field="validStatus" from="returnItem.statusId in ['ReturnReceived', 'ReturnCompleted'] ||
                     (returnItem.responseImmediate == 'Y' &amp;&amp; returnItem.statusId in ['ReturnApproved', 'ReturnShipped'])"/>
                 <if condition="!validStatus"><continue/></if>
 
                 <!-- see if the invoice for returned order item is not yet paid, if so cancel/credit instead of credit or refund -->
                 <if condition="returnItem.returnResponseEnumId in ['RrspCredit', 'RrspRefund']">
-                    <!-- TODO: always create return credit memo invoice? maybe better not to adjust the original invoice, easier to track and reconcile -->
-                    <!-- TODO: if only partial quantity received (receivedQuantity < returnQuantity) then prorate product item amounts and child item amounts -->
-                    <!-- TODO: create ReturnItemBilling records to connect ReturnItem and InvoiceItem -->
-
                     <entity-find-related-one value-field="returnItem" relationship-name="orderItem" to-value-field="orderItem"/>
-                    <set field="itemQuantity" from="returnItem.receivedQuantity ?: returnItem.returnQuantity"/>
-                    <set field="amountRemaining" from="returnItem.responseAmount ?: ((itemQuantity ?: 0.0) * (returnItem.returnPrice ?: orderItem?.unitAmount ?: 0.0))"/>
+                    <set field="itemQuantity" from="returnItem.receivedQuantity ?: returnItem.returnQuantity ?: 0.0"/>
+                    <set field="itemAmount" from="returnItem.returnPrice ?: orderItem?.unitAmount ?: 0.0"/>
+                    <set field="amountRemaining" from="(returnItem.responseAmount ?: (itemQuantity * itemAmount)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                     <if condition="!amountRemaining">
                         <message>Return Item ${returnId}:${returnItem.returnItemSeqId} has no amount, not processing credit response</message>
                         <script>remainingAmountBySeqId.put(returnItem.returnItemSeqId, 0.0)</script>
                         <continue/>
                     </if>
+                    <script>remainingAmountBySeqId.put(returnItem.returnItemSeqId, amountRemaining)</script>
 
+                    <!-- always create return credit memo invoice; better not to adjust the original invoice, easier to track and reconcile -->
+                    <!-- if only partial quantity received (receivedQuantity < returnQuantity) then prorate product item amounts and child item amounts (via itemQuantity, itemAmount) -->
+                    <!-- create ReturnItemBilling records to connect ReturnItem and InvoiceItem -->
+
+                    <!-- create return credit memo Invoice if needed -->
+                    <if condition="!returnInvoiceId">
+                        <service-call name="mantle.account.InvoiceServices.create#Invoice" out-map="returnInvoiceOut" out-map-add-to-existing="false"
+                                in-map="[fromPartyId:returnHeader.customerPartyId, toPartyId:returnHeader.vendorPartyId,
+                                    invoiceTypeEnumId:'InvoiceReturn', invoiceDate:responseDate, currencyUomId:returnHeader.currencyUomId]"/>
+                        <set field="returnInvoiceId" from="returnInvoiceOut.invoiceId"/>
+                    </if>
+                    <!-- create return credit memo InvoiceItem -->
+                    <service-call name="mantle.account.InvoiceServices.create#InvoiceItem" out-map="retInvItemOut" out-map-add-to-existing="false"
+                            in-map="[invoiceId:returnInvoiceId, itemTypeEnumId:returnItem.itemTypeEnumId, description:returnItem.description,
+                                quantity:itemQuantity, amount:itemAmount, productId:returnItem.productId]"/>
+                    <!-- create ReturnItemBilling -->
+                    <!-- TODO populate assetReceiptId -->
+                    <service-call name="create#mantle.order.return.ReturnItemBilling" in-map="[returnId:returnId,
+                            returnItemSeqId:returnItem.returnItemSeqId, invoiceId:returnInvoiceId,
+                            invoiceItemSeqId:retInvItemOut.invoiceItemSeqId, quantity:itemQuantity, amount:itemAmount]"/>
+
+                    <!-- old approach: adjust original invoice
                     <entity-find entity-name="mantle.order.OrderItemBilling" list="oibList">
                         <econdition field-name="orderId" from="returnItem.orderId"/>
                         <econdition field-name="orderItemSeqId" from="returnItem.orderItemSeqId"/></entity-find>
@@ -681,22 +705,23 @@ along with this software (see the LICENSE.md file). If not, see
                         <service-call name="mantle.account.InvoiceServices.get#InvoiceTotal"
                                 out-map="invTotal" out-map-add-to-existing="false" in-map="[invoiceId:oib.invoiceId]"/>
                         <if condition="invTotal.unpaidTotal &gt; 0.0">
-                            <!-- adjust by full oib/ii total if unpaidTotal is enough, otherwise just by unpaid total -->
+                            <!- - adjust by full oib/ii total if unpaidTotal is enough, otherwise just by unpaid total - ->
                             <set field="adjustAmount" from="invTotal.unpaidTotal &gt; adjustAmount ? adjustAmount : invTotal.unpaidTotal"/>
-                            <!-- call invoice adjust, subtract adjustAmount -->
-                            <!-- TODO: more direct way to link back to return item (than new ii to parent ii to oib to oi to ri)? -->
+                            <!- - call invoice adjust, subtract adjustAmount - ->
+                            <!- - NOTE: more direct way to link back to return item (than new ii to parent ii to oib to oi to ri)? - ->
                             <set field="adjDesc" value="Return Item ${returnId}:${returnItem.returnItemSeqId} for Order Item ${orderItem.orderId}:${orderItem.orderItemSeqId}"/>
                             <service-call name="mantle.account.InvoiceServices.adjust#Invoice"
                                     in-map="[invoiceId:oib.invoiceId, description:adjDesc, amount:adjustAmount,
                                         parentInvoiceItemSeqId:oib.invoiceItemSeqId, itemTypeEnumId:'ItemReturnAdjust']"/>
-                            <!-- reduce amountRemaining -->
+                            <!- - reduce amountRemaining - ->
                             <set field="amountRemaining" from="amountRemaining - adjustAmount"/>
                             <if condition="amountRemaining == 0.0"><break/></if>
                         </if>
                     </iterate>
 
-                    <!-- save the amountRemaining so if there is any credit or refund it is only that amount -->
+                    <!- - save the amountRemaining so if there is any credit or refund it is only that amount - ->
                     <script>remainingAmountBySeqId.put(returnItem.returnItemSeqId, amountRemaining)</script>
+                    -->
                 </if>
 
                 <if condition="returnItem.returnResponseEnumId == 'RrspCredit'"><then>
@@ -709,12 +734,54 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
             <!-- <log message="Response ${returnId}:${returnItemSeqId} \n creditItemList: ${creditItemList} \n refundItemList: ${refundItemList} \n replaceItemList: ${replaceItemList}"/> -->
 
-            <!-- Customer Credit (Financial Account Transaction); do one TX for each item -->
-            <iterate list="creditItemList" entry="returnItem">
-                <set field="itemAmount" from="remainingAmountBySeqId.get(returnItem.returnItemSeqId)"/>
-                <if condition="itemAmount == 0.0"><continue/></if>
+            <!-- Customer Credit (Financial Account Transaction) -->
+            <if condition="creditItemList">
+                <set field="creditTotal" from="0.0"/>
+                <set field="faItemList" from="[]"/>
+                <iterate list="creditItemList" entry="returnItem">
+                    <set field="itemTotal" from="remainingAmountBySeqId.get(returnItem.returnItemSeqId)"/>
+                    <if condition="itemTotal == 0.0"><continue/></if>
 
-                <!-- TODO also do credit memo invoice for credit responses? if so also create FA type payment and apply to invoice -->
+                    <set field="creditTotal" from="creditTotal + itemTotal"/>
+                    <script>faItemList.add(returnItem)</script>
+                    <set field="returnItem.responseAmount" from="itemTotal"/>
+                    <set field="returnItem.responseDate" from="responseDate"/>
+                </iterate>
+
+                <if condition="creditTotal">
+                    <set field="finAccountId" from="returnHeader.finAccountId"/>
+                    <if condition="!finAccountId">
+                        <service-call name="mantle.account.FinancialAccountServices.getOrCreate#FinancialAccount"
+                                in-map="[finAccountTypeId:'CustomerCredit', ownerPartyId:returnHeader.customerPartyId,
+                                organizationPartyId:returnHeader.vendorPartyId]" out-map="context"/>
+                    </if>
+
+                    <!-- create the FA Payment -->
+                    <service-call name="mantle.account.PaymentServices.create#Payment" out-map="faPaymentOut" out-map-add-to-existing="false"
+                            in-map="[paymentTypeEnumId:'PtInvoicePayment', statusId:'PmntAuthorized',
+                                paymentInstrumentEnumId:'PiFinancialAccount', finAccountId:finAccountId, effectiveDate:responseDate,
+                                fromPartyId:returnHeader.vendorPartyId, toPartyId:returnHeader.customerPartyId,
+                                amount:creditTotal, amountUomId:returnHeader.currencyUomId, forInvoiceId:returnInvoiceId]"/>
+                    <!-- deliver the FA Payment via FA Trans; NOTE: could also do via SECA on set payment status to Delivered -->
+                    <service-call name="mantle.account.FinancialAccountServices.checkCreate#PaymentTrans" out-map="faTxOut" out-map-add-to-existing="false"
+                            in-map="[paymentId:faPaymentOut.paymentId, reasonEnumId:'FatrCsCredit']"/>
+
+                    <!-- set finAccountTransId and update all credit return items -->
+                    <iterate list="faItemList" entry="returnItem">
+                        <set field="returnItem.finAccountTransId" from="faTxOut.finAccountTransId"/>
+                        <set field="returnItem.refundPaymentId" from="faPaymentOut.paymentId"/>
+                        <entity-update value-field="returnItem"/>
+
+                        <if condition="returnItem.statusId == 'ReturnReceived'">
+                            <service-call name="mantle.order.ReturnServices.complete#ReturnItem"
+                                    in-map="[returnId:returnId, returnItemSeqId:returnItem.returnItemSeqId]"/></if>
+                    </iterate>
+                </if>
+            </if>
+            <!-- old approach, one direct FA transaction per item:
+            <iterate list="creditItemList" entry="returnItem">
+                <set field="itemTotal" from="remainingAmountBySeqId.get(returnItem.returnItemSeqId)"/>
+                <if condition="itemTotal == 0.0"><continue/></if>
 
                 <set field="finAccountId" from="returnHeader.finAccountId"/>
                 <if condition="!finAccountId">
@@ -722,41 +789,42 @@ along with this software (see the LICENSE.md file). If not, see
                             in-map="[finAccountTypeId:'CustomerCredit', ownerPartyId:returnHeader.customerPartyId,
                                 organizationPartyId:returnHeader.vendorPartyId]" out-map="context"/>
                 </if>
-                <if condition="itemAmount &gt; 0.0"><then>
+
+                <if condition="itemTotal &gt; 0.0"><then>
                     <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="faTxOut"
-                            in-map="[finAccountId:finAccountId, reasonEnumId:'FatrCsCredit', amount:itemAmount]"/>
+                            in-map="[finAccountId:finAccountId, reasonEnumId:'FatrCsCredit', amount:itemTotal]"/>
                     <set field="returnItem.finAccountTransId" from="faTxOut.finAccountTransId"/>
                 </then><else>
                     <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" out-map="faTxOut"
-                            in-map="[finAccountId:finAccountId, reasonEnumId:'FatrCsCredit', amount:-itemAmount]"/>
+                            in-map="[finAccountId:finAccountId, reasonEnumId:'FatrCsCredit', amount:-itemTotal]"/>
                     <set field="returnItem.finAccountTransId" from="faTxOut.finAccountTransId"/>
                 </else></if>
 
-                <set field="returnItem.responseAmount" from="itemAmount"/>
-                <set field="returnItem.responseDate" from="ec.user.nowTimestamp"/>
+                <set field="returnItem.responseAmount" from="itemTotal"/>
+                <set field="returnItem.responseDate" from="responseDate"/>
                 <entity-update value-field="returnItem"/>
 
                 <if condition="returnItem.statusId == 'ReturnReceived'">
                     <service-call name="mantle.order.ReturnServices.complete#ReturnItem"
                             in-map="[returnId:returnId, returnItemSeqId:returnItem.returnItemSeqId]"/></if>
             </iterate>
+            -->
 
             <!-- Refund (Payment); consolidate for checks -->
             <if condition="refundItemList">
-                <set field="checkAmount" from="0.0"/>
-                <set field="checkItemList" from="[]"/>
+                <set field="paymentTotal" from="0.0"/>
+                <set field="paymentItemList" from="[]"/>
                 <iterate list="refundItemList" entry="returnItem">
-                    <set field="itemAmount" from="remainingAmountBySeqId.get(returnItem.returnItemSeqId)"/>
-                    <if condition="itemAmount == 0.0"><continue/></if>
+                    <set field="itemTotal" from="remainingAmountBySeqId.get(returnItem.returnItemSeqId)"/>
+                    <if condition="itemTotal == 0.0"><continue/></if>
 
-                    <!-- TODO: handle CC refunds, other paymentInstrumentEnumId based on original payment method or ReturnHeader.paymentMethodId -->
-                    <set field="checkAmount" from="checkAmount + itemAmount"/>
-                    <script>checkItemList.add(returnItem)</script>
-                    <set field="returnItem.responseAmount" from="itemAmount"/>
-                    <set field="returnItem.responseDate" from="ec.user.nowTimestamp"/>
+                    <set field="paymentTotal" from="paymentTotal + itemTotal"/>
+                    <script>paymentItemList.add(returnItem)</script>
+                    <set field="returnItem.responseAmount" from="itemTotal"/>
+                    <set field="returnItem.responseDate" from="responseDate"/>
                 </iterate>
 
-                <if condition="checkAmount">
+                <if condition="paymentTotal">
                     <!-- lookup Return Refund PaymentMethod (BankAccount) for internal org (vendor) -->
                     <entity-find entity-name="mantle.account.method.PaymentMethod" list="paymentMethodList">
                         <date-filter/><econdition field-name="ownerPartyId" from="returnHeader.vendorPartyId"/>
@@ -766,33 +834,40 @@ along with this software (see the LICENSE.md file). If not, see
                         <econdition field-name="purposeEnumId" value="PmpGeneral"/><order-by field-name="-fromDate"/></entity-find></if>
                     <if condition="paymentMethodList"><set field="paymentMethodId" from="paymentMethodList[0].paymentMethodId"/></if>
 
-                    <!-- TODO handle other side of Payment, for each refund Payment here:
+                    <!-- handle other side of Payment, for each refund Payment here:
                         (may be multiple Payments applied to sales invoice, if some Delivered/Applied and others not then generate partial invoice if needed and reduce the undelivered payments?)
                         - if order Payment(s) in Delivered status
-                          - NOTE: see new TODO about always creating credit memo invoice instead of modifying, simplifies the logic here
+                          - NOTE: now always creating credit memo invoice instead of modifying, simplifies the logic here; always do 'else' with setting forInvoiceId
                           - if sales invoice was adjusted above then apply refund Payment to original sales invoice Payment
                           - else generate return invoice (credit memo) and set here on Payment.forInvoiceId (return refund payment applied to return credit memo invoice)
-                        - else if order Payment(s) in Promised or Authorized status
-                          - these would be payments with forInvoiceId = sales invoice ID or order/part payments
-                          - sales incoming payments in these statuses won't be applied to invoice so the sales invoice should have been adjusted above
-                          - reduce Payment(s) amount as needed, if multiple instruments reduce CC before FinancialAccount (customer credits), etc
+                        - TODO else if order Payment(s) in Promised or Authorized status
+                          - old approach with invoice adjust, no longer applicable:
+                            - these would be payments with forInvoiceId = sales invoice ID or order/part payments
+                            - sales incoming payments in these statuses won't be applied to invoice so the sales invoice should have been adjusted above
+                            - reduce Payment(s) amount as needed, if multiple instruments reduce CC before FinancialAccount (customer credits), etc
+                          - TODO instead of Payment apply return credit memo invoice to sales invoice
                     -->
 
                     <!-- NOTE: don't specify paymentInstrumentEnumId, create#Payment will determine from toPaymentMethodId or default to PiCompanyCheck -->
-                    <service-call name="mantle.account.PaymentServices.create#Payment" out-map="context"
-                        in-map="[paymentTypeEnumId:'PtRefund', statusId:'PmntPromised',
+                    <service-call name="mantle.account.PaymentServices.create#Payment" out-map="refundPmntOut" out-map-add-to-existing="false"
+                        in-map="[paymentTypeEnumId:'PtInvoicePayment', statusId:'PmntPromised',
                             fromPartyId:returnHeader.vendorPartyId, toPartyId:returnHeader.customerPartyId,
                             paymentMethodId:paymentMethodId, toPaymentMethodId:returnHeader.paymentMethodId,
-                            amount:checkAmount, amountUomId:returnHeader.currencyUomId]"/>
+                            amount:paymentTotal, amountUomId:returnHeader.currencyUomId, forInvoiceId:returnInvoiceId]"/>
 
-                    <iterate list="checkItemList" entry="returnItem">
-                        <set field="returnItem.refundPaymentId" from="paymentId"/>
+                    <iterate list="paymentItemList" entry="returnItem">
+                        <set field="returnItem.refundPaymentId" from="refundPmntOut.paymentId"/>
                         <entity-update value-field="returnItem"/>
 
                         <if condition="returnItem.statusId == 'ReturnReceived'">
                             <service-call name="mantle.order.ReturnServices.complete#ReturnItem"
                                     in-map="[returnId:returnId, returnItemSeqId:returnItem.returnItemSeqId]"/></if>
                     </iterate>
+
+                    <!-- TODO: if CC do refund Payment via gateway; may need new code that
+                        - add Payment.refundForPaymentId and refund against that CC Payment
+                        - if multiple original payments may need to split refund across multiple CC payments
+                    -->
                 </if>
             </if>
 
@@ -808,7 +883,7 @@ along with this software (see the LICENSE.md file). If not, see
                             in-map="[orderId:orderId, productId:returnItem.productId, quantity:itemQuantity, unitAmount:0.0]"/>
 
                     <set field="returnItem.replacementOrderId" from="orderId"/>
-                    <set field="returnItem.responseDate" from="ec.user.nowTimestamp"/>
+                    <set field="returnItem.responseDate" from="responseDate"/>
                     <entity-update value-field="returnItem"/>
 
                     <if condition="returnItem.statusId == 'ReturnReceived'">
@@ -824,6 +899,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- place and approve order, come from here ready to ship -->
                 <service-call name="mantle.order.OrderServices.place#Order" in-map="[orderId:orderId]"/>
                 <service-call name="mantle.order.OrderServices.approve#Order" in-map="[orderId:orderId]"/>
+            </if>
+
+            <!-- if returnInvoiceId set statusId to InvoiceApproved, trigger payment applications based on forInvoiceId -->
+            <if condition="returnInvoiceId">
+                <service-call name="update#mantle.account.invoice.Invoice" in-map="[invoiceId:returnInvoiceId, statusId:'InvoiceApproved']"/>
             </if>
         </actions>
     </service>

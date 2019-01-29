@@ -688,7 +688,10 @@ along with this software (see the LICENSE.md file). If not, see
             1. paymentTypeEnumId == 'PtFinancialAccount': should have a payment instrument/method that is not FinancialAccount to represent transfer of funds to/from the FA account via the payment (deposit for incoming, withdraw for outgoing)
             2. paymentTypeEnumId != 'PtFinancialAccount' AND paymentInstrumentEnumId == 'PiFinancialAccount' then it is a payment for invoice/etc paid via FinancialAccount (withdraw for incoming, deposit for outgoing)
         </description>
-        <in-parameters><parameter name="paymentId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="paymentId" required="true"/>
+            <parameter name="reasonEnumId"/>
+        </in-parameters>
         <out-parameters><parameter name="finAccountTransId"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment" for-update="true"/>
@@ -696,7 +699,12 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!finAccountId"><return/></if>
             <set field="amount" from="payment.amount"/>
             <if condition="!amount"><return/></if>
-            <if condition="payment.finAccountTransId"><set field="finAccountTransId" from="payment.finAccountTransId"/><return/></if>
+            <if condition="payment.finAccountTransId">
+                <set field="finAccountTransId" from="payment.finAccountTransId"/>
+                <return/>
+            </if>
+            <if condition="payment.statusId in ['PmntProposed', 'PmntPromised', 'PmntCancelled', 'PmntVoid', 'PmntDeclined']">
+                <return message="Not creating Financial Account transaction for Payment ${paymentId} in status ${payment.status?.description}, must be Authorized or Delivered"/></if>
 
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount"/>
             <!-- is this a deposit, withdrawal, or invalid  -->
@@ -730,16 +738,20 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="isDeposit"><then>
                 <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="txOut"
                         in-map="[finAccountId:finAccountId, amount:amount, transactionDate:payment.effectiveDate,
-                            paymentId:paymentId, reasonEnumId:'FatrReplenish']"/>
+                            paymentId:paymentId, reasonEnumId:(reasonEnumId ?: 'FatrReplenish')]"/>
             </then><else>
                 <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" out-map="txOut"
                         in-map="[finAccountId:finAccountId, amount:amount, transactionDate:payment.effectiveDate,
-                            paymentId:paymentId, reasonEnumId:'FatrDisbursement']"/>
+                            paymentId:paymentId, reasonEnumId:(reasonEnumId ?: 'FatrDisbursement')]"/>
             </else></if>
 
             <set field="finAccountTransId" from="txOut.finAccountTransId"/>
             <set field="payment.finAccountTransId" from="finAccountTransId"/>
             <entity-update value-field="payment"/>
+
+            <!-- if status Authorized now consider Delivered; make sure finAccountTransId set first so not redone from SECA rule -->
+            <if condition="payment.statusId == 'PmntAuthorized'">
+                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntDelivered']"/></if>
 
             <!-- TODO: adjust Payment GL posting to post to Financial Account In Transit account (deposit or withdraw)
                 instead of to account configured for item type, maybe do here with Payment.overrideGlAccountId and then
