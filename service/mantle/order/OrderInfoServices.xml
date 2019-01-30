@@ -531,6 +531,18 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="validate" noun="Order" type="interface">
+        <in-parameters><parameter name="orderId" required="true"/></in-parameters>
+        <out-parameters><parameter name="approveWarnings" type="List"><parameter name="approveWarning"/></parameter></out-parameters>
+    </service>
+    <service verb="validate" noun="OrderRequireManual">
+        <implements service="mantle.order.OrderInfoServices.validate#Order"/>
+        <actions>
+            <set field="approveWarnings" from="[]"/>
+            <script>approveWarnings.add("==> Store configured to require manual approval")</script>
+        </actions>
+    </service>
+
     <service verb="check" noun="OrderPreApprove">
         <description>A basic set of checks for possible issues before approving an order. Use an SECA on this service to do
             additional checks, adding to the approveWarnings List as needed.</description>
@@ -591,6 +603,35 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </iterate>
             <if condition="noCustomerOrVendor"><return/></if>
+
+            <!-- Call OrderValidate services configured for ProductStore via ProductStoreApprove -->
+            <!-- NOTE: do this before others so that these warnings appear just after payment warnings -->
+            <if condition="productStoreId">
+                <entity-find entity-name="mantle.product.store.ProductStoreApprove" list="productStoreApproveList">
+                    <date-filter valid-date="orderHeader.placedDate"/>
+                    <econdition field-name="productStoreId"/>
+                    <order-by field-name="sequenceNum"/>
+                </entity-find>
+                <script><![CDATA[
+                for (storeApprove in productStoreApproveList) {
+                    String storeApproveId = storeApprove.storeApproveId
+                    try {
+                        Map parmMap = new HashMap()
+                        List promoParameterList = storeApprove.parameters
+                        for (promoParameter in promoParameterList) parmMap.put(promoParameter.parameterName, promoParameter.parameterValue)
+                        parmMap.put("orderId", orderId)
+                        parmMap.put("storeApproveId", storeApproveId)
+
+                        Map serviceRegister = storeApprove.serviceRegister
+                        Map result = ec.service.sync().name(serviceRegister.serviceName).parameters(parmMap).softValidate(true).disableAuthz().call()
+                        if (result != null && result.approveWarnings && !ec.message.hasError())
+                            approveWarnings.addAll(result.approveWarnings)
+                    } catch (Throwable t) {
+                        ec.logger.log(300, "Error calling store order approval validate service ${storeApproveId}", t)
+                    }
+                }
+                ]]></script>
+            </if>
 
             <entity-find entity-name="mantle.product.store.ProductStoreSetting" list="storeSettingList">
                 <econdition field-name="productStoreId"/></entity-find>
