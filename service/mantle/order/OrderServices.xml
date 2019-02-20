@@ -267,10 +267,22 @@ General Order Placement and eCommerce Usage
                             requireInventory:requireInventory]"/>
             </if>
 
-            <if condition="product?.amountRequire == 'Y' &amp;&amp; !selectedAmount">
-                <return error="true" message="Product ${productId} requires a selected amount"/></if>
-            <if condition="!itemDescription"><set field="itemDescription" from="product?.productName"/></if>
-            <if condition="!quantityUomId"><set field="quantityUomId" from="product?.amountUomId"/></if>
+            <if condition="isProductItem"><then>
+                <!-- set some product item defaults -->
+                <if condition="product?.amountRequire == 'Y' &amp;&amp; !selectedAmount">
+                    <return error="true" message="Product ${productId} requires a selected amount"/></if>
+                <if condition="!itemDescription"><set field="itemDescription" from="product?.productName"/></if>
+                <if condition="!quantityUomId"><set field="quantityUomId" from="product?.amountUomId"/></if>
+            </then><else-if condition="parentItemSeqId">
+                <!-- set productId from parent item -->
+                <if condition="!productId">
+                    <entity-find-one entity-name="mantle.order.OrderItem" value-field="parentItem">
+                        <field-map field-name="orderId"/>
+                        <field-map field-name="orderItemSeqId" from="parentItemSeqId"/>
+                    </entity-find-one>
+                    <set field="productId" from="parentItem?.productId"/>
+                </if>
+            </else-if></if>
 
             <service-call name="create#mantle.order.OrderItem" in-map="context" out-map="context"/>
         </actions>
@@ -300,93 +312,111 @@ General Order Placement and eCommerce Usage
                 <set field="isProductItem" from="orderItem.itemTypeEnumId in productItemTypes"/>
             </if>
 
-            <if condition="isProductItem &amp;&amp; quantity">
+            <if condition="isProductItem"><then>
+                <!-- logic for product items -->
+
                 <!-- if requireInventory check available inventory (for store/facility, product) -->
-                <service-call name="mantle.order.OrderServices.check#AvailableInventory"
-                        in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId,
+                <if condition="quantity">
+                    <service-call name="mantle.order.OrderServices.check#AvailableInventory"
+                            in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId,
                             orderItemSeqId:orderItemSeqId, requireInventory:requireInventory]"/>
-                <!-- don't let quantity go below quantity issued -->
-                <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="itemAssetIssuanceList">
-                    <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
-                <set field="itemQuantityIssued" from="0.0"/>
-                <iterate list="itemAssetIssuanceList" entry="itemAssetIssuance">
-                    <set field="itemQuantityIssued" from="itemQuantityIssued + itemAssetIssuance.quantity"/></iterate>
-                <if condition="quantity &lt; itemQuantityIssued">
-                    <set field="quantity" from="itemQuantityIssued"/>
-                    <message type="warning" public="true">Quantity requested ${quantity} is less than quantity already shipped ${itemQuantityIssued}, setting to quantity shipped</message>
+                    <!-- don't let quantity go below quantity issued -->
+                    <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="itemAssetIssuanceList">
+                        <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
+                    <set field="itemQuantityIssued" from="0.0"/>
+                    <iterate list="itemAssetIssuanceList" entry="itemAssetIssuance">
+                        <set field="itemQuantityIssued" from="itemQuantityIssued + itemAssetIssuance.quantity"/></iterate>
+                    <if condition="quantity &lt; itemQuantityIssued">
+                        <set field="quantity" from="itemQuantityIssued"/>
+                        <message type="warning" public="true">Quantity requested ${quantity} is less than quantity already shipped ${itemQuantityIssued}, setting to quantity shipped</message>
+                    </if>
                 </if>
-            </if>
 
-            <!-- calculate the price based on quantity, etc, -->
-            <if condition="unitAmount == null &amp;&amp; isProductItem"><then>
-                <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
-                <set field="orderPart" from="orderItem.part"/>
+                <!-- calculate the price based on quantity, etc, -->
+                <if condition="unitAmount == null &amp;&amp; isProductItem"><then>
+                    <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
+                    <set field="orderPart" from="orderItem.part"/>
 
-                <service-call name="mantle.product.PriceServices.get#ProductPrice" out-map="priceMap"
-                              in-map="[productId:productId, quantity:quantity, priceUomId:orderHeader.currencyUomId,
+                    <service-call name="mantle.product.PriceServices.get#ProductPrice" out-map="priceMap"
+                            in-map="[productId:productId, quantity:quantity, priceUomId:orderHeader.currencyUomId,
                                   productStoreId:orderHeader.productStoreId, customerPartyId:orderPart.customerPartyId,
                                   vendorPartyId:orderPart.vendorPartyId]"/>
 
-                <set field="unitAmount" from="priceMap.price"/>
-                <set field="unitListPrice" from="priceMap.listPrice"/>
-                <set field="isModifiedPrice" value="N"/>
-            </then><else>
-                <set field="isModifiedPrice" value="Y"/>
-            </else></if>
+                    <set field="unitAmount" from="priceMap.price"/>
+                    <set field="unitListPrice" from="priceMap.listPrice"/>
+                    <set field="isModifiedPrice" value="N"/>
+                </then><else>
+                    <set field="isModifiedPrice" value="Y"/>
+                </else></if>
 
-            <!-- on quantity changes adjust ShipmentItem/Source (only if some exist for 'open' shipments) -->
-            <if condition="quantity != null &amp;&amp; quantity != orderItem.quantity">
-                <entity-find entity-name="mantle.shipment.ShipmentAndItemSource" list="shipmentItemSourceList">
-                    <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/>
-                    <econdition field-name="shipmentStatusId" operator="in" value="ShipInput,ShipScheduled"/>
-                    <order-by field-name="shipmentId"/>
-                </entity-find>
-                <if condition="shipmentItemSourceList">
-                    <set field="sourceQuantityTotal" from="0"/>
-                    <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
-                        <set field="sourceQuantityTotal" from="sourceQuantityTotal + shipmentItemSource.quantity"/></iterate>
-                    <if condition="quantity &gt; sourceQuantityTotal"><then>
-                        <set field="quantityIncrease" from="quantity - sourceQuantityTotal"/>
-                        <!-- quantity increase, we don't know which shipment it should go on so just pick the first -->
-                        <set field="shipmentItemSource" from="shipmentItemSourceList[0]"/>
-                        <service-call name="update#mantle.shipment.ShipmentItemSource"
-                                      in-map="[shipmentItemSourceId:shipmentItemSource.shipmentItemSourceId,
-                                          quantity:(shipmentItemSource.quantity + quantityIncrease),
-                                          quantityNotHandled:(shipmentItemSource.quantityNotHandled + quantityIncrease)]"/>
-
-                        <!-- also update ShipmentItem.quantity -->
-                        <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
-                            <field-map field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
-                            <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
-                        <service-call name="update#mantle.shipment.ShipmentItem"
-                                      in-map="[shipmentId:shipmentItem.shipmentId, productId:shipmentItem.productId,
-                                          quantity:(shipmentItem.quantity + quantityIncrease)]"/>
-                    </then><else>
-                        <!-- a little more fun, deduct as available from each item in the list until all handled -->
-                        <set field="quantityReduceRemaining" from="sourceQuantityTotal - quantity"/>
+                <!-- on quantity changes adjust ShipmentItem/Source (only if some exist for 'open' shipments) -->
+                <if condition="quantity != null &amp;&amp; quantity != orderItem.quantity">
+                    <entity-find entity-name="mantle.shipment.ShipmentAndItemSource" list="shipmentItemSourceList">
+                        <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/>
+                        <econdition field-name="shipmentStatusId" operator="in" value="ShipInput,ShipScheduled"/>
+                        <order-by field-name="shipmentId"/>
+                    </entity-find>
+                    <if condition="shipmentItemSourceList">
+                        <set field="sourceQuantityTotal" from="0"/>
                         <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
-                            <set field="quantityReduce" from="quantityReduceRemaining &gt; shipmentItemSource.quantityNotHandled ?
-                                    shipmentItemSource.quantityNotHandled : quantityReduceRemaining"/>
-                            <if condition="quantityReduce == 0"><break/></if>
+                            <set field="sourceQuantityTotal" from="sourceQuantityTotal + shipmentItemSource.quantity"/></iterate>
+                        <if condition="quantity &gt; sourceQuantityTotal"><then>
+                            <set field="quantityIncrease" from="quantity - sourceQuantityTotal"/>
+                            <!-- quantity increase, we don't know which shipment it should go on so just pick the first -->
+                            <set field="shipmentItemSource" from="shipmentItemSourceList[0]"/>
                             <service-call name="update#mantle.shipment.ShipmentItemSource"
                                     in-map="[shipmentItemSourceId:shipmentItemSource.shipmentItemSourceId,
-                                        quantity:(shipmentItemSource.quantity - quantityReduce),
-                                        quantityNotHandled:(shipmentItemSource.quantityNotHandled - quantityReduce)]"/>
-                            <set field="quantityReduceRemaining" from="quantityReduceRemaining - quantityReduce"/>
+                                          quantity:(shipmentItemSource.quantity + quantityIncrease),
+                                          quantityNotHandled:(shipmentItemSource.quantityNotHandled + quantityIncrease)]"/>
 
                             <!-- also update ShipmentItem.quantity -->
                             <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
                                 <field-map field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
                                 <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
-                            <set field="newItemQuantity" from="shipmentItem.quantity &gt; quantityReduce ?
-                                    shipmentItem.quantity - quantityReduce : 0.0"/>
                             <service-call name="update#mantle.shipment.ShipmentItem"
                                     in-map="[shipmentId:shipmentItem.shipmentId, productId:shipmentItem.productId,
+                                          quantity:(shipmentItem.quantity + quantityIncrease)]"/>
+                        </then><else>
+                            <!-- a little more fun, deduct as available from each item in the list until all handled -->
+                            <set field="quantityReduceRemaining" from="sourceQuantityTotal - quantity"/>
+                            <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
+                                <set field="quantityReduce" from="quantityReduceRemaining &gt; shipmentItemSource.quantityNotHandled ?
+                                    shipmentItemSource.quantityNotHandled : quantityReduceRemaining"/>
+                                <if condition="quantityReduce == 0"><break/></if>
+                                <service-call name="update#mantle.shipment.ShipmentItemSource"
+                                        in-map="[shipmentItemSourceId:shipmentItemSource.shipmentItemSourceId,
+                                        quantity:(shipmentItemSource.quantity - quantityReduce),
+                                        quantityNotHandled:(shipmentItemSource.quantityNotHandled - quantityReduce)]"/>
+                                <set field="quantityReduceRemaining" from="quantityReduceRemaining - quantityReduce"/>
+
+                                <!-- also update ShipmentItem.quantity -->
+                                <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
+                                    <field-map field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
+                                    <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
+                                <set field="newItemQuantity" from="shipmentItem.quantity &gt; quantityReduce ?
+                                    shipmentItem.quantity - quantityReduce : 0.0"/>
+                                <service-call name="update#mantle.shipment.ShipmentItem"
+                                        in-map="[shipmentId:shipmentItem.shipmentId, productId:shipmentItem.productId,
                                         quantity:newItemQuantity]"/>
-                        </iterate>
-                    </else></if>
+                            </iterate>
+                        </else></if>
+                    </if>
                 </if>
-            </if>
+            </then><else>
+                <!-- logic for non-product items -->
+
+                <!-- defaults from parent item -->
+                <if condition="parentItemSeqId">
+                    <!-- set productId from parent item -->
+                    <if condition="!productId">
+                        <entity-find-one entity-name="mantle.order.OrderItem" value-field="parentItem">
+                            <field-map field-name="orderId"/>
+                            <field-map field-name="orderItemSeqId" from="parentItemSeqId"/>
+                        </entity-find-one>
+                        <set field="productId" from="parentItem?.productId"/>
+                    </if>
+                </if>
+            </else></if>
 
             <service-call name="update#mantle.order.OrderItem" in-map="context"/>
             <!-- leave this out, may be nice to have a way to easily ignore messages from a specific service call: <message>Order item ${orderItemSeqId} updated</message> -->
