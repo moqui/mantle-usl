@@ -581,6 +581,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="totalAuthorized" from="0"/>
             <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
                 <econdition field-name="orderId"/></entity-find>
+            <set field="paymentMethodIdSet" from="new HashSet()"/>
             <iterate list="paymentList" entry="payment">
                 <if condition="payment.statusId in ['PmntAuthorized', 'PmntDelivered', 'PmntConfirmed']"><then>
                     <set field="totalPromised" from="totalPromised + (payment.amount ?: 0.0)"/>
@@ -588,6 +589,8 @@ along with this software (see the LICENSE.md file). If not, see
                 </then><else-if condition="payment.statusId == 'PmntPromised'">
                     <set field="totalPromised" from="totalPromised + (payment.amount ?: 0.0)"/>
                 </else-if></if>
+                <if condition="payment.paymentMethodId &amp;&amp; !(payment.statusId in ['PmntCancelled', 'PmntVoid', 'PmntDeclined'])">
+                    <script>paymentMethodIdSet.add(payment.paymentMethodId)</script></if>
                 <if condition="payment.amountUomId != orderHeader.currencyUomId">
                     <script>approveWarnings.add(ec.resource.expand('OrderApproveCurrencyDifferent', null))</script></if>
             </iterate>
@@ -609,6 +612,20 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </iterate>
             <if condition="noCustomerOrVendor"><return/></if>
+
+            <!-- get all PaymentMethods -->
+            <entity-find entity-name="mantle.account.method.PaymentMethod" list="paymentMethodList">
+                <econdition field-name="paymentMethodId" operator="in" from="paymentMethodIdSet"/></entity-find>
+
+            <!-- get all billing addresses -->
+            <set field="billingAddressIdSet" from="new HashSet(paymentMethodList*.postalContactMechId)"/>
+            <entity-find entity-name="mantle.party.contact.ContactMechPostalAddress" list="billingAddressList">
+                <econdition field-name="contactMechId" operator="in" from="billingAddressIdSet"/></entity-find>
+
+            <!-- get all shipping addresses -->
+            <set field="shippingAddressIdSet" from="new HashSet(orderPartList*.postalContactMechId)"/>
+            <entity-find entity-name="mantle.party.contact.ContactMechPostalAddress" list="shippingAddressList">
+                <econdition field-name="contactMechId" operator="in" from="shippingAddressIdSet"/></entity-find>
 
             <!-- Call OrderValidate services configured for ProductStore via ProductStoreApprove -->
             <!-- NOTE: do this before others so that these warnings appear just after payment warnings -->
@@ -671,16 +688,124 @@ along with this software (see the LICENSE.md file). If not, see
                         <continue/>
                     </if>
                     <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveAddrNotValid'.equals(it.settingTypeEnumId)})?.settingValue)">
-                        <entity-find-one entity-name="mantle.party.contact.ContactMech" value-field="postalCm">
+                        <entity-find-one entity-name="mantle.party.contact.ContactMechPostalAddress" value-field="postalCm">
                             <field-map field-name="contactMechId" from="orderPart.postalContactMechId"/></entity-find-one>
                         <set field="trustLevelEnumId" from="postalCm.trustLevelEnumId ?: 'CmtlNew'"/>
                         <if condition="!'CmtlValid'.equals(trustLevelEnumId) &amp;&amp; !'CmtlVerified'.equals(trustLevelEnumId)">
                             <entity-find-one entity-name="moqui.basic.Enumeration" value-field="trustLevelEnum">
                                 <field-map field-name="enumId" from="trustLevelEnumId"/></entity-find-one>
-                            <script>approveWarnings.add(ec.resource.expand('Part ${orderPart.orderPartSeqId} shipping address ${orderPart.postalContactMechId} has trust level of ${trustLevelEnum.description}', null))</script>
+                            <script>approveWarnings.add(ec.resource.expand('Part ${orderPart.orderPartSeqId} shipping address ${postalCm.address1}, ${postalCm.postalCode} has trust level of ${trustLevelEnum.description}', null))</script>
                         </if>
                     </if>
                 </iterate>
+
+                <!-- potential fraud: billing and shipping addresses different (multiple payments: any billing address differs) -->
+                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveBillShipAddrDiff'.equals(it.settingTypeEnumId)})?.settingValue)">
+                    <iterate list="billingAddressList" entry="billingAddress">
+                        <set field="foundCurMatch" from="false"/>
+                        <iterate list="shippingAddressList" entry="shippingAddress">
+                            <!-- if IDs match call it good -->
+                            <if condition="billingAddress.contactMechId == shippingAddress.contactMechId">
+                                <set field="foundCurMatch" from="true"/><break/></if>
+
+                            <!-- if key fields not equal (or present and not equal) continue because it's not a match -->
+                            <if condition="billingAddress.postalCode != shippingAddress.postalCode"><continue/></if>
+                            <if condition="billingAddress.countryGeoId &amp;&amp; shippingAddress.countryGeoId &amp;&amp;
+                                    billingAddress.countryGeoId != shippingAddress.countryGeoId"><continue/></if>
+                            <if condition="billingAddress.unitNumber &amp;&amp; shippingAddress.unitNumber &amp;&amp;
+                                    removeNonAlphaNumeric(billingAddress.unitNumber) != removeNonAlphaNumeric(shippingAddress.unitNumber)"><continue/></if>
+                            <!-- last check tougher, match first number found in address1 -->
+                            <if condition="findFirstNumber(billingAddress.address1) != findFirstNumber(shippingAddress.address1)"><continue/></if>
+                            <!-- if we get here all matched so we're done -->
+                            <set field="foundCurMatch" from="true"/>
+                            <break/>
+                        </iterate>
+                        <if condition="!foundCurMatch"><script>approveWarnings.add(ec.resource.expand(
+                                'Billing address ${billingAddress.address1}, ${billingAddress.postalCode} does not match shipping address', null))</script></if>
+                    </iterate>
+                </if>
+
+                <!-- potential fraud: different names on Party and PaymentMethod -->
+                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApprovePayMethNameDiff'.equals(it.settingTypeEnumId)})?.settingValue)">
+                    <entity-find-one entity-name="mantle.party.PartyDetail" value-field="customerParty">
+                        <field-map field-name="partyId" from="customerPartyId"/></entity-find-one>
+                    <iterate list="paymentMethodList" entry="paymentMethod">
+                        <set field="combinedCustName" value="${customerParty.organizationName?.trim()?:''}${customerParty.firstName?.trim()?:''}${customerParty.middleName ? ' ' + customerParty.middleName.trim() : ''}${customerParty.lastName ? ' ' + customerParty.lastName.trim() : ''}"/>
+                        <set field="combinedPmPersonName" value="${paymentMethod.firstNameOnAccount?.trim()?:''}${paymentMethod.middleNameOnAccount ? ' ' + paymentMethod.middleNameOnAccount.trim() : ''}${paymentMethod.lastNameOnAccount ? ' ' + paymentMethod.lastNameOnAccount.trim() : ''}"/>
+                        <if condition="customerParty.organizationName"><then>
+                            <if condition="customerParty.organizationName.trim().toLowerCase() != paymentMethod.companyNameOnAccount?.trim()?.toLowerCase() &amp;&amp;
+                                    customerParty.organizationName != combinedPmPersonName?.toLowerCase()">
+                                <script>approveWarnings.add(ec.resource.expand(
+                                        'Name on payment method ${paymentMethod.companyNameOnAccount ?: combinedPmPersonName} does not match customer name ${combinedCustName}', null))</script>
+                            </if>
+                        </then><else>
+                            <if condition="combinedCustName?.trim()?.toLowerCase() != combinedPmPersonName?.trim()?.toLowerCase() &amp;&amp;
+                                    (paymentMethod.firstNameOnAccount?.trim()?.toLowerCase() != customerParty.firstName?.trim()?.toLowerCase() ||
+                                        paymentMethod.lastNameOnAccount?.trim()?.toLowerCase() != customerParty.lastName?.trim()?.toLowerCase())">
+                                <script>approveWarnings.add(ec.resource.expand(
+                                        'Name on payment method ${combinedPmPersonName} does not match customer name ${combinedCustName}', null))</script>
+                            </if>
+                        </else></if>
+                    </iterate>
+                </if>
+
+                <!-- TODO: potential fraud: CreditCard card number blacklisted via hashed card number, bank and account number, other payment method types? (if key field(s) available) -->
+                <!--
+                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApprovePayMethBlacklist'.equals(it.settingTypeEnumId)})?.settingValue)">
+                </if>
+                -->
+
+                <!-- potential fraud: ContactMech blacklisted (shipping address + phone, billing address(es) + phone, email) -->
+                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveContactBlacklist'.equals(it.settingTypeEnumId)})?.settingValue)">
+                    <iterate list="shippingAddressList" entry="addr">
+                        <!-- NOTE: don't need to check these for shipping addresses, checked and displayed when validation ship addresses above (general warning if trust level not Valid):
+                        <if condition="'CmtlBlacklisted' == addr.trustLevelEnumId">
+                            <script>approveWarnings.add(ec.resource.expand('Shipping address ${addr.address1}, ${addr.postalCode} is BLACKLISTED', null))</script><continue/></if>
+                        <if condition="'CmtlGreylisted' == addr.trustLevelEnumId">
+                            <script>approveWarnings.add(ec.resource.expand('Shipping address ${addr.address1}, ${addr.postalCode} is greylisted', null))</script><continue/></if>
+                        -->
+                        <!-- if current address not black/greylisted then look for others in system (generally more likely/useful) -->
+                        <service-call name="mantle.party.DuplicateServices.find#PostalAddresses" out-map="blacklistAddrOut" out-map-add-to-existing="false"
+                                in-map="[partyId:customerPartyId, address1:addr.address1, unitNumber:addr.unitNumber, postalCode:addr.postalCode,
+                                    postalCodeExt:addr.postalCodeExt, countryGeoId:addr.countryGeoId,
+                                    trustLevelEnumId:'CmtlGreylisted,CmtlBlacklisted']"/>
+                        <if condition="blacklistAddrOut.postalAddressList">
+                            <set field="firstMatch" from="blacklistAddrOut.postalAddressList[0]"/>
+                            <entity-find-one entity-name="moqui.basic.Enumeration" value-field="trustLevelEnum">
+                                <field-map field-name="enumId" from="firstMatch.trustLevelEnumId"/></entity-find-one>
+                            <script>approveWarnings.add(ec.resource.expand('Shipping address ${addr.address1}, ${addr.postalCode} matches ${trustLevelEnum?.description} address ${firstMatch.address1}, ${firstMatch.postalCode}', null))</script>
+                        </if>
+                    </iterate>
+                    <iterate list="billingAddressList" entry="addr">
+                        <!-- skip billing addresses that are also shipping addresses, already checked above -->
+                        <if condition="addr.contactMechId in shippingAddressIdSet"><continue/></if>
+                        <if condition="'CmtlBlacklisted' == addr.trustLevelEnumId">
+                            <script>approveWarnings.add(ec.resource.expand('Billing address ${addr.address1}, ${addr.postalCode} is BLACKLISTED', null))</script>
+                            <continue/>
+                        </if>
+                        <if condition="'CmtlGreylisted' == addr.trustLevelEnumId">
+                            <script>approveWarnings.add(ec.resource.expand('Billing address ${addr.address1}, ${addr.postalCode} is Greylisted', null))</script>
+                            <continue/>
+                        </if>
+                        <!-- if current address not black/greylisted then look for others in system (generally more likely/useful) -->
+                        <service-call name="mantle.party.DuplicateServices.find#PostalAddresses" out-map="blacklistAddrOut" out-map-add-to-existing="false"
+                                in-map="[partyId:customerPartyId, address1:addr.address1, unitNumber:addr.unitNumber, postalCode:addr.postalCode,
+                                    postalCodeExt:addr.postalCodeExt, countryGeoId:addr.countryGeoId,
+                                    trustLevelEnumId:'CmtlGreylisted,CmtlBlacklisted']"/>
+                        <if condition="blacklistAddrOut.postalAddressList">
+                            <set field="firstMatch" from="blacklistAddrOut.postalAddressList[0]"/>
+                            <entity-find-one entity-name="moqui.basic.Enumeration" value-field="trustLevelEnum">
+                                <field-map field-name="enumId" from="firstMatch.trustLevelEnumId"/></entity-find-one>
+                            <script>approveWarnings.add(ec.resource.expand('Billing address ${addr.address1}, ${addr.postalCode} matches ${trustLevelEnum?.description} address ${firstMatch.address1}, ${firstMatch.postalCode}', null))</script>
+                        </if>
+                    </iterate>
+
+                    <!-- TODO: maybe also do phone numbers, etc
+                    <service-call name="mantle.party.DuplicateServices.find#TelecomNumbers" out-map="blacklistTelOut" out-map-add-to-existing="false"
+                            in-map="[partyId:partyId, areaCode:ptn.areaCode, contactNumber:ptn.contactNumber,
+                                trustLevelEnumId:'CmtlGreylisted,CmtlBlacklisted']"/>
+                    -->
+                </if>
 
                 <!-- is this order much larger than past orders? (by part if 3 or more; avg + 3 std devs) -->
                 <if condition="otherPartCount &gt;= 3">
@@ -866,41 +991,6 @@ along with this software (see the LICENSE.md file). If not, see
                         <if condition="maxPrice &amp;&amp; unitAmount &gt; maxPrice"><script>approveWarnings.add(ec.resource.expand(
                                 'Item ${orderItem.orderItemSeqId} price ${ec.l10n.format(unitAmount, "0.00")} is greater than maximum price ${ec.l10n.format(maxPrice, "0.00")} for product ${orderItem.productId}', null))</script></if>
                     </iterate>
-                </if>
-
-                <!-- TODO: potential fraud: different names on Party and CreditCard -->
-                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveCcNameDiff'.equals(it.settingTypeEnumId)})?.settingValue)">
-
-                </if>
-
-                <!-- TODO: potential fraud: billing and shipping addresses different (multiple payments: any billing address differs) -->
-                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveBillShipAddrDiff'.equals(it.settingTypeEnumId)})?.settingValue)">
-
-                </if>
-
-                <!-- TODO: potential fraud: ContactMech blacklisted (shipping address + phone, billing address(es) + phone, email) -->
-                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveContactBlacklist'.equals(it.settingTypeEnumId)})?.settingValue)">
-
-                    <!--
-
-                    <service-call name="mantle.party.DuplicateServices.find#PostalAddresses" out-map="blacklistAddrOut" out-map-add-to-existing="false"
-                            in-map="[partyId:partyId, address1:ppa.address1, unitNumber:ppa.unitNumber, postalCode:ppa.postalCode,
-                                postalCodeExt:ppa.postalCodeExt, countryGeoId:ppa.countryGeoId,
-                                trustLevelEnumId:'CmtlGreylisted,CmtlBlacklisted']"/>
-
-
-
-                    <service-call name="mantle.party.DuplicateServices.find#TelecomNumbers" out-map="blacklistTelOut" out-map-add-to-existing="false"
-                            in-map="[partyId:partyId, areaCode:ptn.areaCode, contactNumber:ptn.contactNumber,
-                                trustLevelEnumId:'CmtlGreylisted,CmtlBlacklisted']"/>
-
-                    -->
-
-                </if>
-
-                <!-- TODO: potential fraud: CreditCard card number blacklisted, via hashed card number, bank and account number, other payment method types? (if key field(s) available) -->
-                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApprovePayMethBlacklist'.equals(it.settingTypeEnumId)})?.settingValue)">
-
                 </if>
             </then><else>
                 <!-- ========== Purchase Order Validations ========== -->
