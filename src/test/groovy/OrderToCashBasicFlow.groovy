@@ -127,21 +127,21 @@ class OrderToCashBasicFlow extends Specification {
         // item 1 sales tax
         ec.service.sync().name("mantle.order.OrderServices.create#OrderItem")
                 .parameters([orderId:cartOrderId, orderPartSeqId:cartOrderPartSeqId, parentItemSeqId:addOut1.orderItemSeqId,
-                    itemTypeEnumId:'ItemSalesTax', itemDescription:'Text Tax 7%', quantity:1, unitAmount:1.189]).call() // 16.99 * 0.07 = 1.1893
+                    itemTypeEnumId:'ItemSalesTax', itemDescription:'Test Tax 7%', quantity:1, unitAmount:1.189]).call() // 16.99 * 0.07 = 1.1893
         // item 2 discount and sales tax, child qty == parent qty
         ec.service.sync().name("mantle.order.OrderServices.create#OrderItem")
                 .parameters([orderId:cartOrderId, orderPartSeqId:cartOrderPartSeqId, parentItemSeqId:addOut2.orderItemSeqId,
                     itemTypeEnumId:'ItemDiscount', itemDescription:'Discount why? Because we love you.', quantity:5, unitAmount:-1.23]).call()
         ec.service.sync().name("mantle.order.OrderServices.create#OrderItem")
                 .parameters([orderId:cartOrderId, orderPartSeqId:cartOrderPartSeqId, parentItemSeqId:addOut2.orderItemSeqId,
-                    itemTypeEnumId:'ItemSalesTax', itemDescription:'Text Tax 7%', quantity:5, unitAmount:0.458]).call() // (7.77 - 1.23) * 0.07 = 0.4578
+                    itemTypeEnumId:'ItemSalesTax', itemDescription:'Test Tax 7%', quantity:5, unitAmount:0.458]).call() // (7.77 - 1.23) * 0.07 = 0.4578
         // item 3 discount and sales tax, child qty != parent qty; sales tax with qty = 1 to simulate partial data coming from external system
         ec.service.sync().name("mantle.order.OrderServices.create#OrderItem")
                 .parameters([orderId:cartOrderId, orderPartSeqId:cartOrderPartSeqId, parentItemSeqId:addOut3.orderItemSeqId,
                     itemTypeEnumId:'ItemDiscount', itemDescription:'Discount why? Because we love you.', quantity:4, unitAmount:-2.345]).call()
         ec.service.sync().name("mantle.order.OrderServices.create#OrderItem")
                 .parameters([orderId:cartOrderId, orderPartSeqId:cartOrderPartSeqId, parentItemSeqId:addOut3.orderItemSeqId,
-                    itemTypeEnumId:'ItemSalesTax', itemDescription:'Text Tax 7%', quantity:1, unitAmount:5.28]).call() // ((12.12 * 7) - (2.345 * 4)) * 0.07 = 5.2822
+                    itemTypeEnumId:'ItemSalesTax', itemDescription:'Test Tax 7%', quantity:1, unitAmount:5.28]).call() // ((12.12 * 7) - (2.345 * 4)) * 0.07 = 5.2822
 
         // add shipping charges, order part level not per item; NOTE: set so order total matches historic value of 140.68
         ec.service.sync().name("mantle.order.OrderServices.create#OrderItem")
@@ -426,7 +426,7 @@ class OrderToCashBasicFlow extends Specification {
                     <shipmentItemSources shipmentItemSourceId="55500" orderId="${cartOrderId}" orderItemSeqId="01" quantity="1" 
                         productId="DEMO_1_1" statusId="SisPacked" quantityNotHandled="0" shipmentId="${shipResult.shipmentId}"/>
                 </items>
-                <items invoiceItemSeqId="02" parentItemSeqId="01" amount="1.189" quantity="1" description="Text Tax 7%" itemTypeEnumId="ItemSalesTax">
+                <items invoiceItemSeqId="02" parentItemSeqId="01" amount="1.189" quantity="1" description="Test Tax 7%" itemTypeEnumId="ItemSalesTax">
                     <orderItemBillings orderItemSeqId="04" amount="1.19" quantity="1" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55501"/>
                 </items>
                 <items invoiceItemSeqId="03" amount="7.77" quantity="4" productId="DEMO_3_1" description="Demo Product Three-One" itemTypeEnumId="ItemProduct" assetId="DEMO_3_1A">
@@ -440,7 +440,7 @@ class OrderToCashBasicFlow extends Specification {
                 <items invoiceItemSeqId="04" parentItemSeqId="03" amount="-1.23" quantity="4" description="Discount why? Because we love you." itemTypeEnumId="ItemDiscount">
                     <orderItemBillings orderItemSeqId="05" amount="-1.23" quantity="4" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55503"/>
                 </items>
-                <items invoiceItemSeqId="05" parentItemSeqId="03" amount="0.458" quantity="4" description="Text Tax 7%" itemTypeEnumId="ItemSalesTax">
+                <items invoiceItemSeqId="05" parentItemSeqId="03" amount="0.458" quantity="4" description="Test Tax 7%" itemTypeEnumId="ItemSalesTax">
                     <orderItemBillings orderItemSeqId="06" amount="0.46" quantity="4" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55504"/>
                 </items>
                 <items invoiceItemSeqId="06" amount="12.12" quantity="5" productId="DEMO_2_1" description="Demo Product Two-One" itemTypeEnumId="ItemProduct" assetId="55500">
@@ -454,7 +454,7 @@ class OrderToCashBasicFlow extends Specification {
                 <items amount="-6.7" quantity="1" description="Discount why? Because we love you." invoiceItemSeqId="07" itemTypeEnumId="ItemDiscount" parentItemSeqId="06">
                     <orderItemBillings orderItemSeqId="07" amount="-6.7" quantity="1" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55506"/>
                 </items>
-                <items amount="3.77" quantity="1" description="Text Tax 7%" invoiceItemSeqId="08" itemTypeEnumId="ItemSalesTax" parentItemSeqId="06">
+                <items amount="3.77" quantity="1" description="Test Tax 7%" invoiceItemSeqId="08" itemTypeEnumId="ItemSalesTax" parentItemSeqId="06">
                     <orderItemBillings orderItemSeqId="08" amount="3.77" quantity="1" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55507"/>
                 </items>
                 <items amount="6.77" quantity="1" description="Standard Shipping" invoiceItemSeqId="09" itemTypeEnumId="ItemShipping">
@@ -482,7 +482,7 @@ class OrderToCashBasicFlow extends Specification {
                         description="Demo Product One-One" reconcileStatusId="AterNot" invoiceItemSeqId="01" isSummary="N" 
                         glAccountTypeEnumId="GatSales" assetId="55400"/>
                 <entries acctgTransEntrySeqId="02" amount="1.19" debitCreditFlag="C" glAccountId="224000000" 
-                        description="Text Tax 7%" reconcileStatusId="AterNot" invoiceItemSeqId="02" isSummary="N" 
+                        description="Test Tax 7%" reconcileStatusId="AterNot" invoiceItemSeqId="02" isSummary="N" 
                         glAccountTypeEnumId="GatAccruedExpenses"/>
 
                 <entries acctgTransEntrySeqId="03" amount="31.08" debitCreditFlag="C" glAccountId="411000000" productId="DEMO_3_1" 
@@ -492,7 +492,7 @@ class OrderToCashBasicFlow extends Specification {
                         description="Discount why? Because we love you." reconcileStatusId="AterNot" invoiceItemSeqId="04" isSummary="N" 
                         glAccountTypeEnumId="GatDiscounts"/>
                 <entries acctgTransEntrySeqId="05" amount="1.83" debitCreditFlag="C" glAccountId="224000000" 
-                        description="Text Tax 7%" reconcileStatusId="AterNot" invoiceItemSeqId="05" isSummary="N" glAccountTypeEnumId="GatAccruedExpenses"/>
+                        description="Test Tax 7%" reconcileStatusId="AterNot" invoiceItemSeqId="05" isSummary="N" glAccountTypeEnumId="GatAccruedExpenses"/>
 
                 <entries acctgTransEntrySeqId="06" amount="60.6" debitCreditFlag="C" glAccountId="411000000" productId="DEMO_2_1" 
                         description="Demo Product Two-One" reconcileStatusId="AterNot" invoiceItemSeqId="06" isSummary="N" 
@@ -501,7 +501,7 @@ class OrderToCashBasicFlow extends Specification {
                         description="Discount why? Because we love you." reconcileStatusId="AterNot" invoiceItemSeqId="07" isSummary="N" 
                         glAccountTypeEnumId="GatDiscounts"/>
                 <entries acctgTransEntrySeqId="08" amount="3.77" debitCreditFlag="C" glAccountId="224000000" 
-                        description="Text Tax 7%" reconcileStatusId="AterNot" invoiceItemSeqId="08" isSummary="N" 
+                        description="Test Tax 7%" reconcileStatusId="AterNot" invoiceItemSeqId="08" isSummary="N" 
                         glAccountTypeEnumId="GatAccruedExpenses"/>
                 <entries acctgTransEntrySeqId="09" amount="6.77" debitCreditFlag="C" glAccountId="441000000" 
                         description="Standard Shipping" reconcileStatusId="AterNot" invoiceItemSeqId="09" isSummary="N"/>

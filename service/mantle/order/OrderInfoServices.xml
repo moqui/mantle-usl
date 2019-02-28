@@ -32,6 +32,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <auto-parameters entity-name="mantle.order.OrderItem"/></parameter></parameter>
             <parameter name="allItemsAuditLogList" type="List"><parameter name="orderItem" type="Map"/></parameter>
             <parameter name="orderItemWithChildrenSet" type="Set"><parameter name="orderItemSeqId"/></parameter>
+            <parameter name="productItemTypes" type="List"><parameter name="itemTypeEnumId"/></parameter>
 
             <parameter name="orderPromoCodeDetailList" type="List"><parameter name="orderPromoCode" type="Map"/></parameter>
             <parameter name="paymentList" type="List"><parameter name="payment" type="Map">
@@ -446,7 +447,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="itemCount" from="0.0"/>
             <entity-find entity-name="mantle.order.OrderItem" list="orderItemList"><econdition field-name="orderId"/></entity-find>
             <iterate list="orderItemList" entry="orderItem">
-                <if condition="!(orderItem.itemTypeEnumId in productItemTypes)"><continue/></if>
+                <if condition="!productItemTypes.contains(orderItem.itemTypeEnumId)"><continue/></if>
                 <set field="itemCount" from="itemCount + orderItem.quantity"/>
             </iterate>
         </actions>
@@ -638,6 +639,10 @@ along with this software (see the LICENSE.md file). If not, see
                 ]]></script>
             </if>
 
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
             <entity-find entity-name="mantle.product.store.ProductStoreSetting" list="storeSettingList">
                 <econdition field-name="productStoreId"/></entity-find>
 
@@ -680,7 +685,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- is this order much larger than past orders? (by part if 3 or more; avg + 3 std devs) -->
                 <if condition="otherPartCount &gt;= 3">
                     <set field="settingStdDevTotal" from="storeSettingList.find({'PsstOrdApproveStdDevTotal'.equals(it.settingTypeEnumId)})?.settingValue ?: '3.0'"/>
-                    <set field="stdDevTotalBd" from="settingStdDevTotal.isBigDecimal() ? settingStdDevTotal as BigDecimal : 0.0"/>
+                    <set field="stdDevTotalBd" from="settingStdDevTotal.isBigDecimal() ? (settingStdDevTotal as BigDecimal) : 0.0"/>
                     <if condition="stdDevTotalBd">
                         <set field="partMaxTotal" from="stdDevMaxFromMapField(otherPartList, 'partTotal', stdDevTotalBd)?.maximum"/>
                         <iterate list="orderPartList" entry="orderPart">
@@ -692,14 +697,16 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <!-- is this order much larger than past orders? (by product if 3 or more; avg + 3 std devs) -->
                 <set field="settingStdDevProdQty" from="storeSettingList.find({'PsstOrdApproveStdDevProdQty'.equals(it.settingTypeEnumId)})?.settingValue ?: '3.0'"/>
-                <set field="stdDevProdQtyBd" from="settingStdDevProdQty.isBigDecimal() ? settingStdDevProdQty as BigDecimal : 0.0"/>
+                <set field="stdDevProdQtyBd" from="settingStdDevProdQty.isBigDecimal() ? (settingStdDevProdQty as BigDecimal) : 0.0"/>
                 <if condition="stdDevProdQtyBd">
                     <iterate list="orderItemList" entry="orderItem">
                         <set field="productId" from="orderItem.productId"/>
-                        <if condition="!productId"><continue/></if>
+                        <if condition="!productId || !productItemTypes.contains(orderItem.itemTypeEnumId)"><continue/></if>
                         <entity-find entity-name="mantle.order.OrderItemAndPart" list="pastItemPartList">
-                            <econdition field-name="customerPartyId"/><econdition field-name="orderId" operator="not-equals"/>
+                            <econdition field-name="customerPartyId"/>
+                            <econdition field-name="orderId" operator="not-equals"/>
                             <econdition field-name="productId"/>
+                            <econdition field-name="itemTypeEnumId" operator="in" from="productItemTypes"/>
                             <select-field field-name="quantity"/>
                         </entity-find>
                         <if condition="pastItemPartList.size() &lt; 3"><continue/></if>
@@ -788,7 +795,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="productIdSet" from="new HashSet()"/><!-- prep this for similar order check below -->
                     <iterate list="orderItemList" entry="orderItem">
                         <set field="productId" from="orderItem.productId"/>
-                        <if condition="!productId"><continue/></if>
+                        <if condition="!productId || !productItemTypes.contains(orderItem.itemTypeEnumId)"><continue/></if>
                         <script>productIdSet.add(productId)</script>
                         <set field="quantity" from="orderItem.quantity"/>
                         <!-- TODO: make the 5 configurable (by ProductStore) -->
@@ -840,7 +847,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApprovePriceMinMax'.equals(it.settingTypeEnumId)})?.settingValue)">
                     <iterate list="orderItemList" entry="orderItem">
                         <set field="productId" from="orderItem.productId"/>
-                        <if condition="!productId"><continue/></if>
+                        <if condition="!productId || !productItemTypes.contains(orderItem.itemTypeEnumId)"><continue/></if>
                         <set field="unitAmount" from="orderItem.unitAmount"/>
 
                         <service-call name="mantle.product.PriceServices.get#ProductPriceByType" out-map="minOut"
@@ -860,13 +867,48 @@ along with this software (see the LICENSE.md file). If not, see
                                 'Item ${orderItem.orderItemSeqId} price ${ec.l10n.format(unitAmount, "0.00")} is greater than maximum price ${ec.l10n.format(maxPrice, "0.00")} for product ${orderItem.productId}', null))</script></if>
                     </iterate>
                 </if>
+
+                <!-- TODO: potential fraud: different names on Party and CreditCard -->
+                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveCcNameDiff'.equals(it.settingTypeEnumId)})?.settingValue)">
+
+                </if>
+
+                <!-- TODO: potential fraud: billing and shipping addresses different (multiple payments: any billing address differs) -->
+                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveBillShipAddrDiff'.equals(it.settingTypeEnumId)})?.settingValue)">
+
+                </if>
+
+                <!-- TODO: potential fraud: ContactMech blacklisted (shipping address + phone, billing address(es) + phone, email) -->
+                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApproveContactBlacklist'.equals(it.settingTypeEnumId)})?.settingValue)">
+
+                    <!--
+
+                    <service-call name="mantle.party.DuplicateServices.find#PostalAddresses" out-map="blacklistAddrOut" out-map-add-to-existing="false"
+                            in-map="[partyId:partyId, address1:ppa.address1, unitNumber:ppa.unitNumber, postalCode:ppa.postalCode,
+                                postalCodeExt:ppa.postalCodeExt, countryGeoId:ppa.countryGeoId,
+                                trustLevelEnumId:'CmtlGreylisted,CmtlBlacklisted']"/>
+
+
+
+                    <service-call name="mantle.party.DuplicateServices.find#TelecomNumbers" out-map="blacklistTelOut" out-map-add-to-existing="false"
+                            in-map="[partyId:partyId, areaCode:ptn.areaCode, contactNumber:ptn.contactNumber,
+                                trustLevelEnumId:'CmtlGreylisted,CmtlBlacklisted']"/>
+
+                    -->
+
+                </if>
+
+                <!-- TODO: potential fraud: CreditCard card number blacklisted, via hashed card number, bank and account number, other payment method types? (if key field(s) available) -->
+                <if condition="!'false'.equals(storeSettingList.find({'PsstOrdApprovePayMethBlacklist'.equals(it.settingTypeEnumId)})?.settingValue)">
+
+                </if>
             </then><else>
                 <!-- ========== Purchase Order Validations ========== -->
 
                 <!-- purchase price more than 50% of current sale price -->
                 <iterate list="orderItemList" entry="orderItem">
                     <set field="productId" from="orderItem.productId"/>
-                    <if condition="!productId"><continue/></if>
+                    <if condition="!productId || !productItemTypes.contains(orderItem.itemTypeEnumId)"><continue/></if>
                     <set field="unitAmount" from="orderItem.unitAmount"/>
 
                     <!-- we don't know the store, customer, etc here so do a less constrained search -->

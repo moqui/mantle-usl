@@ -301,10 +301,10 @@ class ReturnToResponseBasicFlow extends Specification {
                 <paymentApplications paymentApplicationId="55700" paymentId="55700" amountApplied="23.07" appliedDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"/>
                 <items invoiceItemSeqId="01" amount="7.77" quantity="2" productId="DEMO_3_1" description="Demo Product Three-One" itemTypeEnumId="ItemProduct"/>
                 <items invoiceItemSeqId="02" amount="-2.46" quantity="1" description="Discount why? Because we love you." itemTypeEnumId="ItemDiscount"/>
-                <items invoiceItemSeqId="03" amount="0.92" quantity="1" description="Text Tax 7%" itemTypeEnumId="ItemSalesTax"/>
+                <items invoiceItemSeqId="03" amount="0.92" quantity="1" description="Test Tax 7%" itemTypeEnumId="ItemSalesTax"/>
                 <items invoiceItemSeqId="04" amount="12.12" quantity="2" productId="DEMO_2_1" description="Demo Product Two-One" itemTypeEnumId="ItemProduct"/>
                 <items invoiceItemSeqId="05" amount="-4.02" quantity="0.666667" description="Discount why? Because we love you." itemTypeEnumId="ItemDiscount"/>
-                <items invoiceItemSeqId="06" amount="2.26" quantity="0.666667" description="Text Tax 7%" itemTypeEnumId="ItemSalesTax"/>
+                <items invoiceItemSeqId="06" amount="2.26" quantity="0.666667" description="Test Tax 7%" itemTypeEnumId="ItemSalesTax"/>
             </invoices>
         </entity-facade-xml>""").check(dataCheckErrors)
         // NOTE: for Promised payment no effectiveDate so don't validate
