@@ -650,7 +650,8 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!amount"><return message="Amount is zero, not creating refund payment"/></if>
 
             <!-- automatic field settings -->
-            <if condition="statusId == 'PmntDelivered' &amp;&amp; effectiveDate == null"><set field="effectiveDate" from="ec.user.nowTimestamp"/></if>
+            <if condition="statusId in ['PmntDelivered', 'PmntConfirmed'] &amp;&amp; effectiveDate == null">
+                <set field="effectiveDate" from="ec.user.nowTimestamp"/></if>
             <set field="fromPartyId" from="originalPayment.toPartyId"/>
             <set field="toPartyId" from="originalPayment.fromPartyId"/>
             <set field="orderId" from="orderId ?: originalPayment.orderId"/>
@@ -660,7 +661,7 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.account.PaymentServices.create#Payment" in-map="context" out-map="createOut"/>
             <set field="paymentId" from="createOut.paymentId"/>
 
-            <if condition="statusId == 'PmntDelivered'">
+            <if condition="statusId in ['PmntDelivered', 'PmntConfirmed']">
                 <!-- apply refund to original -->
                 <service-call name="mantle.account.PaymentServices.apply#PaymentToPayment" out-map="context"
                         in-map="[paymentId:paymentId, toPaymentId:originalPaymentId, amount:amount]"/>
@@ -770,16 +771,14 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <if condition="payment.amountUomId != invoice.currencyUomId">
-                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment has a different currency (${payment.amountUomId}) than invoice (${invoice.currencyUomId})</message></if>
+                <return type="danger" message="Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment has a different currency (${payment.amountUomId}) than invoice (${invoice.currencyUomId})"/></if>
             <if condition="payment.fromPartyId != invoice.toPartyId">
-                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is from a different party (${payment.fromPartyId}) than invoice is to (${invoice.toPartyId})</message></if>
+                <return type="danger" message="Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is from a different party (${payment.fromPartyId}) than invoice is to (${invoice.toPartyId})"/></if>
             <if condition="payment.toPartyId != invoice.fromPartyId">
-                <message error="true">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is to a different party (${payment.toPartyId}) than invoice is from (${invoice.fromPartyId})</message></if>
-
-            <check-errors/>
+                <return type="danger" message="Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is to a different party (${payment.toPartyId}) than invoice is from (${invoice.fromPartyId})"/></if>
 
             <if condition="!(payment.statusId in ['PmntDelivered', 'PmntConfirmed'])">
-                <return message="Not applying payment ${paymentId} in status ${payment.statusId} to invoice ${invoiceId}, payment must be Delivered or Confirmed to be applied"/>
+                <return type="warning" message="Not applying payment ${paymentId} in status ${payment.statusId} to invoice ${invoiceId}, payment must be Delivered or Confirmed to be applied"/>
             </if>
             <if condition="!(invoice.statusId in ['InvoiceFinalized', 'InvoiceSent', 'InvoiceAcked', 'InvoicePmtRecvd', 'InvoiceApproved', 'InvoicePmtSent'])">
                 <log level="warn" message="Not applying payment ${paymentId} to invoice ${invoiceId} in status ${invoice.statusId} stack: ${ec.artifactExecution.getStackNameString()}"/>
@@ -826,10 +825,22 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="apply" noun="InvoiceForPayments">
         <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
+            <if condition="invoice == null"><return message="Invoice ${invoiceId} not found, not applying payments"/></if>
             <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
                 <econdition field-name="forInvoiceId" from="invoiceId"/></entity-find>
             <iterate list="paymentList" entry="payment">
                 <if condition="payment.statusId in ['PmntDelivered', 'PmntConfirmed'] &amp;&amp; (payment.unappliedTotal == null || payment.unappliedTotal > 0.0)">
+                    <!-- check for matching from/to parties, generate warning message and don't try to apply -->
+                    <if condition="payment.fromPartyId != invoice.toPartyId">
+                        <message type="warning">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is from a different party (${payment.fromPartyId}) than invoice is to (${invoice.toPartyId})</message>
+                        <continue/>
+                    </if>
+                    <if condition="payment.toPartyId != invoice.fromPartyId">
+                        <message type="warning">Cannot apply payment ${paymentId} to invoice ${invoiceId}, payment is to a different party (${payment.toPartyId}) than invoice is from (${invoice.fromPartyId})</message>
+                        <continue/>
+                    </if>
+                    <!-- apply the payment to the invoice -->
                     <service-call name="mantle.account.PaymentServices.apply#InvoicePayment" out-map="context"
                             in-map="[paymentId:payment.paymentId, invoiceId:invoiceId]"/>
                 </if>
