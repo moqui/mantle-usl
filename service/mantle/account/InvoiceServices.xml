@@ -19,7 +19,10 @@ along with this software (see the LICENSE.md file). If not, see
     <!-- =========================================== -->
 
     <service verb="get" noun="InvoiceDisplayInfo">
-        <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="invoiceId" required="true"/>
+            <parameter name="activeOrgId"/>
+        </in-parameters>
         <out-parameters>
             <parameter name="invoice" type="Map"/>
             <parameter name="editableStatusIds" type="Set"><parameter name="statusId"/></parameter>
@@ -27,8 +30,14 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="recordPaymentStatusIds" type="Set"><parameter name="statusId"/></parameter>
             <parameter name="canRecordPayments" type="Boolean"/>
 
-            <parameter name="isFromPartyOrgInternal" type="Boolean"><description>If true invoice is receivable</description></parameter>
-            <parameter name="isToPartyOrgInternal" type="Boolean"><description>If true invoice is payable</description></parameter>
+            <parameter name="isFromPartyOrgInternal" type="Boolean"/>
+            <parameter name="isToPartyOrgInternal" type="Boolean"/>
+            <parameter name="organizationPartyId"><description>Org considered primary for this invoice to determine payable or
+                receivable; based on activeOrgId if specified, otherwise defaults to whichever party has role OrgInternal and
+                defaulting to fromPartyId</description></parameter>
+            <parameter name="isPayableInvoice" type="Boolean">
+                <description>If true invoice is payable for activeOrgId or default logic, otherwise is receivable</description></parameter>
+            <parameter name="statusFlowId"/>
             <parameter name="dupInvoiceList" type="List"><description>List of invoices matching referenceNumber and
                 other party (non org internal)</description><parameter name="dupInvoice" type="Map"/></parameter>
 
@@ -80,6 +89,17 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="partyId" from="invoice.toPartyId"/>
                 <econdition field-name="roleTypeId" value="OrgInternal"/></entity-find-count>
             <set field="isToPartyOrgInternal" from="toOrgInternalCount &gt; 0"/>
+
+            <!-- TODO: also consider userOrgIds if no activeOrdId? better default in some cases for particular users even if forget to set active org -->
+            <if condition="!activeOrgId"><set field="activeOrgId" from="ec.user.getPreference('ACTIVE_ORGANIZATION')"/></if>
+            <set field="organizationPartyId" from="activeOrgId ?: (isFromPartyOrgInternal ? invoice.fromPartyId : invoice.toPartyId)"/>
+            <set field="isPayableInvoice" from="organizationPartyId == invoice.toPartyId"/>
+            <!-- statusFlowId used in StatusChangeSection, see seed data in AccountingAccountEntities.xml -->
+            <set field="statusFlowId" from="isPayableInvoice ? 'InvoicePayable' : 'InvoiceReceivable'"/>
+            <!-- check the statusFlowId to make sure it has transitions, for backward compatibility from before these had seed data! -->
+            <entity-find-count entity-name="moqui.basic.StatusFlowTransition" count-field="statusFlowTransCount" cache="true">
+                <econdition field-name="statusFlowId"/></entity-find-count>
+            <if condition="statusFlowTransCount == 0"><set field="statusFlowId" from="null"/></if>
 
             <!-- look for duplicate invoices by referenceNumber -->
             <if condition="isFromPartyOrgInternal &amp;&amp; invoice.referenceNumber">
@@ -560,15 +580,25 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="invoiceId"/></out-parameters>
         <actions>
-            <entity-find entity-name="mantle.party.PartyRole" list="fromOrgInternalList">
-                <econdition field-name="partyId" from="fromPartyId"/>
-                <econdition field-name="roleTypeId" value="OrgInternal"/></entity-find>
-            <set field="isFromPartyOrgInternal" from="fromOrgInternalList as boolean"/>
-            <set field="organizationPartyId" from="isFromPartyOrgInternal ? fromPartyId : toPartyId"/>
-            <set field="otherPartyId" from="isFromPartyOrgInternal ? toPartyId : fromPartyId"/>
-
+            <entity-find-count entity-name="mantle.party.PartyRole" count-field="fromOrgInternalCount">
+                <econdition field-name="partyId" from="fromPartyId"/><econdition field-name="roleTypeId" value="OrgInternal"/></entity-find-count>
+            <set field="isFromPartyOrgInternal" from="fromOrgInternalCount &gt; 0"/>
+            <entity-find-count entity-name="mantle.party.PartyRole" count-field="toOrgInternalCount">
+                <econdition field-name="partyId" from="toPartyId"/><econdition field-name="roleTypeId" value="OrgInternal"/></entity-find-count>
+            <set field="isToPartyOrgInternal" from="toOrgInternalCount &gt; 0"/>
             <!-- set the initial statusId based on which party is OrgInternal -->
-            <set field="statusId" from="isFromPartyOrgInternal ? 'InvoiceInProcess' : 'InvoiceIncoming'"/>
+            <!-- if both parties are in role OrgInternal start in InvoiceInProcess status because Receivable/Outgoing statuses come before Payable/Incoming statuses -->
+            <if condition="isToPartyOrgInternal &amp;&amp; !isFromPartyOrgInternal"><then>
+                <!-- Payable -->
+                <set field="organizationPartyId" from="toPartyId"/>
+                <set field="otherPartyId" from="fromPartyId"/>
+                <set field="statusId" value="InvoiceIncoming"/>
+            </then><else>
+                <!-- Receivable -->
+                <set field="organizationPartyId" from="fromPartyId"/>
+                <set field="otherPartyId" from="toPartyId"/>
+                <set field="statusId" value="InvoiceInProcess"/>
+            </else></if>
 
             <!-- get configured currency for org if none specified -->
             <if condition="!currencyUomId">
