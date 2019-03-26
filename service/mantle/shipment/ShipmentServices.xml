@@ -132,7 +132,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
             <service-call name="org.moqui.impl.BasicServices.find#EnumerationByParent" out-map="shipmentTypeOut"
                     in-map="[parentEnumId:'ShpTpOutgoing']"/>
-            <set field="noOverQuantity" from="shipment.shipmentTypeEnumId in shipmentTypeOut.enumIdSet"/>
+            <set field="isOutgoing" from="shipment.shipmentTypeEnumId in shipmentTypeOut.enumIdSet"/>
 
             <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem"/>
             <set field="quantityChange" from="quantity - (shipmentItem.quantity ?: 0.0)"/>
@@ -193,7 +193,7 @@ along with this software (see the LICENSE.md file). If not, see
                         </if>
                     </iterate>
 
-                    <if condition="orderSisList &amp;&amp; increaseRemaining &amp;&amp; noOverQuantity">
+                    <if condition="orderSisList &amp;&amp; increaseRemaining &amp;&amp; isOutgoing">
                         <return error="true" message="For outgoing shipments cannot increase quantity above what is on related order items (${increaseRemaining} too many)"/></if>
 
                     <if condition="increaseRemaining &amp;&amp; noOrderSisList"><then>
@@ -206,33 +206,37 @@ along with this software (see the LICENSE.md file). If not, see
                                 in-map="context + [quantity:increaseRemaining, quantityNotHandled:increaseRemaining, statusId:'SisPending']"/>
                     </else-if></if>
                 </if>
-                <if condition="quantityChange &lt; 0">
+                <if condition="quantityChange &lt; 0.0">
                     <!-- quantity reduce, find SIS records with no orderId and update those first, if any left pull from those from orders -->
                     <set field="reduceRemaining" from="-quantityChange"/>
                     <iterate list="noOrderSisList" entry="sis">
-                        <set field="currentChange" from="reduceRemaining &gt; (sis.quantityNotHandled?:0) ?
-                                (sis.quantityNotHandled?:0) : reduceRemaining"/>
+                        <set field="currentChange" from="reduceRemaining &gt; (sis.quantityNotHandled ?: 0.0) ?
+                                (sis.quantityNotHandled ?: 0.0) : reduceRemaining"/>
                         <if condition="currentChange">
                             <set field="sis.quantity" from="(sis.quantity ?: 0.0) - currentChange"/>
                             <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0.0) - currentChange"/>
-                            <if condition="sis.quantity == 0 &amp;&amp; !sis.orderId"><then>
+                            <if condition="sis.quantity &gt; 0.0 &amp;&amp; sis.quantityNotHandled == 0.0">
+                                <set field="sis.statusId" from="isOutgoing ? 'SisPacked' : 'SisReceived'"/></if>
+                            <if condition="sis.quantity == 0.0 &amp;&amp; !sis.orderId"><then>
                                 <entity-delete value-field="sis"/>
                             </then><else>
                                 <entity-update value-field="sis"/>
                             </else></if>
                             <set field="reduceRemaining" from="reduceRemaining - currentChange"/>
-                            <if condition="reduceRemaining == 0"><break/></if>
+                            <if condition="reduceRemaining == 0.0"><break/></if>
                         </if>
                     </iterate>
                     <iterate list="orderSisList" entry="sis">
-                        <set field="currentChange" from="reduceRemaining &gt; (sis.quantityNotHandled?:0) ?
-                                (sis.quantityNotHandled?:0) : reduceRemaining"/>
+                        <set field="currentChange" from="reduceRemaining &gt; (sis.quantityNotHandled ?: 0.0) ?
+                                (sis.quantityNotHandled ?: 0.0) : reduceRemaining"/>
                         <if condition="currentChange">
-                            <set field="sis.quantity" from="(sis.quantity ?: 0) - currentChange"/>
-                            <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0) - currentChange"/>
+                            <set field="sis.quantity" from="(sis.quantity ?: 0.0) - currentChange"/>
+                            <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0.0) - currentChange"/>
+                            <if condition="sis.quantity &gt; 0.0 &amp;&amp; sis.quantityNotHandled == 0.0">
+                                <set field="sis.statusId" from="isOutgoing ? 'SisPacked' : 'SisReceived'"/></if>
                             <entity-update value-field="sis"/>
                             <set field="reduceRemaining" from="reduceRemaining - currentChange"/>
-                            <if condition="reduceRemaining == 0"><break/></if>
+                            <if condition="reduceRemaining == 0.0"><break/></if>
                         </if>
                     </iterate>
                 </if>
@@ -432,11 +436,15 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.shipment.ShipmentServices.create#OrderPartShipment" out-map="context"
                     in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, entryDate:shipDate, tryAutoPackage:tryAutoPackage]"/>
 
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
             <!-- pack all items (creating ShipmentPackageContent and AssetIssuance records) -->
             <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
                 <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/></entity-find>
             <iterate list="orderItemList" entry="orderItem">
-                <if condition="orderItem.productId">
+                <if condition="orderItem.productId &amp;&amp; productItemTypes.contains(orderItem.itemTypeEnumId)">
                     <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentProduct"
                             in-map="[productId:orderItem.productId, quantity:orderItem.quantity, shipmentId:shipmentId,
                                 shipmentPackageSeqId:shipmentPackageSeqId]"/>
@@ -589,12 +597,16 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!(orderPart.statusId in ['OrderApproved', 'OrderSent'])">
                 <return error="true" message="Cannot add Order Part in status ${orderPart.statusId} to Shipment"/></if>
 
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
             <!-- for each OrderItem in the part create ShipmentItem and ShipmentItemSource records -->
             <entity-find-related value-field="orderPart" relationship-name="mantle.order.OrderItem" list="orderItemList"
                     order-by-list="['orderItemSeqId']"/>
             <iterate list="orderItemList" entry="orderItem">
-                <!-- if no productId skip it -->
-                <if condition="!orderItem.productId"><continue/></if>
+                <!-- if no productId or not a product item type skip it -->
+                <if condition="!orderItem.productId || !productItemTypes.contains(orderItem.itemTypeEnumId)"><continue/></if>
 
                 <!-- see if Product is a physical item -->
                 <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
@@ -1003,7 +1015,7 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
 
             <!-- consider doing this automatically when all quantities of all items are received -->
-            <service-call name="update#mantle.shipment.Shipment" out-map="context" in-map="[shipmentId:shipmentId, statusId:'ShipDelivered']"/>
+            <service-call name="mantle.shipment.ShipmentServices.deliver#Shipment" out-map="context" in-map="[shipmentId:shipmentId]"/>
         </actions>
     </service>
     <service verb="receive" noun="ShipmentProduct">
@@ -1500,7 +1512,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="sisList">
                     <econdition field-name="shipmentId"/><econdition field-name="productId" from="shipmentItem.productId"/></entity-find>
                 <iterate list="sisList" entry="sis">
-                    <set field="quantityHandled" from="quantityHandled + sis.quantity - sis.quantityNotHandled"/></iterate>
+                    <set field="sisQtyHandled" from="sis.quantity - sis.quantityNotHandled"/>
+                    <set field="quantityHandled" from="quantityHandled + sisQtyHandled"/>
+                </iterate>
                 <if condition="shipmentItem.quantity != quantityHandled">
                     <service-call name="mantle.shipment.ShipmentServices.update#ShipmentItem"
                             in-map="[shipmentId:shipmentId, productId:shipmentItem.productId, quantity:quantityHandled]"/>

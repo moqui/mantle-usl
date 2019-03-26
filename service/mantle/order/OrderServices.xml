@@ -267,10 +267,22 @@ General Order Placement and eCommerce Usage
                             requireInventory:requireInventory]"/>
             </if>
 
-            <if condition="product?.amountRequire == 'Y' &amp;&amp; !selectedAmount">
-                <return error="true" message="Product ${productId} requires a selected amount"/></if>
-            <if condition="!itemDescription"><set field="itemDescription" from="product?.productName"/></if>
-            <if condition="!quantityUomId"><set field="quantityUomId" from="product?.amountUomId"/></if>
+            <if condition="isProductItem"><then>
+                <!-- set some product item defaults -->
+                <if condition="product?.amountRequire == 'Y' &amp;&amp; !selectedAmount">
+                    <return error="true" message="Product ${productId} requires a selected amount"/></if>
+                <if condition="!itemDescription"><set field="itemDescription" from="product?.productName"/></if>
+                <if condition="!quantityUomId"><set field="quantityUomId" from="product?.amountUomId"/></if>
+            </then><else-if condition="parentItemSeqId">
+                <!-- set productId from parent item -->
+                <if condition="!productId">
+                    <entity-find-one entity-name="mantle.order.OrderItem" value-field="parentItem">
+                        <field-map field-name="orderId"/>
+                        <field-map field-name="orderItemSeqId" from="parentItemSeqId"/>
+                    </entity-find-one>
+                    <set field="productId" from="parentItem?.productId"/>
+                </if>
+            </else-if></if>
 
             <service-call name="create#mantle.order.OrderItem" in-map="context" out-map="context"/>
         </actions>
@@ -297,93 +309,114 @@ General Order Placement and eCommerce Usage
                 <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
                     <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
                 <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
-                <set field="isProductItem" from="orderItem.itemTypeEnumId in productItemTypes"/>
+                <set field="isProductItem" from="productItemTypes.contains(orderItem.itemTypeEnumId)"/>
             </if>
 
-            <if condition="isProductItem &amp;&amp; quantity">
+            <if condition="isProductItem"><then>
+                <!-- logic for product items -->
+
                 <!-- if requireInventory check available inventory (for store/facility, product) -->
-                <service-call name="mantle.order.OrderServices.check#AvailableInventory"
-                        in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId,
+                <if condition="quantity">
+                    <service-call name="mantle.order.OrderServices.check#AvailableInventory"
+                            in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId,
                             orderItemSeqId:orderItemSeqId, requireInventory:requireInventory]"/>
-                <!-- don't let quantity go below quantity issued -->
-                <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="itemAssetIssuanceList">
-                    <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
-                <set field="itemQuantityIssued" from="0.0"/>
-                <iterate list="itemAssetIssuanceList" entry="itemAssetIssuance">
-                    <set field="itemQuantityIssued" from="itemQuantityIssued + itemAssetIssuance.quantity"/></iterate>
-                <if condition="quantity &lt; itemQuantityIssued">
-                    <set field="quantity" from="itemQuantityIssued"/>
-                    <message type="warning" public="true">Quantity requested ${quantity} is less than quantity already shipped ${itemQuantityIssued}, setting to quantity shipped</message>
+                    <!-- don't let quantity go below quantity issued -->
+                    <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="itemAssetIssuanceList">
+                        <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
+                    <set field="itemQuantityIssued" from="0.0"/>
+                    <iterate list="itemAssetIssuanceList" entry="itemAssetIssuance">
+                        <set field="itemQuantityIssued" from="itemQuantityIssued + itemAssetIssuance.quantity"/></iterate>
+                    <if condition="quantity &lt; itemQuantityIssued">
+                        <set field="quantity" from="itemQuantityIssued"/>
+                        <message type="warning" public="true">Quantity requested ${quantity} is less than quantity already shipped ${itemQuantityIssued}, setting to quantity shipped</message>
+                    </if>
                 </if>
-            </if>
 
-            <!-- calculate the price based on quantity, etc, -->
-            <if condition="unitAmount == null &amp;&amp; isProductItem"><then>
-                <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
-                <set field="orderPart" from="orderItem.part"/>
+                <!-- calculate the price based on quantity, etc, -->
+                <if condition="unitAmount == null &amp;&amp; isProductItem"><then>
+                    <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
+                    <set field="orderPart" from="orderItem.part"/>
 
-                <service-call name="mantle.product.PriceServices.get#ProductPrice" out-map="priceMap"
-                              in-map="[productId:productId, quantity:quantity, priceUomId:orderHeader.currencyUomId,
+                    <service-call name="mantle.product.PriceServices.get#ProductPrice" out-map="priceMap"
+                            in-map="[productId:productId, quantity:quantity, priceUomId:orderHeader.currencyUomId,
                                   productStoreId:orderHeader.productStoreId, customerPartyId:orderPart.customerPartyId,
                                   vendorPartyId:orderPart.vendorPartyId]"/>
 
-                <set field="unitAmount" from="priceMap.price"/>
-                <set field="unitListPrice" from="priceMap.listPrice"/>
-                <set field="isModifiedPrice" value="N"/>
-            </then><else>
-                <set field="isModifiedPrice" value="Y"/>
-            </else></if>
+                    <set field="unitAmount" from="priceMap.price"/>
+                    <set field="unitListPrice" from="priceMap.listPrice"/>
+                    <set field="isModifiedPrice" value="N"/>
+                </then><else>
+                    <set field="isModifiedPrice" value="Y"/>
+                </else></if>
 
-            <!-- on quantity changes adjust ShipmentItem/Source (only if some already exist) -->
-            <if condition="quantity != null &amp;&amp; quantity != orderItem.quantity">
-                <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList">
-                    <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/><order-by field-name="shipmentId"/></entity-find>
-                <if condition="shipmentItemSourceList">
-                    <set field="sourceQuantityTotal" from="0"/>
-                    <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
-                        <set field="sourceQuantityTotal" from="sourceQuantityTotal + shipmentItemSource.quantity"/></iterate>
-                    <if condition="quantity &gt; sourceQuantityTotal"><then>
-                        <set field="quantityIncrease" from="quantity - sourceQuantityTotal"/>
-                        <!-- quantity increase, we don't know which shipment it should go on so just pick the first -->
-                        <set field="shipmentItemSource" from="shipmentItemSourceList[0]"/>
-                        <service-call name="update#mantle.shipment.ShipmentItemSource"
-                                      in-map="[shipmentItemSourceId:shipmentItemSource.shipmentItemSourceId,
-                                          quantity:(shipmentItemSource.quantity + quantityIncrease),
-                                          quantityNotHandled:(shipmentItemSource.quantityNotHandled + quantityIncrease)]"/>
-
-                        <!-- also update ShipmentItem.quantity -->
-                        <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
-                            <field-map field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
-                            <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
-                        <service-call name="update#mantle.shipment.ShipmentItem"
-                                      in-map="[shipmentId:shipmentItem.shipmentId, productId:shipmentItem.productId,
-                                          quantity:(shipmentItem.quantity + quantityIncrease)]"/>
-                    </then><else>
-                        <!-- a little more fun, deduct as available from each item in the list until all handled -->
-                        <set field="quantityReduceRemaining" from="sourceQuantityTotal - quantity"/>
+                <!-- on quantity changes adjust ShipmentItem/Source (only if some exist for 'open' shipments) -->
+                <if condition="quantity != null &amp;&amp; quantity != orderItem.quantity">
+                    <entity-find entity-name="mantle.shipment.ShipmentAndItemSource" list="shipmentItemSourceList">
+                        <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/>
+                        <econdition field-name="shipmentStatusId" operator="in" value="ShipInput,ShipScheduled"/>
+                        <order-by field-name="shipmentId"/>
+                    </entity-find>
+                    <if condition="shipmentItemSourceList">
+                        <set field="sourceQuantityTotal" from="0"/>
                         <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
-                            <set field="quantityReduce" from="quantityReduceRemaining &gt; shipmentItemSource.quantityNotHandled ?
-                                    shipmentItemSource.quantityNotHandled : quantityReduceRemaining"/>
-                            <if condition="quantityReduce == 0"><break/></if>
+                            <set field="sourceQuantityTotal" from="sourceQuantityTotal + shipmentItemSource.quantity"/></iterate>
+                        <if condition="quantity &gt; sourceQuantityTotal"><then>
+                            <set field="quantityIncrease" from="quantity - sourceQuantityTotal"/>
+                            <!-- quantity increase, we don't know which shipment it should go on so just pick the first -->
+                            <set field="shipmentItemSource" from="shipmentItemSourceList[0]"/>
                             <service-call name="update#mantle.shipment.ShipmentItemSource"
                                     in-map="[shipmentItemSourceId:shipmentItemSource.shipmentItemSourceId,
-                                        quantity:(shipmentItemSource.quantity - quantityReduce),
-                                        quantityNotHandled:(shipmentItemSource.quantityNotHandled - quantityReduce)]"/>
-                            <set field="quantityReduceRemaining" from="quantityReduceRemaining - quantityReduce"/>
+                                          quantity:(shipmentItemSource.quantity + quantityIncrease),
+                                          quantityNotHandled:(shipmentItemSource.quantityNotHandled + quantityIncrease)]"/>
 
                             <!-- also update ShipmentItem.quantity -->
                             <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
                                 <field-map field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
                                 <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
-                            <set field="newItemQuantity" from="shipmentItem.quantity &gt; quantityReduce ?
-                                    shipmentItem.quantity - quantityReduce : 0.0"/>
                             <service-call name="update#mantle.shipment.ShipmentItem"
                                     in-map="[shipmentId:shipmentItem.shipmentId, productId:shipmentItem.productId,
+                                          quantity:(shipmentItem.quantity + quantityIncrease)]"/>
+                        </then><else>
+                            <!-- a little more fun, deduct as available from each item in the list until all handled -->
+                            <set field="quantityReduceRemaining" from="sourceQuantityTotal - quantity"/>
+                            <iterate list="shipmentItemSourceList" entry="shipmentItemSource">
+                                <set field="quantityReduce" from="quantityReduceRemaining &gt; shipmentItemSource.quantityNotHandled ?
+                                    shipmentItemSource.quantityNotHandled : quantityReduceRemaining"/>
+                                <if condition="quantityReduce == 0"><break/></if>
+                                <service-call name="update#mantle.shipment.ShipmentItemSource"
+                                        in-map="[shipmentItemSourceId:shipmentItemSource.shipmentItemSourceId,
+                                        quantity:(shipmentItemSource.quantity - quantityReduce),
+                                        quantityNotHandled:(shipmentItemSource.quantityNotHandled - quantityReduce)]"/>
+                                <set field="quantityReduceRemaining" from="quantityReduceRemaining - quantityReduce"/>
+
+                                <!-- also update ShipmentItem.quantity -->
+                                <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
+                                    <field-map field-name="shipmentId" from="shipmentItemSource.shipmentId"/>
+                                    <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
+                                <set field="newItemQuantity" from="shipmentItem.quantity &gt; quantityReduce ?
+                                    shipmentItem.quantity - quantityReduce : 0.0"/>
+                                <service-call name="update#mantle.shipment.ShipmentItem"
+                                        in-map="[shipmentId:shipmentItem.shipmentId, productId:shipmentItem.productId,
                                         quantity:newItemQuantity]"/>
-                        </iterate>
-                    </else></if>
+                            </iterate>
+                        </else></if>
+                    </if>
                 </if>
-            </if>
+            </then><else>
+                <!-- logic for non-product items -->
+
+                <!-- defaults from parent item -->
+                <if condition="parentItemSeqId">
+                    <!-- set productId from parent item -->
+                    <if condition="!productId">
+                        <entity-find-one entity-name="mantle.order.OrderItem" value-field="parentItem">
+                            <field-map field-name="orderId"/>
+                            <field-map field-name="orderItemSeqId" from="parentItemSeqId"/>
+                        </entity-find-one>
+                        <set field="productId" from="parentItem?.productId"/>
+                    </if>
+                </if>
+            </else></if>
 
             <service-call name="update#mantle.order.OrderItem" in-map="context"/>
             <!-- leave this out, may be nice to have a way to easily ignore messages from a specific service call: <message>Order item ${orderItemSeqId} updated</message> -->
@@ -650,7 +683,7 @@ General Order Placement and eCommerce Usage
                 <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
             <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
             <iterate list="orderItemList" entry="orderItem">
-                <if condition="!orderItem.productId || !(orderItem.itemTypeEnumId in productItemTypes)"><continue/></if>
+                <if condition="!orderItem.productId || !productItemTypes.contains(orderItem.itemTypeEnumId)"><continue/></if>
                 <service-call name="mantle.order.OrderServices.add#OrderProductQuantity"
                         in-map="[orderId:orderId, productId:orderItem.productId, quantity:orderItem.quantity]"/>
             </iterate>
@@ -805,9 +838,17 @@ General Order Placement and eCommerce Usage
         <actions>
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
+
+            <set field="fromPartyId" from="orderPart.customerPartyId"/>
+            <entity-find entity-name="mantle.order.OrderPartParty" list="billToList">
+                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                <econdition field-name="roleTypeId" value="CustomerBillTo"/>
+            </entity-find>
+            <if condition="billToList"><set field="fromPartyId" from="billToList[0].partyId"/></if>
+
             <service-call name="mantle.account.PaymentServices.create#Payment" out-map="context"
                     in-map="context + [amount:(amount ?: orderPart.partTotal), amountUomId:orderHeader.currencyUomId,
-                        fromPartyId:orderPart.customerPartyId, toPartyId:orderPart.vendorPartyId]"/>
+                        fromPartyId:fromPartyId, toPartyId:orderPart.vendorPartyId]"/>
         </actions>
     </service>
 
@@ -901,7 +942,7 @@ General Order Placement and eCommerce Usage
 
                 <set field="allInventoryAvailable" from="true"/>
                 <iterate list="orderItemList" entry="orderItem">
-                    <set field="isProductItem" from="orderItem.itemTypeEnumId in productItemTypes &amp;&amp; orderItem.productId"/>
+                    <set field="isProductItem" from="productItemTypes.contains(orderItem.itemTypeEnumId) &amp;&amp; orderItem.productId"/>
                     <if condition="!isProductItem"><continue/></if>
 
                     <!-- get current available inventory -->
@@ -960,6 +1001,41 @@ General Order Placement and eCommerce Usage
         </actions>
     </service>
 
+    <service verb="autoApprove" noun="OrdersDelayed" authenticate="anonymous-all">
+        <description>ServiceJob service (see default jobName 'autoApprove_OrdersDelayed') to try auto-approval for Placed orders in ProductStore with
+            autoApproveDelay; can setup for specific store or all stores</description>
+        <in-parameters>
+            <parameter name="productStoreId"><description>If specified only run for this store, otherwise run for all stores</description></parameter>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.product.store.ProductStore" list="productStoreList">
+                <econdition field-name="productStoreId" ignore-if-empty="true"/>
+                <econdition field-name="autoApproveDelay" operator="not-equals" from="0"/>
+            </entity-find>
+            <iterate list="productStoreList" entry="productStore">
+                <set field="delayMinutes" from="productStore.autoApproveDelay"/>
+                <script>
+                    Calendar delayCal = ec.user.getCalendarSafe()
+                    delayCal.add(Calendar.MINUTE, (int) -delayMinutes)
+                    delayTimestamp = new Timestamp(delayCal.getTimeInMillis())
+                </script>
+
+                <entity-find entity-name="mantle.order.OrderHeader" list="orderList">
+                    <econdition field-name="productStoreId" from="productStore.productStoreId"/>
+                    <econdition field-name="statusId" value="OrderPlaced"/>
+                    <econdition field-name="placedDate" operator="less-equals" from="delayTimestamp"/>
+                    <select-field field-name="orderId"/>
+                </entity-find>
+                <if condition="orderList">
+                    <log message="Trying delayed auto-approve for store ${productStore.productStoreId} with ${delayMinutes}m delay (before ${delayTimestamp}) for ${orderList.size()} orders"/>
+
+                    <iterate list="orderList" entry="order">
+                        <service-call name="mantle.order.OrderServices.autoApprove#Order" in-map="[orderId:order.orderId]"/>
+                    </iterate>
+                </if>
+            </iterate>
+        </actions>
+    </service>
     <service verb="autoApprove" noun="Order">
         <description>
             If order is in Placed status and has sufficient Authorized, Delivered, or Confirmed payments for the grandTotal
@@ -1024,46 +1100,52 @@ General Order Placement and eCommerce Usage
                 <order-by field-name="orderItemSeqId"/>
             </entity-find>
 
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
             <!-- set to true, if any found not fulfilled will set to false -->
             <set field="isFulfilled" from="true"/>
-            <iterate list="orderItemList" entry="orderItem"><if condition="orderItem.productId">
-                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
-                    <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
+            <iterate list="orderItemList" entry="orderItem">
+                <if condition="orderItem.productId &amp;&amp; productItemTypes.contains(orderItem.itemTypeEnumId)">
+                    <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
+                        <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
 
-                <if condition="product.productTypeEnumId in ['PtDigital', 'PtDigitalAsset']">
-                    <entity-find entity-name="mantle.product.subscription.ProductSubscriptionResource"
-                            list="productSubscriptionResourceList" cache="true">
-                        <econdition field-name="productId" from="product.productId"/></entity-find>
-                    <iterate list="productSubscriptionResourceList" entry="productSubscriptionResource">
-                        <filter-map-list list="existingSubscriptionList" to-list="currentSubscriptionList">
-                            <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
-                            <field-map field-name="subscriptionResourceId" from="productSubscriptionResource.subscriptionResourceId"/>
-                        </filter-map-list>
-                        <if condition="!currentSubscriptionList">
+                    <if condition="product.productTypeEnumId in ['PtDigital', 'PtDigitalAsset']">
+                        <entity-find entity-name="mantle.product.subscription.ProductSubscriptionResource"
+                                list="productSubscriptionResourceList" cache="true">
+                            <econdition field-name="productId" from="product.productId"/></entity-find>
+                        <iterate list="productSubscriptionResourceList" entry="productSubscriptionResource">
+                            <filter-map-list list="existingSubscriptionList" to-list="currentSubscriptionList">
+                                <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
+                                <field-map field-name="subscriptionResourceId" from="productSubscriptionResource.subscriptionResourceId"/>
+                            </filter-map-list>
+                            <if condition="!currentSubscriptionList">
+                                <set field="isFulfilled" from="false"/>
+                                <break/>
+                            </if>
+                        </iterate>
+                    </if>
+                    <if condition="product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset']">
+                        <filter-map-list list="existingAssetIssuanceList" to-list="currentAssetIssuanceList">
+                            <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/></filter-map-list>
+                        <filter-map-list list="existingAssetReceiptList" to-list="currentAssetReceiptList">
+                            <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/></filter-map-list>
+                        <!-- add up quantity in currentAssetIssuanceList, compare to orderItem.quantity -->
+                        <set field="currentQuantityTotal" from="0" type="BigDecimal"/>
+                        <iterate list="currentAssetIssuanceList" entry="currentAssetIssuance">
+                            <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetIssuance.quantity"/>
+                        </iterate>
+                        <iterate list="currentAssetReceiptList" entry="currentAssetReceipt">
+                            <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetReceipt.quantityAccepted"/>
+                        </iterate>
+                        <if condition="currentQuantityTotal &lt; orderItem.quantity">
                             <set field="isFulfilled" from="false"/>
                             <break/>
                         </if>
-                    </iterate>
-                </if>
-                <if condition="product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset']">
-                    <filter-map-list list="existingAssetIssuanceList" to-list="currentAssetIssuanceList">
-                        <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/></filter-map-list>
-                    <filter-map-list list="existingAssetReceiptList" to-list="currentAssetReceiptList">
-                        <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/></filter-map-list>
-                    <!-- add up quantity in currentAssetIssuanceList, compare to orderItem.quantity -->
-                    <set field="currentQuantityTotal" from="0" type="BigDecimal"/>
-                    <iterate list="currentAssetIssuanceList" entry="currentAssetIssuance">
-                        <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetIssuance.quantity"/>
-                    </iterate>
-                    <iterate list="currentAssetReceiptList" entry="currentAssetReceipt">
-                        <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetReceipt.quantityAccepted"/>
-                    </iterate>
-                    <if condition="currentQuantityTotal &lt; orderItem.quantity">
-                        <set field="isFulfilled" from="false"/>
-                        <break/>
                     </if>
                 </if>
-            </if></iterate>
+            </iterate>
         </actions>
     </service>
     <service verb="checkComplete" noun="OrderPart">
@@ -1275,9 +1357,8 @@ General Order Placement and eCommerce Usage
             <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
                 <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
             <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
-            <if condition="!(orderItem.itemTypeEnumId in productItemTypes)">
-                <return type="warning" message="Item ${orderItemSeqId} is not a product type item, not cancelling"/>
-            </if>
+            <if condition="!productItemTypes.contains(orderItem.itemTypeEnumId)">
+                <return type="warning" message="Item ${orderItemSeqId} is not a product type item, not closing"/></if>
 
             <!-- check quantity issued -->
             <if condition="fullAssetIssuanceList"><then>
@@ -1333,7 +1414,7 @@ General Order Placement and eCommerce Usage
                         quantity:(itemQuantity - quantityCancelled)]"/>
                 </then><else>
                     <!-- quantity doesn't match, leave quantity alone and prorate unitAmount -->
-                    <set field="newUnitAmount" from="childOrderItem.unitAmount - (childCancelRatio as BigDecimal * childOrderItem.unitAmount as BigDecimal).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                    <set field="newUnitAmount" from="childOrderItem.unitAmount - ((childCancelRatio as BigDecimal) * (childOrderItem.unitAmount as BigDecimal)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                     <service-call name="update#mantle.order.OrderItem" in-map="[orderId:orderId,
                         orderItemSeqId:childOrderItem.orderItemSeqId, unitAmount:newUnitAmount]"/>
                 </else></if>
@@ -1635,14 +1716,24 @@ General Order Placement and eCommerce Usage
             <parameter name="orderHeader" type="EntityValue"/>
         </in-parameters>
         <actions>
+            <!-- use ec.context.sharedMap for a reentrant semaphore (sort of, not thread safe but all needed to prevent incorrect/infinite recursion) -->
             <set field="sharedFlagKey" from="'OrderMajorChange' + orderId + orderPartSeqId"/>
             <if condition="ec.context.getSharedMap().get(sharedFlagKey)"><return/></if>
 
             <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/></if>
             <if condition="orderHeader.productStoreId">
                 <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart" for-update="true"/>
-                <if condition="orderPart.statusId in ['OrderApproved', 'OrderSent', 'OrderCompleted', 'OrderRejected', 'OrderCancelled']">
-                    <return type="warning" message="Not updating promotions, shipping, or tax for order in status ${orderPart.status?.description}"/></if>
+                <set field="noRecalcStatuses" from="['OrderApproved', 'OrderSent', 'OrderCompleted', 'OrderRejected', 'OrderCancelled']"/>
+                <if condition="orderHeader.statusId in noRecalcStatuses">
+                    <return type="warning" message="Not updating promotions, shipping, or tax for order ${orderId} in status ${orderHeader.status?.description}"/></if>
+                <if condition="orderPart.statusId in noRecalcStatuses">
+                    <return type="warning" message="Not updating promotions, shipping, or tax for order part ${orderId}:${orderPartSeqId} in status ${orderPart.status?.description}"/></if>
+
+                <!-- make sure no billing done, don't auto update if so -->
+                <entity-find-count entity-name="mantle.order.OrderItemBillingDetail" count-field="partBillingCount">
+                    <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/></entity-find-count>
+                <if condition="partBillingCount">
+                    <return type="warning" message="Not updating promotions, shipping, or tax for order part ${orderId}:${orderPartSeqId} with ${partBillingCount} OrderItemBilling records"/></if>
 
                 <!-- set flag in context root to avoid recursive triggers -->
                 <script>ec.context.getSharedMap().put(sharedFlagKey, true)</script>

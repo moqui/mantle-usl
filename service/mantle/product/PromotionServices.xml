@@ -55,9 +55,12 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="firstOrderPart" from="orderPartList?.first"/>
             <set field="customerPartyId" from="firstOrderPart?.customerPartyId"/>
 
-            <!-- get all promos -->
+            <!-- get all active promos for store -->
             <entity-find entity-name="mantle.product.store.ProductStorePromotion" list="storePromoList" cache="true">
-                <date-filter valid-date="orderHeader.placedDate"/><econdition field-name="productStoreId"/><order-by field-name="sequenceNum"/></entity-find>
+                <date-filter valid-date="orderHeader.placedDate"/>
+                <econdition field-name="productStoreId"/>
+                <order-by field-name="sequenceNum"/>
+            </entity-find>
 
             <set field="applicablePromoList" from="new ArrayList(storePromoList.size())"/>
             <set field="promoCodesByPromo" from="[:]"/>
@@ -190,23 +193,25 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- run the promotion services -->
             <script><![CDATA[
-            for (storePromo in applicablePromoList) { try {
+            for (storePromo in applicablePromoList) {
                 String storePromotionId = storePromo.storePromotionId
-                Map parmMap = new HashMap(context)
-                parmMap.put("itemDescription", storePromo.itemDescription)
-                List promoParameterList = storePromo.parameters
-                for (promoParameter in promoParameterList) parmMap.put(promoParameter.parameterName, promoParameter.parameterValue)
-                parmMap.put("storePromotionId", storePromotionId)
-                parmMap.put("promoCodeId", promoCodesByPromo.get(storePromotionId))
-                parmMap.put("useLimit", useLimitByPromo.get(storePromotionId))
-                // ec.logger.warn("Calling store promotion service ${storePromotionId} promoCodeId ${promoCodesByPromo.get(storePromotionId)} useLimit ${useLimitByPromo.get(storePromotionId)}")
+                try {
+                    Map parmMap = new HashMap(context)
+                    parmMap.put("itemDescription", storePromo.itemDescription)
+                    List promoParameterList = storePromo.parameters
+                    for (promoParameter in promoParameterList) parmMap.put(promoParameter.parameterName, promoParameter.parameterValue)
+                    parmMap.put("storePromotionId", storePromotionId)
+                    parmMap.put("promoCodeId", promoCodesByPromo.get(storePromotionId))
+                    parmMap.put("useLimit", useLimitByPromo.get(storePromotionId))
+                    // ec.logger.warn("Calling store promotion service ${storePromotionId} promoCodeId ${promoCodesByPromo.get(storePromotionId)} useLimit ${useLimitByPromo.get(storePromotionId)}")
 
-                Map serviceRegister = storePromo.serviceRegister
-                Map result = ec.service.sync().name(serviceRegister.serviceName).parameters(parmMap).softValidate(true).disableAuthz().call()
-                if (result != null && !ec.message.hasError()) ec.context.putAll(result)
-            } catch (Throwable t) {
-                ec.logger.log(300, "Error calling store promotion service ${storePromotionId}", t)
-            } }
+                    Map serviceRegister = storePromo.serviceRegister
+                    Map result = ec.service.sync().name(serviceRegister.serviceName).parameters(parmMap).softValidate(true).disableAuthz().call()
+                    if (result != null && !ec.message.hasError()) ec.context.putAll(result)
+                } catch (Throwable t) {
+                    ec.logger.log(300, "Error calling store promotion service ${storePromotionId}", t)
+                }
+            }
             ]]></script>
         </actions>
     </service>
@@ -442,6 +447,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="ordersCount"><return/></if>
             </if>
 
+            <!-- get the ProductStorePromoCode record for the promoCode to save with the OrderItem(s) generated; will be null if no promoCodeId -->
+            <entity-find-one entity-name="mantle.product.store.ProductStorePromoCode" value-field="storePromoCode"/>
+            
             <!-- NOTE: default to 1000 as an arbitrary high number for when there is no use limit; could also refactor here and main promo apply service for null/0 handling -->
             <set field="useLimitRemaining" from="useLimit ?: 1000.0"/>
 
@@ -470,8 +478,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="discountAmount" from="-(orderItemTotalOut.combinedAmount * (discountPercent/100.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                 <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
-                                 itemTypeEnumId:'ItemDiscount', quantity:promoQuantity, unitAmount:discountAmount,
-                                 sourcePercentage:discountPercent, storePromotionId:storePromotionId, promoCodeId:promoCodeId,
+                                 itemTypeEnumId:'ItemDiscount', quantity:promoQuantity, unitAmount:discountAmount, productId:orderItem.productId,
+                                 sourcePercentage:discountPercent, storePromotionId:storePromotionId,
+                                 promoCodeId:promoCodeId, promoCodeText:storePromoCode?.promoCode,
                                  isPromo:'Y', promoQuantity:promoQuantity, promoTimesUsed:promoQuantity,
                                  itemDescription:ec.resource.expand(itemDescription, '')?:'New Customer Discount']"/>
             </iterate>
@@ -512,7 +521,10 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.product.store.ProductStorePromoProduct" list="psppList" cache="true">
                 <econdition field-name="storePromotionId"/></entity-find>
             <set field="applProductIdSet" from="psppList ? new HashSet(psppList*.productId) : null"/>
-            
+
+            <!-- get the ProductStorePromoCode record for the promoCode to save with the OrderItem(s) generated; will be null if no promoCodeId -->
+            <entity-find-one entity-name="mantle.product.store.ProductStorePromoCode" value-field="storePromoCode"/>
+
             <!-- NOTE: default to 1000 as an arbitrary high number for when there is no use limit; could also refactor here and main promo apply service for null/0 handling -->
             <set field="useLimitRemaining" from="useLimit ?: 1000.0"/>
 
@@ -551,8 +563,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="discountAmount" from="-(orderItemTotalOut.combinedAmount*(discountPercent/100.0)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
                 <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
-                             itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:discountAmount,
-                             sourcePercentage:discountPercent, storePromotionId:storePromotionId, promoCodeId:promoCodeId,
+                             itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:discountAmount, productId:orderItem.productId,
+                             sourcePercentage:discountPercent, storePromotionId:storePromotionId,
+                             promoCodeId:promoCodeId, promoCodeText:storePromoCode?.promoCode,
                              isPromo:'Y', promoQuantity:promoQuantity, promoTimesUsed:timesToApply,
                              itemDescription:ec.resource.expand(itemDescription, '')?:('Buy ' + buyQuantity + ' Get ' + getQuantity + ' at ' + discountPercent + '% off')]"/>
             </iterate>
@@ -588,6 +601,9 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.product.store.ProductStorePromoProduct" list="psppList" cache="true">
                 <econdition field-name="storePromotionId"/></entity-find>
             <set field="applProductIdSet" from="psppList ? new HashSet(psppList*.productId) : null"/>
+
+            <!-- get the ProductStorePromoCode record for the promoCode to save with the OrderItem(s) generated; will be null if no promoCodeId -->
+            <entity-find-one entity-name="mantle.product.store.ProductStorePromoCode" value-field="storePromoCode"/>
 
             <!-- NOTE: default use limit is 1000.0 so if that then set to 1.0 as a more sensible default -->
             <set field="useLimitRemaining" from="!useLimit || useLimit == 1000.0 ? 1.0 : useLimit"/>
@@ -626,8 +642,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="discountAmount" from="orderItemTotalOut.combinedAmount"/></if>
                 <service-call name="create#mantle.order.OrderItem" out-map="createItemOut"
                         in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, parentItemSeqId:orderItem.orderItemSeqId,
-                             itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:-discountAmount,
-                             storePromotionId:storePromotionId, promoCodeId:promoCodeId,
+                             itemTypeEnumId:'ItemDiscount', quantity:itemQuantity, unitAmount:-discountAmount, productId:orderItem.productId,
+                             storePromotionId:storePromotionId, promoCodeId:promoCodeId, promoCodeText:storePromoCode?.promoCode,
                              isPromo:'Y', promoQuantity:promoQuantity, promoTimesUsed:eligibleQuantity,
                              itemDescription:ec.resource.expand(itemDescription, '')?:('Get ' + ec.l10n.format(discountAmount, '#,##0.00') + ' off')]"/>
             </iterate>

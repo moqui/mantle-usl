@@ -29,27 +29,20 @@ import java.sql.Timestamp
  */
 
 class ReturnToResponseBasicFlow extends Specification {
-    @Shared
-    protected final static Logger logger = LoggerFactory.getLogger(ReturnToResponseBasicFlow.class)
-    @Shared
-    ExecutionContext ec
-    @Shared
-    String returnId = null, originalOrderId = "55500", returnShipmentId
-    @Shared
-    Map replaceShipResult
-    @Shared
-    long effectiveTime = System.currentTimeMillis()
-    @Shared
-    long totalFieldsChecked = 0
-    @Shared
-    boolean kieEnabled = false
+    @Shared protected final static Logger logger = LoggerFactory.getLogger(ReturnToResponseBasicFlow.class)
+    @Shared ExecutionContext ec
+    @Shared String returnId = null, originalOrderId = "55500", returnShipmentId
+    @Shared Map replaceShipResult
+    @Shared long effectiveTime = System.currentTimeMillis()
+    @Shared long totalFieldsChecked = 0
+    // no longer needed: @Shared boolean kieEnabled = false
 
     def setupSpec() {
         // init the framework, get the ec
         ec = Moqui.getExecutionContext()
         // set an effective date so data check works, etc
         ec.user.setEffectiveTime(new Timestamp(effectiveTime))
-        kieEnabled = ec.factory.getToolFactory("KIE") != null
+        // no longer needed: kieEnabled = ec.factory.getToolFactory("KIE") != null
 
         ec.entity.tempSetSequencedIdPrimary("mantle.account.invoice.Invoice", 55700, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.account.financial.FinancialAccount", 55700, 10)
@@ -141,7 +134,7 @@ class ReturnToResponseBasicFlow extends Specification {
                 <items returnItemSeqId="02" orderId="55500" orderItemSeqId="02" returnReasonEnumId="RrsnDefective"
                     returnQuantity="2" productId="DEMO_3_1" description="Demo Product Three-One" itemTypeEnumId="ItemProduct"
                     statusId="ReturnRequested" returnResponseEnumId="RrspRefund"/>
-                <items returnItemSeqId="03" orderId="55500" orderItemSeqId="03" returnReasonEnumId="RrsnDidNotWant"
+                <items returnItemSeqId="05" orderId="55500" orderItemSeqId="03" returnReasonEnumId="RrsnDidNotWant"
                     returnQuantity="3" productId="DEMO_2_1" description="Demo Product Two-One" itemTypeEnumId="ItemProduct"
                     statusId="ReturnRequested" returnResponseEnumId="RrspCredit"/>
             </returns>
@@ -185,8 +178,19 @@ class ReturnToResponseBasicFlow extends Specification {
 
         // receive Return Shipment
         // triggers SECA rules to receive ReturnItems
-        ec.service.sync().name("mantle.shipment.ShipmentServices.receive#EntireShipment")
-                .parameters([shipmentId:returnShipmentId, statusId:'AstOnHold']).call()
+
+        // old approach, receive all: ec.service.sync().name("mantle.shipment.ShipmentServices.receive#EntireShipment").parameters([shipmentId:returnShipmentId, statusId:'AstOnHold']).call()
+
+        // receive individually to do partial return receipt for DEMO_2_1 (2 of 3) to test prorating of responses
+        ec.service.sync().name("mantle.shipment.ShipmentServices.receive#ShipmentProduct")
+                .parameters([shipmentId:returnShipmentId, productId:'DEMO_1_1', statusId:'AstOnHold', quantityAccepted:1.0]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.receive#ShipmentProduct")
+                .parameters([shipmentId:returnShipmentId, productId:'DEMO_2_1', statusId:'AstOnHold', quantityAccepted:2.0]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.receive#ShipmentProduct")
+                .parameters([shipmentId:returnShipmentId, productId:'DEMO_3_1', statusId:'AstOnHold', quantityAccepted:2.0]).call()
+
+        ec.service.sync().name("mantle.shipment.ShipmentServices.deliver#Shipment")
+                .parameters([shipmentId:returnShipmentId]).call()
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
@@ -196,9 +200,9 @@ class ReturnToResponseBasicFlow extends Specification {
                     <sources shipmentItemSourceId="55700" quantity="1" statusId="SisReceived" quantityNotHandled="0"
                         returnId="55700" returnItemSeqId="01"/>
                 </items>
-                <items quantity="3" productId="DEMO_2_1">
-                    <sources shipmentItemSourceId="55702" quantity="3" statusId="SisReceived" quantityNotHandled="0"
-                        returnId="55700" returnItemSeqId="03"/>
+                <items quantity="2" productId="DEMO_2_1">
+                    <sources shipmentItemSourceId="55702" quantity="2" statusId="SisReceived" quantityNotHandled="0"
+                        returnId="55700" returnItemSeqId="05"/>
                 </items>
                 <items quantity="2" productId="DEMO_3_1">
                     <sources shipmentItemSourceId="55701" quantity="2" statusId="SisReceived" quantityNotHandled="0"
@@ -232,8 +236,8 @@ class ReturnToResponseBasicFlow extends Specification {
                         availableToPromiseDiff="1" shipmentId="55700" assetReceiptId="55700" effectiveDate="${effectiveTime}"
                         quantityOnHandDiff="1"/>
                 </items>
-                <items returnItemSeqId="02" orderItemSeqId="02" responseDate="${effectiveTime}" refundPaymentId="55700"
-                        statusId="ReturnCompleted" responseAmount="15.54" receivedQuantity="2">
+                <items returnItemSeqId="02" orderItemSeqId="02" responseDate="${effectiveTime}" refundPaymentId="55701"
+                        statusId="ReturnCompleted" responseAmount="15.54" receivedQuantity="2" returnQuantity="2">
                     <receipts assetReceiptId="55702" productId="DEMO_3_1" quantityAccepted="2"
                         acctgTransResultEnumId="AtrNoAcquireCost" quantityRejected="0" assetId="55702" shipmentId="55700"
                         receivedByUserId="EX_JOHN_DOE" receivedDate="${effectiveTime}"/>
@@ -241,14 +245,14 @@ class ReturnToResponseBasicFlow extends Specification {
                         availableToPromiseDiff="2" shipmentId="55700" assetReceiptId="55702" effectiveDate="${effectiveTime}"
                         quantityOnHandDiff="2"/>
                 </items>
-                <items returnItemSeqId="03" finAccountTransId="55700" statusId="ReturnCompleted" responseAmount="36.36"
-                        receivedQuantity="3">
-                    <receipts assetReceiptId="55701" productId="DEMO_2_1" quantityAccepted="3"
+                <items returnItemSeqId="05" orderItemSeqId="03" responseDate="${effectiveTime}" refundPaymentId="55700" finAccountTransId="55700" 
+                        statusId="ReturnCompleted" responseAmount="24.24" receivedQuantity="2" returnQuantity="2">
+                    <receipts assetReceiptId="55701" productId="DEMO_2_1" quantityAccepted="2"
                         acctgTransResultEnumId="AtrNoAcquireCost" quantityRejected="0" assetId="55701" shipmentId="55700"
                         receivedByUserId="EX_JOHN_DOE" receivedDate="${effectiveTime}"/>
                     <mantle.product.asset.AssetDetail assetDetailId="55701" productId="DEMO_2_1" assetId="55701"
-                        availableToPromiseDiff="3" shipmentId="55700" assetReceiptId="55701" effectiveDate="${effectiveTime}"
-                        quantityOnHandDiff="3"/>
+                        availableToPromiseDiff="2" shipmentId="55700" assetReceiptId="55701" effectiveDate="${effectiveTime}"
+                        quantityOnHandDiff="2"/>
                 </items>
             </returns>
         </entity-facade-xml>""").check(dataCheckErrors)
@@ -288,13 +292,38 @@ class ReturnToResponseBasicFlow extends Specification {
         dataCheckErrors.size() == 0
     }
 
+    def "validate Return Credit Memo Invoice"() {
+        when:
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <invoices invoiceId="55700" fromPartyId="CustJqp" toPartyId="ORG_ZIZI_RETAIL" unpaidTotal="14" acctgTransResultEnumId="AtrSuccess" invoiceDate="${effectiveTime}" 
+                    currencyUomId="USD" statusId="InvoiceApproved" invoiceTypeEnumId="InvoiceReturn" invoiceTotal="37.07" appliedPaymentsTotal="23.07">
+                <paymentApplications paymentApplicationId="55700" paymentId="55700" amountApplied="23.07" appliedDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"/>
+                <items invoiceItemSeqId="01" amount="7.77" quantity="2" productId="DEMO_3_1" description="Demo Product Three-One" itemTypeEnumId="ItemProduct"/>
+                <items invoiceItemSeqId="02" amount="-2.46" quantity="1" description="Discount why? Because we love you." itemTypeEnumId="ItemDiscount"/>
+                <items invoiceItemSeqId="03" amount="0.92" quantity="1" description="Test Tax 7%" itemTypeEnumId="ItemSalesTax"/>
+                <items invoiceItemSeqId="04" amount="12.12" quantity="2" productId="DEMO_2_1" description="Demo Product Two-One" itemTypeEnumId="ItemProduct"/>
+                <items invoiceItemSeqId="05" amount="-4.02" quantity="0.666667" description="Discount why? Because we love you." itemTypeEnumId="ItemDiscount"/>
+                <items invoiceItemSeqId="06" amount="2.26" quantity="0.666667" description="Test Tax 7%" itemTypeEnumId="ItemSalesTax"/>
+            </invoices>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        // NOTE: for Promised payment no effectiveDate so don't validate
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+        if (ec.message.hasError()) logger.warn(ec.message.getErrorsString())
+
+        then:
+        dataCheckErrors.size() == 0
+    }
+
     def "validate Refund Payment"() {
         when:
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
-            <payments paymentId="55700" fromPartyId="ORG_ZIZI_RETAIL" toPartyId="CustJqp" amountUomId="USD"
-                paymentTypeEnumId="PtRefund" toPaymentMethodId="CustJqpCc" amount="15.54" reconcileStatusId="PmtrNot"
-                statusId="PmntPromised" paymentInstrumentEnumId="PiCompanyCheck"/>
+            <payments paymentId="55701" fromPartyId="ORG_ZIZI_RETAIL" toPartyId="CustJqp" amountUomId="USD"
+                paymentTypeEnumId="PtInvoicePayment" toPaymentMethodId="CustJqpCc" amount="14.0" reconcileStatusId="PmtrNot"
+                statusId="PmntPromised" paymentInstrumentEnumId="PiCreditCard"/>
         </entity-facade-xml>""").check(dataCheckErrors)
         // NOTE: for Promised payment no effectiveDate so don't validate
         totalFieldsChecked += fieldsChecked
@@ -311,19 +340,19 @@ class ReturnToResponseBasicFlow extends Specification {
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
             <mantle.account.financial.FinancialAccount finAccountId="55700" finAccountTypeId="CustomerCredit" isRefundable="Y"
-                    availableBalance="36.36" ownerPartyId="CustJqp" currencyUomId="USD" statusId="FaActive"
-                    finAccountName="Joe Public Customer Credit" actualBalance="36.36" organizationPartyId="ORG_ZIZI_RETAIL">
+                    actualBalance="23.07" availableBalance="23.07" ownerPartyId="CustJqp" currencyUomId="USD" statusId="FaActive"
+                    finAccountName="Joe Public Customer Credit" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.account.financial.FinancialAccountTrans finAccountTransId="55700" fromPartyId="ORG_ZIZI_RETAIL"
-                        finAccountTransTypeEnumId="FattDeposit" reasonEnumId="FatrCsCredit" amount="36.36"
+                        finAccountTransTypeEnumId="FattDeposit" reasonEnumId="FatrCsCredit" amount="23.07"
                         entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess" transactionDate="${effectiveTime}"
-                        postBalance="36.36" toPartyId="CustJqp" performedByUserId="EX_JOHN_DOE"/>
+                        postBalance="23.07" toPartyId="CustJqp" performedByUserId="EX_JOHN_DOE"/>
             </mantle.account.financial.FinancialAccount>
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55700" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                     amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttFinancialDeposit"
                     glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
-                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="36.36" glAccountId="430000000"
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="01" amount="23.07" glAccountId="430000000"
                         reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatSales" debitCreditFlag="D"/>
-                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" amount="36.36" glAccountId="251100000"
+                <mantle.ledger.transaction.AcctgTransEntry acctgTransEntrySeqId="02" amount="23.07" glAccountId="251100000"
                         reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatCustomerCredits" debitCreditFlag="C"/>
             </mantle.ledger.transaction.AcctgTrans>
         </entity-facade-xml>""").check(dataCheckErrors)
@@ -394,9 +423,9 @@ class ReturnToResponseBasicFlow extends Specification {
             <mantle.product.issuance.AssetIssuance assetIssuanceId="55700" assetId="55400" shipmentId="55701"
                     orderId="55700" orderItemSeqId="01" issuedDate="${effectiveTime}" quantity="1" productId="DEMO_1_1"
                     assetReservationId="55700" acctgTransResultEnumId="AtrSuccess">
-                <mantle.ledger.transaction.AcctgTrans postedDate="${effectiveTime}" amountUomId="USD" isPosted="Y"
+                <mantle.ledger.transaction.AcctgTrans acctgTransId="55704" postedDate="${effectiveTime}" amountUomId="USD" isPosted="Y"
                         assetId="55400" acctgTransTypeEnumId="AttInventoryIssuance" glFiscalTypeEnumId="GLFT_ACTUAL"
-                        transactionDate="${effectiveTime}" acctgTransId="55701" organizationPartyId="ORG_ZIZI_RETAIL">
+                        transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                     <mantle.ledger.transaction.AcctgTransEntry amount="8" productId="DEMO_1_1" glAccountId="141300000"
                             reconcileStatusId="AterNot" isSummary="N" glAccountTypeEnumId="GatInventory"
                             debitCreditFlag="C" assetId="55400" acctgTransEntrySeqId="01"/>
@@ -454,43 +483,43 @@ class ReturnToResponseBasicFlow extends Specification {
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
-            <financialAccounts finAccountId="55700" negativeBalanceLimit="0" availableBalance="${kieEnabled ? '22.59' : '28.59'}"
-                    actualBalance="${kieEnabled ? '22.59' : '28.59'}" ownerPartyId="CustJqp" organizationPartyId="ORG_ZIZI_RETAIL">
+            <financialAccounts finAccountId="55700" negativeBalanceLimit="0" availableBalance="15.30"
+                    actualBalance="15.30" ownerPartyId="CustJqp" organizationPartyId="ORG_ZIZI_RETAIL">
                 <!-- NOTE: expireDate is set to now when payment is captured, so not in the future as when created -->
-                <mantle.account.financial.FinancialAccountAuth finAccountAuthId="55700" amount="${kieEnabled ? '13.77' : '7.77'}" paymentId="55701"
+                <mantle.account.financial.FinancialAccountAuth finAccountAuthId="55700" amount="7.77" paymentId="55702"
                         authorizationDate="${effectiveTime}" expireDate="${effectiveTime}"/>
                 <mantle.account.method.PaymentGatewayResponse paymentGatewayResponseId="55700"
-                        paymentGatewayConfigId="FinancialAccountLocal" amountUomId="USD" paymentId="55701"
-                        paymentOperationEnumId="PgoAuthorize" amount="${kieEnabled ? '13.77' : '7.77'}" resultDeclined="N" resultError="N"
+                        paymentGatewayConfigId="FinancialAccountLocal" amountUomId="USD" paymentId="55702"
+                        paymentOperationEnumId="PgoAuthorize" amount="7.77" resultDeclined="N" resultError="N"
                         transactionDate="${effectiveTime}" resultNsf="N" referenceNum="55700" resultSuccess="Y"/>
                 <mantle.account.financial.FinancialAccountTrans finAccountTransId="55701" fromPartyId="CustJqp"
                         toPartyId="ORG_ZIZI_RETAIL" finAccountTransTypeEnumId="FattWithdraw" reasonEnumId="FatrDisbursement"
-                        amount="${kieEnabled ? '-13.77' : '-7.77'}" entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"
-                        transactionDate="${effectiveTime}" postBalance="${kieEnabled ? '22.59' : '28.59'}" finAccountAuthId="55700" performedByUserId="EX_JOHN_DOE"/>
-                <acctgTrans acctgTransId="55705" otherPartyId="CustJqp" amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttFinancialWithdrawal"
+                        amount="-7.77" entryDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess"
+                        transactionDate="${effectiveTime}" postBalance="15.30" finAccountAuthId="55700" performedByUserId="EX_JOHN_DOE"/>
+                <acctgTrans acctgTransId="55708" otherPartyId="CustJqp" amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttFinancialWithdrawal"
                         glFiscalTypeEnumId="GLFT_ACTUAL" transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
                     <entries acctgTransEntrySeqId="01" amount="7.77" glAccountId="258200000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="C"/>
                     <entries acctgTransEntrySeqId="02" amount="7.77" glAccountId="251100000" reconcileStatusId="AterNot" isSummary="N" debitCreditFlag="D"/>
                 </acctgTrans>
-                <mantle.account.method.PaymentGatewayResponse approvalCode="55701" paymentGatewayConfigId="FinancialAccountLocal"
-                        responseCode="success" amountUomId="USD" resultDeclined="N" paymentGatewayResponseId="55701" paymentId="55701"
-                        paymentOperationEnumId="PgoCapture" amount="${kieEnabled ? '13.77' : '7.77'}" resultError="N" resultNsf="N" referenceNum="55701"
+                <mantle.account.method.PaymentGatewayResponse paymentGatewayResponseId="55701" paymentGatewayConfigId="FinancialAccountLocal"
+                        responseCode="success" amountUomId="USD" resultDeclined="N" paymentId="55702" paymentOperationEnumId="PgoCapture" 
+                        amount="7.77" resultError="N" resultNsf="N" referenceNum="55701" approvalCode="55701"
                         resultSuccess="Y" transactionDate="${effectiveTime}"/>
-                <mantle.account.payment.Payment paymentId="55701" fromPartyId="CustJqp" paymentGatewayConfigId="FinancialAccountLocal"
-                        amountUomId="USD" paymentTypeEnumId="PtInvoicePayment" finAccountTransId="55701" amount="${kieEnabled ? '13.77' : '7.77'}"
+                <mantle.account.payment.Payment paymentId="55702" fromPartyId="CustJqp" paymentGatewayConfigId="FinancialAccountLocal"
+                        amountUomId="USD" paymentTypeEnumId="PtInvoicePayment" finAccountTransId="55701" amount="7.77"
                         reconcileStatusId="PmtrNot" acctgTransResultEnumId="AtrSuccess" finAccountAuthId="55700" statusId="PmntDelivered"
                         paymentInstrumentEnumId="PiFinancialAccount" toPartyId="ORG_ZIZI_RETAIL" orderId="55701" orderPartSeqId="01">
-                    <mantle.ledger.transaction.AcctgTrans acctgTransId="55706" otherPartyId="CustJqp" postedDate="${effectiveTime}"
+                    <mantle.ledger.transaction.AcctgTrans acctgTransId="55709" otherPartyId="CustJqp" postedDate="${effectiveTime}"
                             amountUomId="USD" isPosted="Y" acctgTransTypeEnumId="AttIncomingPayment" glFiscalTypeEnumId="GLFT_ACTUAL"
                             transactionDate="${effectiveTime}" organizationPartyId="ORG_ZIZI_RETAIL">
-                        <entries acctgTransEntrySeqId="01" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="121000000" reconcileStatusId="AterNot"
+                        <entries acctgTransEntrySeqId="01" amount="7.77" glAccountId="121000000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="GatAccountsReceivable" debitCreditFlag="C"/>
-                        <entries acctgTransEntrySeqId="02" amount="${kieEnabled ? '13.77' : '7.77'}" glAccountId="258200000" reconcileStatusId="AterNot"
+                        <entries acctgTransEntrySeqId="02" amount="7.77" glAccountId="258200000" reconcileStatusId="AterNot"
                             isSummary="N" glAccountTypeEnumId="" debitCreditFlag="D"/>
                     </mantle.ledger.transaction.AcctgTrans>
                     <!-- NOTE: not checking acctgTransResultEnumId, could be success or payment not posted depending on if payment or application posts first -->
-                    <applications amountApplied="${kieEnabled ? '13.77' : '7.77'}" appliedDate="${effectiveTime}"
-                            paymentApplicationId="55700" invoiceId="55701"/>
+                    <applications amountApplied="7.77" appliedDate="${effectiveTime}"
+                            paymentApplicationId="55701" invoiceId="55702"/>
                 </mantle.account.payment.Payment>
             </financialAccounts>
         </entity-facade-xml>""").check(dataCheckErrors)

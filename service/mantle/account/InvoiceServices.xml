@@ -19,7 +19,10 @@ along with this software (see the LICENSE.md file). If not, see
     <!-- =========================================== -->
 
     <service verb="get" noun="InvoiceDisplayInfo">
-        <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="invoiceId" required="true"/>
+            <parameter name="activeOrgId"/>
+        </in-parameters>
         <out-parameters>
             <parameter name="invoice" type="Map"/>
             <parameter name="editableStatusIds" type="Set"><parameter name="statusId"/></parameter>
@@ -27,8 +30,14 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="recordPaymentStatusIds" type="Set"><parameter name="statusId"/></parameter>
             <parameter name="canRecordPayments" type="Boolean"/>
 
-            <parameter name="isFromPartyOrgInternal" type="Boolean"><description>If true invoice is receivable</description></parameter>
-            <parameter name="isToPartyOrgInternal" type="Boolean"><description>If true invoice is payable</description></parameter>
+            <parameter name="isFromPartyOrgInternal" type="Boolean"/>
+            <parameter name="isToPartyOrgInternal" type="Boolean"/>
+            <parameter name="organizationPartyId"><description>Org considered primary for this invoice to determine payable or
+                receivable; based on activeOrgId if specified, otherwise defaults to whichever party has role OrgInternal and
+                defaulting to fromPartyId</description></parameter>
+            <parameter name="isPayableInvoice" type="Boolean">
+                <description>If true invoice is payable for activeOrgId or default logic, otherwise is receivable</description></parameter>
+            <parameter name="statusFlowId"/>
             <parameter name="dupInvoiceList" type="List"><description>List of invoices matching referenceNumber and
                 other party (non org internal)</description><parameter name="dupInvoice" type="Map"/></parameter>
 
@@ -53,6 +62,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="orderPromisedPaymentList" type="List"><parameter name="orderPromisedPayment" type="Map"/></parameter>
             <parameter name="shipmentItemSourceList" type="List"><parameter name="shipmentItemSource" type="Map"/></parameter>
             <parameter name="shipmentIdSet" type="Set"><parameter name="shipmentId"/></parameter>
+            <parameter name="returnItemBillingList" type="List"><parameter name="returnItemBilling" type="Map"/></parameter>
+            <parameter name="returnIdSet" type="Set"><parameter name="returnId"/></parameter>
 
             <parameter name="acctgTransList" type="List"><parameter name="acctgTrans" type="Map"/></parameter>
             <parameter name="acctgTransIdSet" type="Set"><parameter name="acctgTransId"/></parameter>
@@ -78,6 +89,27 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="partyId" from="invoice.toPartyId"/>
                 <econdition field-name="roleTypeId" value="OrgInternal"/></entity-find-count>
             <set field="isToPartyOrgInternal" from="toOrgInternalCount &gt; 0"/>
+
+            <!-- for context sensitive selection of the OrgInternal to use if both from and to parties are OrgInternal start with activeOrgId -->
+            <!-- also consider userOrgIds if no activeOrdId; better default in some cases for particular users even if forget to set active org -->
+            <service-call name="mantle.party.PartyServices.get#PartyOrganizationInfo" out-map="context" in-map="[partyId:partyId]"/>
+            <if condition="activeOrgId &amp;&amp; ((isFromPartyOrgInternal &amp;&amp; activeOrgId == invoice.fromPartyId) ||
+                    (isToPartyOrgInternal &amp;&amp; activeOrgId == invoice.toPartyId))"><then>
+                <set field="organizationPartyId" from="activeOrgId"/>
+            </then><else-if condition="isToPartyOrgInternal &amp;&amp; invoice.toPartyId in userOrgIds">
+                <set field="organizationPartyId" from="invoice.toPartyId"/>
+            </else-if><else-if condition="isFromPartyOrgInternal &amp;&amp; invoice.fromPartyId in userOrgIds">
+                <set field="organizationPartyId" from="invoice.fromPartyId"/>
+            </else-if><else>
+                <set field="organizationPartyId" from="isFromPartyOrgInternal ? invoice.fromPartyId : invoice.toPartyId"/>
+            </else></if>
+            <set field="isPayableInvoice" from="organizationPartyId == invoice.toPartyId"/>
+            <!-- statusFlowId used in StatusChangeSection, see seed data in AccountingAccountEntities.xml -->
+            <set field="statusFlowId" from="isPayableInvoice ? 'InvoicePayable' : 'InvoiceReceivable'"/>
+            <!-- check the statusFlowId to make sure it has transitions, for backward compatibility from before these had seed data! -->
+            <entity-find-count entity-name="moqui.basic.StatusFlowTransition" count-field="statusFlowTransCount" cache="true">
+                <econdition field-name="statusFlowId"/></entity-find-count>
+            <if condition="statusFlowTransCount == 0"><set field="statusFlowId" from="null"/></if>
 
             <!-- look for duplicate invoices by referenceNumber -->
             <if condition="isFromPartyOrgInternal &amp;&amp; invoice.referenceNumber">
@@ -165,6 +197,11 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="shipmentItemSourceList">
                 <econdition field-name="invoiceId"/></entity-find>
             <set field="shipmentIdSet" from="new TreeSet(shipmentItemSourceList*.shipmentId)"/>
+
+            <!-- get associated return items -->
+            <entity-find entity-name="mantle.order.return.ReturnItemBilling" list="returnItemBillingList">
+                <econdition field-name="invoiceId"/></entity-find>
+            <set field="returnIdSet" from="new TreeSet(returnItemBillingList*.returnId)"/>
 
             <!-- get associated accounting transactions -->
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="acctgTransList">
@@ -553,15 +590,25 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="invoiceId"/></out-parameters>
         <actions>
-            <entity-find entity-name="mantle.party.PartyRole" list="fromOrgInternalList">
-                <econdition field-name="partyId" from="fromPartyId"/>
-                <econdition field-name="roleTypeId" value="OrgInternal"/></entity-find>
-            <set field="isFromPartyOrgInternal" from="fromOrgInternalList as boolean"/>
-            <set field="organizationPartyId" from="isFromPartyOrgInternal ? fromPartyId : toPartyId"/>
-            <set field="otherPartyId" from="isFromPartyOrgInternal ? toPartyId : fromPartyId"/>
-
+            <entity-find-count entity-name="mantle.party.PartyRole" count-field="fromOrgInternalCount">
+                <econdition field-name="partyId" from="fromPartyId"/><econdition field-name="roleTypeId" value="OrgInternal"/></entity-find-count>
+            <set field="isFromPartyOrgInternal" from="fromOrgInternalCount &gt; 0"/>
+            <entity-find-count entity-name="mantle.party.PartyRole" count-field="toOrgInternalCount">
+                <econdition field-name="partyId" from="toPartyId"/><econdition field-name="roleTypeId" value="OrgInternal"/></entity-find-count>
+            <set field="isToPartyOrgInternal" from="toOrgInternalCount &gt; 0"/>
             <!-- set the initial statusId based on which party is OrgInternal -->
-            <set field="statusId" from="isFromPartyOrgInternal ? 'InvoiceInProcess' : 'InvoiceIncoming'"/>
+            <!-- if both parties are in role OrgInternal start in InvoiceInProcess status because Receivable/Outgoing statuses come before Payable/Incoming statuses -->
+            <if condition="isToPartyOrgInternal &amp;&amp; !isFromPartyOrgInternal"><then>
+                <!-- Payable -->
+                <set field="organizationPartyId" from="toPartyId"/>
+                <set field="otherPartyId" from="fromPartyId"/>
+                <set field="statusId" value="InvoiceIncoming"/>
+            </then><else>
+                <!-- Receivable -->
+                <set field="organizationPartyId" from="fromPartyId"/>
+                <set field="otherPartyId" from="toPartyId"/>
+                <set field="statusId" value="InvoiceInProcess"/>
+            </else></if>
 
             <!-- get configured currency for org if none specified -->
             <if condition="!currencyUomId">
@@ -845,7 +892,8 @@ along with this software (see the LICENSE.md file). If not, see
                                 parentItemSeqId:orderItem.parentItemSeqId, itemTypeEnumId:orderItem.itemTypeEnumId ?: 'ItemSales',
                                 amount:orderItem.unitAmount, description:orderItem.itemDescription, quantity:quantityNotBilled,
                                 quantityUomId:orderItem.quantityUomId, otherPartyProductId:orderItem.otherPartyProductId,
-                                productId:orderItem.productId]"/>
+                                productId:orderItem.productId,
+                                finAccountId:orderItem.finAccountId, finAccountTransId:orderItem.finAccountTransId]"/>
 
                     <!-- for ShipmentItemSource set the invoiceId/invoiceItemSeqId on it -->
                     <set field="quantityNotShipSourced" from="quantityNotBilled"/>
@@ -975,10 +1023,11 @@ along with this software (see the LICENSE.md file). If not, see
                         <!-- set Payment.forInvoiceId on order part payments, if not already set -->
                         <set field="partPayments" from="orderPart.payments"/>
                         <iterate list="partPayments" entry="partPayment">
-                            <if condition="!partPayment.forInvoiceId">
-                                <set field="partPayment.forInvoiceId" from="invoiceId"/>
-                                <entity-update value-field="partPayment"/>
-                            </if>
+                            <!-- only set forInvoiceId if not set, payment not Cancelled/etc, and parties match -->
+                            <if condition="partPayment.forInvoiceId || partPayment.statusId in ['PmntCancelled', 'PmntVoid', 'PmntDeclined'] ||
+                                    partPayment.fromPartyId != toPartyId || partPayment.toPartyId != orderPart.vendorPartyId"><continue/></if>
+                            <set field="partPayment.forInvoiceId" from="invoiceId"/>
+                            <entity-update value-field="partPayment"/>
                         </iterate>
                     </if>
                 </if>
@@ -1007,7 +1056,8 @@ along with this software (see the LICENSE.md file). If not, see
                                         amount:orderItem.unitAmount, description:orderItem.itemDescription,
                                         quantity:issuanceQuantityToBill, assetId:assetIssuance.assetId,
                                         quantityUomId:orderItem.quantityUomId, productId:orderItem.productId,
-                                        otherPartyProductId:orderItem.otherPartyProductId]"/>
+                                        otherPartyProductId:orderItem.otherPartyProductId,
+                                        finAccountId:orderItem.finAccountId, finAccountTransId:orderItem.finAccountTransId]"/>
                             <if condition="!parentInvoiceItemSeqId"><set field="parentInvoiceItemSeqId" from="iiOut.invoiceItemSeqId"/></if>
                             <service-call name="create#mantle.order.OrderItemBilling"
                                     in-map="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
@@ -1069,7 +1119,8 @@ along with this software (see the LICENSE.md file). If not, see
                                         amount:orderItem.unitAmount, description:orderItem.itemDescription,
                                         quantity:receiptQuantityToBill, assetId:assetReceipt.assetId,
                                         quantityUomId:orderItem.quantityUomId, productId:orderItem.productId,
-                                        otherPartyProductId:orderItem.otherPartyProductId]"/>
+                                        otherPartyProductId:orderItem.otherPartyProductId,
+                                        finAccountId:orderItem.finAccountId, finAccountTransId:orderItem.finAccountTransId]"/>
                             <if condition="!parentInvoiceItemSeqId"><set field="parentInvoiceItemSeqId" from="iiOut.invoiceItemSeqId"/></if>
                             <service-call name="create#mantle.order.OrderItemBilling"
                                     in-map="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
@@ -1109,7 +1160,8 @@ along with this software (see the LICENSE.md file). If not, see
                                 in-map="[invoiceId:invoiceId, itemTypeEnumId:orderItem.itemTypeEnumId ?: 'ItemProduct',
                                     amount:orderItem.unitAmount, description:orderItem.itemDescription,
                                     quantity:quantityNotBilled, quantityUomId:orderItem.quantityUomId,
-                                    productId:orderItem.productId, otherPartyProductId:orderItem.otherPartyProductId]"/>
+                                    productId:orderItem.productId, otherPartyProductId:orderItem.otherPartyProductId,
+                                    finAccountId:orderItem.finAccountId, finAccountTransId:orderItem.finAccountTransId]"/>
                         <if condition="!parentInvoiceItemSeqId"><set field="parentInvoiceItemSeqId" from="mainIiOut.invoiceItemSeqId"/></if>
                         <!-- update ShipmentItemSource -->
                         <if condition="shipmentItemSource.invoiceItemSeqId"><then>
@@ -1180,6 +1232,7 @@ along with this software (see the LICENSE.md file). If not, see
                             <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="childIiOut"
                                     in-map="[invoiceId:invoiceId, itemTypeEnumId:(childOrderItem.itemTypeEnumId ?: 'ItemSales'),
                                         parentItemSeqId:parentInvoiceItemSeqId, amount:childAmountToBill,
+                                        productId:(childOrderItem.productId ?: orderItem.productId),
                                         description:childOrderItem.itemDescription, quantity:childQtyToBill,
                                         quantityUomId:childOrderItem.quantityUomId]"/>
                             <service-call name="create#mantle.order.OrderItemBilling"
@@ -1226,6 +1279,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <!-- TODO is prorate by quantity needed? for example pro-rate order level shipping for partial shipment -->
                         <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="iiOut"
                                 in-map="[invoiceId:invoiceId, itemTypeEnumId:otherOrderItem.itemTypeEnumId ?: 'ItemSales',
+                                    productId:otherOrderItem.productId,
                                     amount:otherOrderItem.unitAmount, description:otherOrderItem.itemDescription,
                                     quantity:otherItemQty, quantityUomId:otherOrderItem.quantityUomId]"/>
                         <set field="parentInvoiceItemSeqId" from="iiOut.invoiceItemSeqId"/>
@@ -1286,6 +1340,7 @@ along with this software (see the LICENSE.md file). If not, see
                             <service-call name="create#mantle.account.invoice.InvoiceItem" out-map="childIiOut"
                                     in-map="[invoiceId:invoiceId, itemTypeEnumId:(childOrderItem.itemTypeEnumId ?: 'ItemSales'),
                                         parentItemSeqId:parentInvoiceItemSeqId, amount:childAmountToBill,
+                                        productId:(childOrderItem.productId ?: otherOrderItem.productId),
                                         description:childOrderItem.itemDescription, quantity:childQtyToBill,
                                         quantityUomId:childOrderItem.quantityUomId]"/>
                             <service-call name="create#mantle.order.OrderItemBilling"
@@ -2133,14 +2188,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <select-field field-name="orderId"/>
             </entity-find>
             <set field="orderIdSet" from="new HashSet(orderItemBillingList*.orderId)"/>
-            <if condition="!orderIdSet"><return/></if>
 
-            <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList" distinct="true">
-                <econdition field-name="orderId" operator="in" from="orderIdSet"/>
-                <econdition field-name="productStoreId" operator="is-not-null"/>
-                <select-field field-name="productStoreId"/>
-            </entity-find>
-            <set field="productStoreIdSet" from="new HashSet(orderHeaderList*.productStoreId)"/>
+            <if condition="orderIdSet">
+                <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList" distinct="true">
+                    <econdition field-name="orderId" operator="in" from="orderIdSet"/>
+                    <econdition field-name="productStoreId" operator="is-not-null"/>
+                    <select-field field-name="productStoreId"/>
+                </entity-find>
+                <set field="productStoreIdSet" from="new HashSet(orderHeaderList*.productStoreId)"/>
+            </if>
 
             <!-- use PartySetting to look up default store if none associated with invoice through orders -->
             <if condition="!productStoreIdSet">
