@@ -133,7 +133,8 @@ class OrderProcureToPayBasicFlow extends Specification {
 
         setInfoOut = ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
                 .parameters([orderId:purchaseOrderId, orderPartSeqId:orderPartSeqId,
-                    paymentInstrumentEnumId:'PiCompanyCheck', shippingPostalContactMechId:'ORG_ZIZI_RTL_SA',
+                    paymentMethodId:"ZIRET_BA", toPaymentMethodId:"ZiddlemanInc_BA",
+                    paymentInstrumentEnumId:'PiAch', shippingPostalContactMechId:'ORG_ZIZI_RTL_SA',
                     shippingTelecomContactMechId:'ORG_ZIZI_RTL_PT', shipmentMethodEnumId:'ShMthPickUp']).call()
 
         // one person will place the PO
@@ -148,7 +149,7 @@ class OrderProcureToPayBasicFlow extends Specification {
                 statusId="OrderApproved" currencyUomId="USD" grandTotal="23795.00"/>
 
             <mantle.account.payment.Payment paymentId="${setInfoOut.paymentId}" fromPartyId="${customerPartyId}" toPartyId="${vendorPartyId}"
-                paymentInstrumentEnumId="PiCompanyCheck" orderId="${purchaseOrderId}" orderPartSeqId="01"
+                paymentInstrumentEnumId="PiAch" orderId="${purchaseOrderId}" orderPartSeqId="01"
                 statusId="PmntPromised" amount="23795.00" amountUomId="USD"/>
 
             <mantle.order.OrderPart orderId="${purchaseOrderId}" orderPartSeqId="01" vendorPartyId="${vendorPartyId}"
@@ -655,10 +656,27 @@ class OrderProcureToPayBasicFlow extends Specification {
 
     def "send Purchase Invoice Payment"() {
         when:
-        // record Payment for Invoice and apply to Invoice (will trigger GL posting for Payment and Payment Application)
+        // Authorize payment
         // intentional overpay to test refund and payment to payment application; invoice amt is 23,830.00, pay 24,000.00 for 170.00 overpay
+        ec.service.sync().name("update#mantle.account.payment.Payment").parameter("paymentId", setInfoOut.paymentId)
+                .parameter("statusId", "PmntAuthorized").parameter("effectiveDate", new Timestamp(effectiveTime))
+                .parameter("amount", 24000.0).call()
+
+        // generate NACHA file, mark payment delivered (done automatically when file generated)
+        ec.service.sync().name("mantle.account.NachaServices.generate#NachaFile")
+                .parameter("paymentMethodId", "ZIRET_BA").call()
+
+        // find PaymentApplication for validation
+        EntityList pappList = ec.entity.find("mantle.account.payment.PaymentApplication")
+                .condition("paymentId", setInfoOut.paymentId).condition("invoiceId", "55400").list()
+        sendPmtResult = [paymentApplicationId:pappList[0].paymentApplicationId]
+
+        /* old approach for PiCompanyCheck payment
+        // record Payment for Invoice and apply to Invoice (will trigger GL posting for Payment and Payment Application)
         sendPmtResult = ec.service.sync().name("mantle.account.PaymentServices.send#PromisedPayment")
                 .parameters([invoiceId:'55400', paymentId:setInfoOut.paymentId, amount:24000.00]).call()
+        sendPmtResult.paymentApplicationId
+         */
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>

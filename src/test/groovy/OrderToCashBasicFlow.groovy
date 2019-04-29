@@ -736,7 +736,7 @@ class OrderToCashBasicFlow extends Specification {
         Map refundPmtResult = ec.service.sync().name("mantle.account.PaymentServices.create#Payment")
                 .parameters([paymentTypeEnumId:'PtRefund', statusId:'PmntDelivered', fromPartyId:'ORG_ZIZI_RETAIL',
                              toPartyId:'JoeDist', effectiveDate:new Timestamp(effectiveTime),
-                             paymentInstrumentEnumId:'PiCompanyCheck', amount:overpayAmount]).call()
+                             paymentInstrumentEnumId:'PiCompanyCheck', paymentMethodId:"ZIRET_BA", amount:overpayAmount]).call()
         // apply refund Payment to overpay Payment
         Map refundApplResult = ec.service.sync().name("mantle.account.PaymentServices.apply#PaymentToPayment")
                 .parameters([paymentId:refundPmtResult.paymentId, toPaymentId:b2bPaymentId]).call()
