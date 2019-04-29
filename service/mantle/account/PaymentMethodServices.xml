@@ -594,8 +594,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="fileText" allow-html="any"/>
             <parameter name="paymentList" type="List"/>
             <parameter name="outgoingStatusId" default-value="PmntDelivered"/>
-            <parameter name="incomingStatusId" default-value="PmntDelivered">
-                <description>Could also be PmntAuthorized</description></parameter>
+            <parameter name="incomingStatusId" default-value="PmntDelivered"><description>Could also be PmntAuthorized</description></parameter>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.method.PaymentMethodFile" value-field="paymentMethodFile"/>
@@ -612,6 +611,57 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- save full file text, etc to PaymentMethodFile -->
             <service-call name="update#mantle.account.method.PaymentMethodFile" in-map="context"/>
+        </actions>
+    </service>
+    <service verb="cancel" noun="PaymentMethodFile">
+        <in-parameters>
+            <parameter name="paymentMethodFileId" required="true"/>
+            <parameter name="outgoingStatusId" default-value="PmntAuthorized"/>
+            <parameter name="incomingStatusId" default-value="PmntPromised"/>
+        </in-parameters>
+        <actions>
+            <!-- TODO -->
+        </actions>
+    </service>
+
+    <service verb="produce" noun="PaymentMethodFileSystemMessage">
+        <description>Send PaymentMethodFile by queueing a SystemMessage</description>
+        <in-parameters>
+            <parameter name="paymentMethodFileId" required="true"/>
+            <parameter name="systemMessageTypeId"><description>If not specified looked up in PaymentMethodFileType</description></parameter>
+            <parameter name="systemMessageRemoteId"><description>If not specified looked up in PaymentMethodFileType</description></parameter>
+        </in-parameters>
+        <out-parameters><parameter name="systemMessageId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.method.PaymentMethodFile" value-field="paymentMethodFile"/>
+            <if condition="paymentMethodFile == null"><return type="danger" message="File with ID ${paymentMethodFileId} not found"/></if>
+
+            <if condition="!systemMessageTypeId || !systemMessageRemoteId">
+                <set field="paymentMethodFileType" from="paymentMethodFile.paymentMethodFileType"/>
+                <if condition="!systemMessageTypeId"><set field="systemMessageTypeId" from="paymentMethodFileType?.systemMessageTypeId"/></if>
+                <if condition="!systemMessageRemoteId"><set field="systemMessageRemoteId" from="paymentMethodFileType?.systemMessageRemoteId"/></if>
+            </if>
+            <if condition="!systemMessageTypeId || !systemMessageRemoteId">
+                <return type="danger" message="Not sending file ${paymentMethodFileId}, no message type or remote specified or configured for payment method ${paymentMethodFile.paymentMethodId} and file type ${paymentMethodFile.fileTypeEnumId}"/>
+            </if>
+
+            <!-- is there already a SystemMessage for this (not cancelled, etc)? -->
+            <entity-find entity-name="moqui.service.message.SystemMessage" list="systemMessageList">
+                <econdition field-name="paymentMethodFileId"/>
+                <econdition field-name="systemMessageTypeId"/>
+                <econdition field-name="systemMessageRemoteId"/>
+                <econdition field-name="statusId" operator="not-in" value="SmsgRejected,SmsgCancelled,SmsgError"/>
+                <select-field field-name="systemMessageId"/>
+            </entity-find>
+            <if condition="systemMessageList">
+                <return type="warning" message="File ${paymentMethodFileId} already sent in SystemMessage ${systemMessageList*.systemMessageId}"/>
+            </if>
+
+            <!-- get the fileText and queue an outgoing SystemMessage -->
+            <service-call name="org.moqui.impl.SystemMessageServices.queue#SystemMessage" out-map="context"
+                    in-map="[systemMessageTypeId:systemMessageTypeId, systemMessageRemoteId:systemMessageRemoteId,
+                        messageText:paymentMethodFile.fileText, paymentMethodFileId:paymentMethodFileId]"/>
+            <message type="success">Queued file ${paymentMethodFileId} to send to ${systemMessageRemoteId} in message ${systemMessageId}</message>
         </actions>
     </service>
 </services>
