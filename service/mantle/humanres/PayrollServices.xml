@@ -631,7 +631,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- for now do a simple ratio of milliseconds -->
                     <set field="partialTime" from="partialThru.time - partialFrom.time"/>
                     <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
-                    <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                    <set field="payAmount" from="ec.l10n.roundCurrency(payAmount * (partialTime/periodTime), currencyUomId)"/>
                 </if>
             </then><else>
                 <!-- Gather uninvoiced time entries -->
@@ -650,8 +650,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="payAmount" from="payAmount + getTeaOut.amountTotal"/>
                     <set field="currencyUomId" from="getTeaOut.currencyUomId"/>
                 </iterate>
-                <!-- round total to 2 decimal places -->
-                <set field="payAmount" from="payAmount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <!-- round according to currency -->
+                <set field="payAmount" from="ec.l10n.roundCurrency(payAmount, currencyUomId)"/>
             </else></if>
         </actions>
     </service>
@@ -681,6 +681,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="employment" type="Map"/>
             <parameter name="timePeriodId" required="true"/>
             <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
+            <parameter name="currencyUomId"/>
         </in-parameters>
         <out-parameters>
             <parameter name="payAmount" type="BigDecimal"/>
@@ -753,7 +754,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find entity-name="mantle.humanres.employment.PayrollAdjustment" list="allPayrollAdjustmentList">
                 <econdition field-name="fromDate" operator="less-equals" from="payDate"/>
-                <econdition field-name="thruDate" operator="greater-equals" from="payDate"/>
+                <econdition field-name="thruDate" operator="greater-equals" from="payDate" or-null="true"/>
                 <econdition field-name="organizationPartyId" from="employment.toPartyId" or-null="true"/>
                 <econdition field-name="partyRelationshipId" or-null="true"/>
                 <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId" or-null="true"/>
@@ -773,6 +774,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="prAdj.itemTypeEnumId in exclusiveEmploymentPrAdjItemTypes"><then>
                     <!-- Exclude any that have an employment and are not exclusive. -->
                     <if condition="prAdj.partyRelationshipId != null &amp;&amp; prAdj.exclusiveByItemType != 'Y'">
+                        <log message="removing adjustment ${prAdj.payrollAdjustmentId} 01"/>
                         <continue/>
                     </if>
                 </then><else-if condition="prAdj.itemTypeEnumId in exclusiveEmployerPrAdjItemTypes">
@@ -780,11 +782,13 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="prAdj.partyRelationshipId == null">
                         <!-- Exclude any that have an organization and are not exclusive. -->
                         <if condition="prAdj.organizationPartyId != null &amp;&amp; prAdj.exclusiveByItemType != 'Y'">
+                            <log message="removing adjustment ${prAdj.payrollAdjustmentId} 02"/>
                             <continue/>
                         </if>
                     </if>
                 </else-if></if>
                 <!-- Default, the adjustment needs to be attempted (it may still not apply; e.g. workers comp) -->
+                <log message="adding adjustment ${prAdj.payrollAdjustmentId} 02"/>
                 <script>applicablePayrollAdjustmentList.add(prAdj)</script>
             </iterate>
 
@@ -807,7 +811,7 @@ along with this software (see the LICENSE.md file). If not, see
             
             <set field="calcAdjParameters" from="[
                     partyRelationshipId:partyRelationshipId, employment:employment, employee:employee,
-                    timePeriod:timePeriod, timeEntryList:timeEntryList,
+                    timePeriod:timePeriod, timeEntryList:timeEntryList, currencyUomId:currencyUomId,
                     timeEntryRiskClassInfoList:timeEntryRiskClassInfoList,
                     timePeriodTypeId:timePeriod.timePeriodTypeId,
                     payTimestamp:payTimestamp, payAmount:payAmount, homePostalAddress:homePostalAddress]"/>
@@ -831,12 +835,14 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <set field="phaseAdjList" from="applicablePayrollAdjustmentList.findAll({ it.payrollPhaseEnumId == payrollPhaseEnumId })"/>
                 <iterate list="phaseAdjList" entry="payrollAdjustment">
+                    <log message="Applying payrollAdjustment ${payrollAdjustment.payrollAdjustmentId}"/>
                     <service-call name="mantle.humanres.PayrollServices.calculate#PayrollAdjustment" out-map="calcOut" out-map-add-to-existing="false"
                             in-map="[payrollAdjustmentId:payrollAdjustment.payrollAdjustmentId, payrollAdjustment:payrollAdjustment,
                                 payrollPhaseEnumId:payrollPhaseEnumId, taxablePayAmount:taxablePayAmount,
                                 socialTaxablePayAmount:socialTaxablePayAmount, medicalTaxablePayAmount:medicalTaxablePayAmount,
                                 taxableYtdIncome:taxableYtdIncome, socialTaxableYtdIncome:socialTaxableYtdIncome,
                                 medicalTaxableYtdIncome:medicalTaxableYtdIncome, priorAdjustmentList:adjustmentList] + calcAdjParameters"/>
+                    <log message="applies: ${calcOut.adjustmentApplies}, taxablePayAmount: ${taxablePayAmount}, amountTotal: ${calcOut.quantity * calcOut.amount}"/>
                     <if condition="!calcOut.adjustmentApplies"><continue/></if>
                     <script>adjustmentList.add(calcOut)</script>
                     <if condition="!calcOut.quantity"><set field="calcOut.quantity" from="1.0"/></if>
@@ -876,6 +882,8 @@ along with this software (see the LICENSE.md file). If not, see
                     Map serviceRegister = adjCalcService.serviceRegister
                     Map result = ec.service.sync().name(serviceRegister.serviceName).parameters(parmMap).disableAuthz().call()
                     if (!ec.message.hasError()) ec.context.putAll(result)
+                    ec.logger.info("Executed adjCalcService ${adjCalcService.adjCalcServiceId}")
+                    ec.logger.info("taxablePayAmount now: ${taxablePayAmount}")
                 } catch (Throwable t) {
                     ec.logger.log(300, "Error calling payroll adjustment calc service ${adjCalcService.adjCalcServiceId}", t)
                 } }
@@ -933,7 +941,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
 
                 <!-- ROUND_HALF_DOWN here so the deduction amount is never more than the percentage limit -->
-                <set field="deductionAmount" from="deductionAmount.setScale(2, BigDecimal.ROUND_HALF_DOWN)"/>
+                <set field="deductionAmount" from="ec.l10n.roundCurrency(deductionAmount, currencyUomId, false, BigDecimal.ROUND_HALF_DOWN)"/>
                 <set field="adjustment.amount" from="-deductionAmount"/>
                 <set field="disposableRemaining" from="disposableRemaining - deductionAmount"/>
             </iterate>
@@ -955,6 +963,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="employment" type="Map"/>
             <parameter name="employee" type="Map"/>
             <parameter name="emplPosition" type="Map"/>
+            <parameter name="currencyUomId"/>
 
             <parameter name="adjCalcServiceId"><description>Only populated if called from a PayrollAdjCalcService</description></parameter>
             <parameter name="description"><description>If configured for service will be set, may expand in context (up to service to decide)</description></parameter>
@@ -1052,6 +1061,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/><!-- adjustmentApplies already set to false so adjustment won't be added by caller -->
             </if>
 
+            <log message="payrollAdjustment.rateBasisEnumId: ${payrollAdjustment.rateBasisEnumId}"/>
+
             <set field="rateBasisEnumId" from="payrollAdjustment.rateBasisEnumId"/>
             <if condition="rateBasisEnumId == 'PrbsIncome'"><then>
                 <set field="adjustmentBasisAmount" from="taxablePayAmount"/>
@@ -1059,9 +1070,6 @@ along with this software (see the LICENSE.md file). If not, see
             </then><else-if condition="rateBasisEnumId == 'PrbsSocial'">
                 <set field="adjustmentBasisAmount" from="socialTaxablePayAmount"/>
                 <set field="adjustmentYtdAmount" from="socialTaxableYtdIncome"/>
-            </else-if><else-if condition="rateBasisEnumId == 'PrbsMedical'">
-                <set field="adjustmentBasisAmount" from="medicalTaxablePayAmount"/>
-                <set field="adjustmentYtdAmount" from="medicalTaxableYtdIncome"/>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsMedical'">
                 <set field="adjustmentBasisAmount" from="medicalTaxablePayAmount"/>
                 <set field="adjustmentYtdAmount" from="medicalTaxableYtdIncome"/>
@@ -1154,6 +1162,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- If the value of the adjustment is 0 then it doesn't apply so just return -->
             <if condition="!adjustmentBasisAmount"><return/></if>
+            <log message="calculate#PayrollAdjustment: adjustmentBasisAmount: ${adjustmentBasisAmount}"/>
 
             <!-- check state and federal filing status constraints, if any; if there are but none match skip the PayrollAdjustment -->
             <entity-find entity-name="mantle.humanres.employment.PayrollAdjustmentFedStts" list="fedSttsList" cache="true">
@@ -1236,17 +1245,29 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- <log message="====== adjustmentYtdAmount=${adjustmentYtdAmount}, adjustmentBasisAmount=${adjustmentBasisAmount}, payrollAdjustmentDetailList:\n${payrollAdjustmentDetailList}"/> -->
 
+            <if condition="!currencyUomId">
+                <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
+                              in-map="[organizationPartyId:organizationPartyId]"/>
+                <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId"/>
+            </if>
             <!-- calculate adjustment amount -->
             <if condition="payrollAdjustmentDetailList">
                 <set field="adjustmentDetail" from="payrollAdjustmentDetailList[0]"/>
 
                 <set field="rateBasis" from="adjustmentBasisAmount"/>
+                <log message="rateBasis: ${rateBasis}"/>
                 <if condition="adjustmentDetail.rateAfterYtdMin == 'Y'">
+                    <log message="rateBasis changed because of rateAfterYtdMin"/>
                     <set field="rateBasis" from="rateBasis - adjustmentDetail.ytdMin"/></if>
                 <if condition="adjustmentDetail.rateAfterPeriodMin == 'Y'">
+                    <log message="rateBasis changed because of rateAfterPeriodMin"/>
                     <set field="rateBasis" from="rateBasis - adjustmentDetail.periodMin"/></if>
+                <log message="rateBasis now: ${rateBasis}"/>
+                <log message="calculating adjustment from flatAmount (${adjustmentDetail.flatAmount}) + rate (${adjustmentDetail.rate})"/>
                 <set field="amount" from="(adjustmentDetail.flatAmount ?: 0) + ((adjustmentDetail.rate ?: 0) * rateBasis)" type="BigDecimal"/>
-                <set field="amount" from="amount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <set field="amount" from="ec.l10n.roundCurrency(amount, currencyUomId)"/>
+                <log message="amount: ${amount}"/>
+                <log message="quantity: ${quantity}"/>
                 <!-- <log message="=== pre-exemption amount=${amount}"/> -->
 
                 <if condition="amount != 0">
