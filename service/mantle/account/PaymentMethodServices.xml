@@ -376,11 +376,11 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.method.CreditCard" value-field="origCreditCard"/>
             <!-- don't allow clearing cardNumber even if null passed to service, needed for admin UI so can be left empty to retain masked number -->
             <if condition="!cardNumber"><set field="cardNumber" from="origCreditCard.cardNumber"/></if>
-            <script>newCreditCard = origCreditCard.cloneValue()</script>
+            <set field="newCreditCard" from="origCreditCard.cloneValue()"/>
             <entity-set value-field="newCreditCard" include="nonpk"/>
 
             <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="origPaymentMethod"/>
-            <script>newPaymentMethod = origPaymentMethod.cloneValue()</script>
+            <set field="newPaymentMethod" from="origPaymentMethod.cloneValue()"/>
             <entity-set value-field="newPaymentMethod" include="nonpk"/>
 
             <if condition="newCreditCard == origCreditCard &amp;&amp; newPaymentMethod == origPaymentMethod">
@@ -451,11 +451,11 @@ along with this software (see the LICENSE.md file). If not, see
         <out-parameters><parameter name="paymentMethodId"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.account.method.BankAccount" value-field="origBankAccount"/>
-            <script>newBankAccount = origBankAccount.cloneValue()</script>
+            <set field="newBankAccount" from="origBankAccount.cloneValue()"/>
             <entity-set value-field="newBankAccount" include="nonpk"/>
 
             <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="origPaymentMethod"/>
-            <script>newPaymentMethod = origPaymentMethod.cloneValue()</script>
+            <set field="newPaymentMethod" from="origPaymentMethod.cloneValue()"/>
             <entity-set value-field="newPaymentMethod" include="nonpk"/>
 
             <if condition="newBankAccount == origBankAccount &amp;&amp; newPaymentMethod == origPaymentMethod">
@@ -633,18 +633,68 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="cancel" noun="PaymentMethodFile">
+        <description>Cancel PaymentMethodFile, makes sure no SystemMessage already sent, cancels any unsent SystemMessages,
+            clears paymentMethodFileId on all related Payment records, and if Enumeration.optionIndicator == 'Y' resets Payment
+            status from Delivered to outgoingStatusId or incomingStatusId</description>
         <in-parameters>
             <parameter name="paymentMethodFileId" required="true"/>
             <parameter name="outgoingStatusId" default-value="PmntAuthorized"/>
             <parameter name="incomingStatusId" default-value="PmntPromised"/>
         </in-parameters>
         <actions>
-            <!-- TODO check SystemMessage, if sent fail, if not cancel -->
-            <!-- TODO
-            - for all Payment with paymentMethodFileId, set paymentMethodFileId to null
+            <entity-find-one entity-name="mantle.account.method.PaymentMethodFile" value-field="paymentMethodFile"/>
+            <if condition="paymentMethodFile.isCancelled == 'Y'">
+                <return type="danger" message="File ${paymentMethodFileId} already cancelled"/></if>
+
+            <set field="fileTypeEnum" from="paymentMethodFile.fileTypeEnum"/>
+            <set field="paymentMethodFileType" from="paymentMethodFile.paymentMethodFileType"/>
+            <if condition="paymentMethodFileType?.systemMessageTypeId &amp;&amp; paymentMethodFileType?.systemMessageRemoteId">
+                <!-- check SystemMessage, if sending or sent fail, if not cancel -->
+                <entity-find entity-name="moqui.service.message.SystemMessage" list="systemMessageList">
+                    <econdition field-name="paymentMethodFileId"/>
+                    <econdition field-name="systemMessageTypeId" from="paymentMethodFileType.systemMessageTypeId"/>
+                    <econdition field-name="systemMessageRemoteId" from="paymentMethodFileType.systemMessageRemoteId"/>
+                    <econdition field-name="statusId" operator="not-in" value="SmsgRejected,SmsgCancelled"/>
+                    <select-field field-name="systemMessageId,statusId"/>
+                    <order-by field-name="systemMessageId"/>
+                </entity-find>
+                <set field="sysMesStatusIdList" from="systemMessageList*.statusId"/>
+                <if condition="sysMesStatusIdList.contains('SmsgSending') || sysMesStatusIdList.contains('SmsgSent') || sysMesStatusIdList.contains('SmsgConfirmed')">
+                    <return type="danger" message="File ${paymentMethodFileId} already sent in SystemMessage ${systemMessageList*.systemMessageId}"/>
+                </if>
+                <iterate list="systemMessageList" entry="systemMessage">
+                    <service-call name="org.moqui.impl.SystemMessageServices.cancel#SystemMessage"
+                            in-map="[systemMessageId:systemMessage.systemMessageId]"/>
+                </iterate>
+            </if>
+
+            <!-- for all Payment with paymentMethodFileId
+            - set paymentMethodFileId to null
             - for outgoing Payment if status Delivered set to Authorized
             - for incoming Payment if status Delivered set to Promised
             -->
+            <entity-find entity-name="mantle.account.payment.Payment" list="paymentList" for-update="true">
+                <econdition field-name="paymentMethodFileId"/>
+                <order-by field-name="paymentId"/>
+            </entity-find>
+            <iterate list="paymentList" entry="payment">
+                <set field="payment.paymentMethodFileId" from="null"/>
+                <if condition="payment.statusId == 'PmntDelivered' &amp;&amp; fileTypeEnum?.optionIndicator == 'Y'">
+                    <if condition="payment.paymentMethodId == paymentMethodFile.paymentMethodId"><then>
+                        <!-- outgoing -->
+                        <set field="payment.statusId" from="outgoingStatusId"/>
+                    </then><else>
+                        <set field="payment.statusId" from="incomingStatusId"/>
+                    </else></if>
+                </if>
+                <entity-update value-field="payment"/>
+            </iterate>
+
+            <set field="paymentMethodFile.entryCount" from="0"/>
+            <set field="paymentMethodFile.debitAmountTotal" from="0.0"/>
+            <set field="paymentMethodFile.creditAmountTotal" from="0.0"/>
+            <set field="paymentMethodFile.isCancelled" value="Y"/>
+            <entity-update value-field="paymentMethodFile"/>
         </actions>
     </service>
 
