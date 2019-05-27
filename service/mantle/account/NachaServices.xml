@@ -243,9 +243,9 @@ along with this software (see the LICENSE.md file). If not, see
                     String otherPartyId = payment.fromPartyId == paymentMethod.ownerPartyId ? payment.toPartyId : payment.fromPartyId
                     EntityValue otherParty = ec.entity.find("mantle.party.PartyDetail").condition("partyId", otherPartyId).one()
 
-                    // get Individual/Company ID from pseudoId
-                    String individualId = otherParty.pseudoId
-                    if (individualId.length() > 15) individualId = individualId.substring(0, 15)
+                    // user "X" + rightmost 14 chars if paymentId length is longer than 15 chars
+                    String individualId = payment.paymentId
+                    if (individualId.length() > 15) individualId = "X" + individualId.substring(0, 14)
 
                     // get Individual/Company Name
                     String indName = pmtPaymentMethod.firstNameOnAccount ?
@@ -404,13 +404,140 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="nachaString" required="true"/>
         </in-parameters>
         <actions>
-            <!-- TODO
-            - find matching Payment
-            - update Payment.statusId: outgoing to Authorized, incoming to Promised
-            - add PaymentGatewayResponse record with return code and other details
-            - send some sort of notification
-            -->
-            <return error="true" message="import#NachaReturn not yet implemented"/>
+            <script><![CDATA[
+
+                /*
+                 * Decode the paymentId if the original value was longer then max
+                 * length of the NACHA field (15 chars)
+                 */
+                def String checkPaymentId(paymentId) {
+                    if (!paymentId) return null;
+                    if ("X" != paymentId[0]) {
+                        return paymentId
+                    } else {
+                        payment = ec.entity.find("mantle.account.payment.Payment")
+                                .condition("paymentInstrumentEnumId", "PiAch")
+                                .condition("paymentMethodId", paymentMethodId)
+                                .condition("paymentId", ComparisonOperator.LIKE, "%" + paymentId.reverse().take(14).reverse())
+                                .one()
+                        payment ? payment.paymentId : null
+                    }
+                }
+
+                def List parse(String content = nachaString) {
+                    def batch = []
+                    def achEntry
+                    content.eachLine {line ->
+                        if (line.length() != 94) {
+                            ec.message.addError("Length of the line is incorrect. Perhaps the file is damaged or improperly formatted.")
+                            return
+                        }
+
+                        type = line.take(1);
+
+                        if ("6" == type /* entry detail */) {
+                            if (achEntry != null) {
+                                batch += achEntry
+                                achEntry = null
+                            }
+                            achEntry = [
+                                recordTypeCode : line[0],
+                                transactionCode : line[1..2],
+                                dfiId : line[3..10].trim(),
+                                dfiAccount :  line[12..28].trim(),
+                                amount : new BigDecimal(line[29..38]).movePointLeft(2),
+                                paymentId : checkPaymentId(line[39..53].trim()),
+                                name : line[54-75].trim(),
+                                discretionaryData: line[76..77],
+                                addendaIndicator: line[78],
+                                traceNumber: line[79..93]
+                            ]
+
+                        } else if ("7" == type /* addenda */) {
+                            if (achEntry != null) {
+                                if (!achEntry.addendums) achEntry.addendums = []
+                                addenda = [recordTypeCode : line[0], addendaTypeCode : line[1..2]]
+                                if (addenda.addendaTypeCode == "99") {
+                                    addenda.returnReasonCode = line[3..5]
+                                    addenda.orgEntryTraceNum = line[6..20]
+                                    addenda.dateOfDeath = line[21..26]
+                                    addenda.orgDfiId = line[27..34].trim()
+                                    addenda.info = line[35..78].trim()
+                                    addenda.traceNum = line[79..93]
+                                } else if (addenda.addendaTypeCode == "98") {
+                                    addenda.changeCode = line[3..5]
+                                    addenda.orgEntryTraceNum = line[6..20]
+                                    addenda.orgDfiId = line[27..34].trim()
+                                    addenda.correctedData = line[35-63].trim()
+                                    addenda.traceNum = line[79..93]
+                                } else {
+                                    addenda.info = line[3..82].trim()
+                                    addenda.addendaSeqNum = line[83..86]
+                                    addenda.entrySeqNum = line[87..93]
+                                }
+                                achEntry.addendums += addenda;
+                            }
+
+                        } else {
+                            if (achEntry != null) {
+                                batch += achEntry
+                                achEntry = null
+                            }
+                        }
+                    }
+
+                    return batch
+                }
+
+                batch = parse()
+                if (batch) {
+                    batch.each{entry ->
+                        paymentId = entry.paymentId;
+                        addendums = entry.addendums;
+                        if (addendums) {
+                            lastAddenda = addendums.last(); // return addenda is either only or last one
+                            type = lastAddenda.addendaTypeCode
+                            if ('99' == type) {
+                                // return
+                                payment = ec.entity.find("mantle.account.payment.Payment").condition([paymentId : paymentId]).one()
+                                if (payment) {
+                                    // find description of the return reason code
+                                    returnReason = ec.entity.find("moqui.basic.Enumeration")
+                                            .condition([enumTypeId : "ACHReturnCode", enumCode : lastAddenda.returnReasonCode]).one()
+                                    ec.service.sync().name("create#mantle.account.method.PaymentGatewayResponse")
+                                            .parameters([paymentId : paymentId, paymentMethodId : paymentMethodId,
+                                            amount : entry.amount, referenceNum : lastAddenda.traceNum,
+                                            amountUomId : payment.amountUomId, reasonCode: lastAddenda.returnReasonCode,
+                                            reasonMessage : returnReason ? returnReason.description : lastAddenda.info]).call()
+                                    ec.service.sync().name("update#mantle.account.payment.Payment")
+                                            .parameters([paymentId : paymentId, statusId : "PmntDeclined"]).call()
+                                } else {
+                                    ec.message.addError(ec.resource.expand('Payment ${paymentId} not found', '', [paymentId: paymentId]))
+                                }
+
+                            } else if ('98' == type) {
+                                // notification of change
+                                payment = ec.entity.find("mantle.account.payment.Payment").condition([paymentId : paymentId]).one()
+                                if (payment) {
+                                    // find description of the change notification
+                                    changeReason = ec.entity.find("moqui.basic.Enumeration")
+                                            .condition([enumTypeId : "ACHChangeCode", enumCode : lastAddenda.changeCode]).one()
+                                    ec.service.sync().name("create#mantle.account.method.PaymentGatewayResponse")
+                                            .parameters([paymentId : paymentId, paymentMethodId : paymentMethodId,
+                                            amount : entry.amount, referenceNum : lastAddenda.traceNum,
+                                            amountUomId : payment.amountUomId, reasonCode: lastAddenda.changeCode,
+                                            reasonMessage : (changeReason ? changeReason.description : "" + " Corrected: " + lastAddenda.correctedData)]).call()
+                                    ec.service.sync().name("update#mantle.account.payment.Payment")
+                                            .parameters([paymentId : paymentId, statusId : "PmntAuthorized"]).call()
+                                } else {
+                                    ec.message.addError(ec.resource.expand('Payment ${paymentId} not found', '', [paymentId: paymentId]))
+                                }
+                            }
+                        }
+                    }
+                }
+
+            ]]></script>
         </actions>
     </service>
 </services>
