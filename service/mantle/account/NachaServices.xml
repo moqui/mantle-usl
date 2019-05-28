@@ -76,10 +76,10 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- set/check some configuration values -->
 
             <!-- File Header fields -->
-            <if condition="!bankAccount.nachaImmedDest || bankAccount.nachaImmedDest.length() != 9">
-                <message error="true">NACHA Immediate Destination field (${bankAccount.nachaImmedDest}) on Bank Account must be 9 characters</message></if>
-            <if condition="!bankAccount.nachaImmedOrig || bankAccount.nachaImmedOrig.length() != 9">
-                <message error="true">NACHA Immediate Origin field (${bankAccount.nachaImmedOrig}) on Bank Account must be 9 characters</message></if>
+            <if condition="!bankAccount.nachaImmedDest || bankAccount.nachaImmedDest.length() &lt; 9 || bankAccount.nachaImmedDest.length() &gt; 10">
+                <message error="true">NACHA Immediate Destination field (${bankAccount.nachaImmedDest}) on Bank Account must be 9 or 10 characters</message></if>
+            <if condition="!bankAccount.nachaImmedOrig || bankAccount.nachaImmedOrig.length() &lt; 9 || bankAccount.nachaImmedOrig.length() &gt; 10">
+                <message error="true">NACHA Immediate Origin field (${bankAccount.nachaImmedOrig}) on Bank Account must be 9 or 10 characters</message></if>
             <set field="nachaImmedDestName" from="bankAccount.nachaImmedDestName ?: bankAccount.bankName"/>
             <if condition="!nachaImmedDestName || nachaImmedDestName.length() &gt; 23">
                 <message error="true">NACHA Immediate Destination Name field (${nachaImmedDestName}) on Bank Account must be specified and not more than 23 characters</message></if>
@@ -133,10 +133,10 @@ along with this software (see the LICENSE.md file). If not, see
                 // 01-01: Record Type Code = '1'
                 // 02-03: Priority Code = '01'
                 fileHeader.append("101")
-                // 04-13: Immediate Destination (space + 9 digits as TTTTAAAAC, really whatever bank specifies)
-                fileHeader.append(" ").append(bankAccount.nachaImmedDest)
-                // 14-23: Immediate Origin (space + 9 digits)
-                fileHeader.append(" ").append(bankAccount.nachaImmedOrig)
+                // 04-13: Immediate Destination (? + 9 digits as TTTTAAAAC, really whatever bank specifies)
+                fileHeader.append(bankAccount.nachaImmedDest.padLeft(10, ' '))
+                // 14-23: Immediate Origin (? + 9 digits)
+                fileHeader.append(bankAccount.nachaImmedOrig.padLeft(10, ' '))
                 // 24-29: File Creation Date
                 fileHeader.append(ec.l10n.format(fileDate, "yyMMdd"))
                 // 30-33: File Creation Time
@@ -212,7 +212,9 @@ along with this software (see the LICENSE.md file). If not, see
                     String routingWeights = "37137137"
                     int routingCheckSum = 0
                     for (int i = 0; i < 8; i++) routingCheckSum += (Character.digit(routingNumber.charAt(i), 10)) * (Character.digit(routingWeights.charAt(i), 10))
-                    String routingCheckDigit = (10 - (routingCheckSum % 10)) as String
+                    int routingCheckSumMod = 10 - (routingCheckSum % 10)
+                    if (routingCheckSumMod == 10) routingCheckSumMod = 0
+                    String routingCheckDigit = routingCheckSumMod as String
                     // add first 8 digits of routingNumber to routingNumberSum
                     routingNumberSum += (routingNumber.substring(0, 8) as long)
 
@@ -256,6 +258,8 @@ along with this software (see the LICENSE.md file). If not, see
                     // done with validation/prep, increment entryCount and create the record
                     entryCount++
                     paymentList.add(payment)
+
+                    // ec.logger.warn("routingNumber ${routingNumber} routingCheckDigit ${routingCheckDigit} accountNumber ${accountNumber}")
 
                     // Entry Detail (6)
                     StringBuilder entry = new StringBuilder()
@@ -356,7 +360,7 @@ along with this software (see the LICENSE.md file). If not, see
                 // combines the lines
                 StringBuilder ftSb = new StringBuilder(95 * lines.size())
                 for (StringBuilder line in lines) {
-                    if (line.length() != 94) ec.message.addError(ec.resource.expand('Generated line does not have exactly 94 chars: ${line}',''))
+                    if (line.length() != 94) ec.message.addError(ec.resource.expand('Generated line does not have exactly 94 chars: ${line}','',[line:line]))
                     ftSb.append(line).append('\n')
                 }
                 // get the String value
@@ -368,6 +372,45 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- save file info on PaymentMethodFile, update statusId and set paymentMethodFileId on Payment records -->
             <service-call name="mantle.account.PaymentMethodServices.update#PaymentMethodFileComplete"
                     in-map="context + [entryCount:entryCount, debitAmountTotal:debitAmountTotal, creditAmountTotal:creditAmountTotal]"/>
+        </actions>
+    </service>
+
+    <service verb="consume" noun="NachaReturnSystemMessage">
+        <implements service="org.moqui.impl.SystemMessageServices.consume#SystemMessage"/>
+        <actions>
+            <entity-find-one entity-name="moqui.service.message.SystemMessage" value-field="systemMessage"/>
+            <set field="nachaString" from="systemMessage.messageText"/>
+
+            <!-- determine paymentMethodId by PaymentMethodFileType record -->
+            <entity-find entity-name="mantle.account.method.PaymentMethodFileType" list="pmftList">
+                <econdition field-name="fileTypeEnumId" value="PmftNacha"/>
+                <econdition field-name="systemMessageTypeId" from="systemMessage.systemMessageTypeId"/>
+                <econdition field-name="systemMessageRemoteId" from="systemMessage.systemMessageRemoteId"/>
+            </entity-find>
+            <if condition="pmftList.size() == 0">
+                <return error="true" message="Could not find paymentMethodId from PaymentMethodFileType record for file type PmftNacha message type ${systemMessage.systemMessageTypeId} remote ${systemMessage.systemMessageRemoteId}"/>
+            </if>
+
+            <!-- weird but allow multiple in case transactions came from more than one BankAccount -->
+            <iterate list="pmftList" entry="pmft">
+                <set field="paymentMethodId" from="pmft.paymentMethodId"/>
+                <service-call name="mantle.account.NachaServices.import#NachaReturn" in-map="context"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="import" noun="NachaReturn">
+        <in-parameters>
+            <parameter name="paymentMethodId" required="true"/>
+            <parameter name="nachaString" required="true"/>
+        </in-parameters>
+        <actions>
+            <!-- TODO
+            - find matching Payment
+            - update Payment.statusId: outgoing to Authorized, incoming to Promised
+            - add PaymentGatewayResponse record with return code and other details
+            - send some sort of notification
+            -->
+            <return error="true" message="import#NachaReturn not yet implemented"/>
         </actions>
     </service>
 </services>

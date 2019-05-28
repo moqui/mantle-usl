@@ -418,8 +418,25 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.shipment.carrier.ShippingGatewayConfig" value-field="shippingGatewayConfig" cache="true">
                     <field-map field-name="shippingGatewayConfigId"/></entity-find-one>
                 <if condition="shippingGatewayConfig == null"><continue/></if>
+                <!-- <log level="warn" message="shippingGatewayConfigId ${shippingGatewayConfigId} carrierPartyIdSet ${carrierPartyIdSet}"/> -->
 
-                <set field="curCarrierMethodList" from="carrierShipmentMethodList.findAll({ it.carrierPartyId in carrierPartyIdSet })"/>
+                <!-- if both single and bulk services configured send _NA_ to single only (bulk typically through carrier integration, _NA_ is independent of carrier -->
+                <set field="otherCarrierMethodList" from="carrierShipmentMethodList.findAll({ it.carrierPartyId != '_NA_' &amp;&amp; it.carrierPartyId in carrierPartyIdSet })"/>
+                <set field="naCarrierMethodList" from="carrierShipmentMethodList.findAll({ it.carrierPartyId == '_NA_' &amp;&amp; it.carrierPartyId in carrierPartyIdSet })"/>
+                <if condition="shippingGatewayConfig.getShippingRatesBulkName &amp;&amp; shippingGatewayConfig.getOrderRateServiceName"><then>
+                    <set field="bulkCarrierMethodList" from="otherCarrierMethodList"/>
+                    <set field="singleCarrierMethodList" from="naCarrierMethodList"/>
+                </then><else-if condition="shippingGatewayConfig.getShippingRatesBulkName">
+                    <set field="bulkCarrierMethodList" from="otherCarrierMethodList + naCarrierMethodList"/>
+                    <set field="singleCarrierMethodList" from="null"/>
+                </else-if><else-if condition="shippingGatewayConfig.getOrderRateServiceName">
+                    <set field="bulkCarrierMethodList" from="null"/>
+                    <set field="singleCarrierMethodList" from="otherCarrierMethodList + naCarrierMethodList"/>
+                </else-if></if>
+                <!--
+                <log message="bulkCarrierMethodList ${bulkCarrierMethodList}"/>
+                <log message="singleCarrierMethodList ${singleCarrierMethodList}"/>
+                -->
 
                 <!-- get auto package info if service available -->
                 <set field="getAutoPackageInfoName" from="shippingGatewayConfig.getAutoPackageInfoName"/>
@@ -433,7 +450,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
 
                 <!-- run the bulk or individual rate services -->
-                <if condition="shippingGatewayConfig.getShippingRatesBulkName"><then>
+                <if condition="bulkCarrierMethodList">
                     <set field="fromPartyId" from="orderPart.vendorPartyId"/>
                     <if condition="!fromPartyId"><continue/></if>
                     <set field="toPartyId" from="orderPart.customerPartyId"/>
@@ -449,8 +466,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="destPostalContactMechId" from="postalContactMechId ?: orderPart.postalContactMechId"/>
                     <if condition="!destPostalContactMechId"><continue/></if>
 
-                    <service-call name="${shippingGatewayConfig.getShippingRatesBulkName}" out-map="bulkOut"
-                            in-map="[shippingGatewayConfigId:shippingGatewayConfigId, carrierShipmentMethodList:curCarrierMethodList,
+                    <service-call name="${shippingGatewayConfig.getShippingRatesBulkName}" out-map="bulkOut" out-map-add-to-existing="false"
+                            in-map="[shippingGatewayConfigId:shippingGatewayConfigId, carrierShipmentMethodList:bulkCarrierMethodList,
                                     fromPartyId:fromPartyId, toPartyId:toPartyId, originFacilityId:originFacilityId,
                                     originPostalContactMechId:facOriginOut.postalContactMechId,
                                     destPostalContactMechId:destPostalContactMechId, packageInfoList:packageInfoList]"/>
@@ -463,17 +480,19 @@ along with this software (see the LICENSE.md file). If not, see
                     </if>
                     <!-- set global postalContactMechId for next iteration -->
                     <set field="postalContactMechId" from="bulkOut.destPostalContactMechId"/>
-                </then><else-if condition="shippingGatewayConfig.getOrderRateServiceName">
-                    <iterate list="curCarrierMethodList" entry="curCarrierMethod">
-                        <service-call name="${shippingGatewayConfig.getOrderRateServiceName}" out-map="singleOut"
+                </if>
+                <if condition="singleCarrierMethodList">
+                    <iterate list="singleCarrierMethodList" entry="curCarrierMethod">
+                        <service-call name="${shippingGatewayConfig.getOrderRateServiceName}" out-map="singleOut" out-map-add-to-existing="false"
                                 in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, shippingGatewayConfigId:shippingGatewayConfigId,
                                     createOrderItem:false, carrierPartyId:curCarrierMethod.carrierPartyId,
                                     shipmentMethodEnumId:curCarrierMethod.shipmentMethodEnumId,
                                     postalContactMechId:postalContactMechId, packageInfoList:packageInfoList]"/>
+                        <!-- <log message="${shippingGatewayConfigId} - ${shippingGatewayConfig.getOrderRateServiceName} singleOut ${singleOut}"/> -->
                         <script>shippingRateInfoList.add(singleOut + [carrierPartyId:curCarrierMethod.carrierPartyId,
                                 shipmentMethodEnumId:curCarrierMethod.shipmentMethodEnumId])</script>
                     </iterate>
-                </else-if></if>
+                </if>
             </iterate>
         </actions>
     </service>

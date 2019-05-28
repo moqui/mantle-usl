@@ -361,7 +361,16 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="resetReservations">
                 <service-call name="mantle.product.AssetServices.remove#OrderItemReservations" in-map="context"/></if>
 
+            <!-- start with full item quantity -->
             <set field="quantityRemaining" from="orderItem.quantity"/>
+
+            <!-- reduce quantity for already packed/issued -->
+            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList">
+                <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/>
+            </entity-find>
+            <iterate list="assetIssuanceList" entry="assetIssuance">
+                <set field="quantityRemaining" from="quantityRemaining - assetIssuance.quantity"/>
+            </iterate>
 
             <!-- if there are any existing reservations, deduct their quantity -->
             <!-- NOTE this was for-update=true but should not be needed, we already locked the OrderItem -->
@@ -373,7 +382,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="quantityRemaining" from="quantityRemaining - existingRes.quantity"/>
             </iterate>
             <!-- if nothing to reserve or un-reserve return now -->
-            <if condition="quantityRemaining == 0"><return/></if>
+            <if condition="quantityRemaining &lt;= 0"><return/></if>
 
             <!-- handle too much reserved -->
             <if condition="quantityRemaining &lt; 0">
@@ -737,34 +746,11 @@ along with this software (see the LICENSE.md file). If not, see
     <!-- TODO: implement this (and populate priority on order/item and on reservation)
     <service verb="reReserve" noun="ProductAssets">
         <description>Clear out all reservations for a Product and re-reserve</description>
-        <in-parameters><parameter name="productId" required="true"/></in-parameters>
+        <in-parameters><parameter name="productId" required="true"/><parameter name="facilityId"/></in-parameters>
         <actions>
         </actions>
     </service>
     -->
-    <service verb="checkReserve" noun="ProductAssets">
-        <description>For a given productId see if there are AssetReservation.quantityNotAvailable and Asset.availableToPromiseTotal, if so update reservations</description>
-        <in-parameters><parameter name="productId" required="true"/></in-parameters>
-        <actions>
-            <entity-find-count entity-name="mantle.product.issuance.AssetReservation" count-field="notAvailResCount">
-                <econdition field-name="productId"/><econdition field-name="quantityNotAvailable" operator="greater" from="0.0"/></entity-find-count>
-            <if condition="notAvailResCount == 0"><return/></if>
-
-            <while condition="notAvailResCount &gt; 0">
-                <entity-find entity-name="mantle.product.asset.Asset" list="availAssetList" limit="1">
-                    <econdition field-name="productId"/>
-                    <econdition field-name="availableToPromiseTotal" operator="greater" from="0.0"/>
-                    <order-by field-name="receivedDate"/><!-- get oldest first for filling quantityNotAvailable -->
-                </entity-find>
-                <if condition="availAssetList.size() == 0"><break/></if>
-                <!-- move reservation(s) to this asset -->
-                <service-call name="mantle.product.AssetServices.reserve#IncreasedAsset" in-map="[assetId:availAssetList[0].assetId]"/>
-                <!-- see if we have any more not available reservations -->
-                <entity-find-count entity-name="mantle.product.issuance.AssetReservation" count-field="notAvailResCount">
-                    <econdition field-name="productId"/><econdition field-name="quantityNotAvailable" operator="greater" from="0.0"/></entity-find-count>
-            </while>
-        </actions>
-    </service>
 
     <service verb="reserve" noun="IncreasedAsset" no-tx-cache="true">
         <description>For Asset with availableToPromiseTotal > 0 find AssetReservation with quantityNotAvailable and reserve against it</description>
@@ -1040,10 +1026,37 @@ along with this software (see the LICENSE.md file). If not, see
 
                         <set field="reduceQuantityRemaining" from="reduceQuantityRemaining - reduceArOut.quantityDeducted"/>
                     </iterate>
+                    <!-- NOTE DEJ 20190413 this call is not needed since reserve#AssetForOrderItem is called for each reduced reservation, and it is a dangerous service so best to avoid: -->
                     <!-- now that quantityNotAvailable is updated see if we can reserve those on other assets -->
-                    <service-call name="mantle.product.AssetServices.checkReserve#ProductAssets" in-map="[productId:asset.productId]"/>
+                    <!-- <service-call name="mantle.product.AssetServices.checkReserve#ProductAssets" in-map="[productId:asset.productId]"/> -->
                 </if>
             </if>
+        </actions>
+    </service>
+    <service verb="checkReserve" noun="ProductAssets">
+        <description>
+            WARNING: don't use this service. The general concept is flawed, needs to be more constrained and/or better handle more complex data scenarios
+            For a given productId see if there are AssetReservation.quantityNotAvailable and Asset.availableToPromiseTotal, if so update reservations
+        </description>
+        <in-parameters><parameter name="productId" required="true"/></in-parameters>
+        <actions>
+            <entity-find-count entity-name="mantle.product.issuance.AssetReservation" count-field="notAvailResCount">
+                <econdition field-name="productId"/><econdition field-name="quantityNotAvailable" operator="greater" from="0.0"/></entity-find-count>
+            <if condition="notAvailResCount == 0"><return/></if>
+
+            <while condition="notAvailResCount &gt; 0">
+                <entity-find entity-name="mantle.product.asset.Asset" list="availAssetList" limit="1">
+                    <econdition field-name="productId"/>
+                    <econdition field-name="availableToPromiseTotal" operator="greater" from="0.0"/>
+                    <order-by field-name="receivedDate"/><!-- get oldest first for filling quantityNotAvailable -->
+                </entity-find>
+                <if condition="availAssetList.size() == 0"><break/></if>
+                <!-- move reservation(s) to this asset -->
+                <service-call name="mantle.product.AssetServices.reserve#IncreasedAsset" in-map="[assetId:availAssetList[0].assetId]"/>
+                <!-- see if we have any more not available reservations -->
+                <entity-find-count entity-name="mantle.product.issuance.AssetReservation" count-field="notAvailResCount">
+                    <econdition field-name="productId"/><econdition field-name="quantityNotAvailable" operator="greater" from="0.0"/></entity-find-count>
+            </while>
         </actions>
     </service>
 
@@ -1736,6 +1749,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="oldAcquireCost" from="asset.acquireCost"/>
             <set field="oldReceivedDate" from="asset.receivedDate"/>
 
+
             <!-- update the AssetReceipt -->
             <if condition="!assetReceiptId"><then>
                 <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList">
@@ -1759,7 +1773,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="newQuantityRemaining" from="(quantityDiff ?: 0) + (quantityRejectedDiff ?: 0)"/>
             <if condition="newQuantityRemaining">
                 <service-call name="mantle.shipment.ShipmentServices.ensure#ShipmentItemQuantityRemaining"
-                        in-map="[shipmentId:shipmentId, productId:productId, newQuantityRemaining:newQuantityRemaining]"/>
+                        in-map="[shipmentId:shipmentId, productId:asset.productId, newQuantityRemaining:newQuantityRemaining]"/>
             </if>
 
             <if condition="expectedEndOfLife == null"><set field="expectedEndOfLife" from="expirationDate"/></if>
@@ -1791,6 +1805,18 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- update AssetReceipt -->
             <service-call name="update#mantle.product.receipt.AssetReceipt" in-map="context" out-map="context"/>
+
+            <!-- update ShipmentItemSource -->
+            <entity-find-one entity-name="mantle.shipment.ShipmentItemSource" value-field="shipmentItemSource" for-update="true">
+                <field-map field-name="shipmentItemSourceId" from="originalAssetReceipt.shipmentItemSourceId"/></entity-find-one>
+            <if condition="shipmentItemSource != null">
+                <set field="shipmentItemSource.quantityNotHandled" from="shipmentItemSource.quantityNotHandled - quantityDiff - quantityRejectedDiff"/>
+                <if condition="shipmentItemSource.quantityNotHandled &amp;&amp; shipmentItemSource.statusId == 'SisReceived'">
+                    <set field="shipmentItemSource.statusId" value="SisPending"/></if>
+                <if condition="!shipmentItemSource.quantityNotHandled &amp;&amp; shipmentItemSource.statusId == 'SisPending'">
+                    <set field="shipmentItemSource.statusId" value="SisReceived"/></if>
+                <entity-update value-field="shipmentItemSource"/>
+            </if>
 
             <!-- update the Asset record -->
             <service-call name="update#mantle.product.asset.Asset" in-map="context" out-map="context"/>
@@ -2000,6 +2026,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="containerId"><description>May be actual containerId or serialNumber</description></parameter>
             <parameter name="scanLocation"><description>May be locationSeqId within facility, containerId, or container serialNumber</description></parameter>
             <parameter name="quantity" type="BigDecimal"><description>Defaults to quantityOnHandTotal if hasQuantity, generally move entire Asset</description></parameter>
+            <parameter name="forceNewAsset" type="Boolean" default="false">
+                <description>If true create a new Asset record for the move rather than updating the existing Asset record even if moving full quantity on hand to the same facility.</description></parameter>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true"/>
@@ -2042,7 +2070,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- for partial quantity or facilityId change reduce quantity on original and create new with given quantity -->
-            <if condition="(quantity &amp;&amp; quantity &lt; asset.quantityOnHandTotal) || (facilityId &amp;&amp; facilityId != asset.facilityId)"><then>
+            <if condition="forceNewAsset || (quantity &amp;&amp; quantity &lt; asset.quantityOnHandTotal) || (facilityId &amp;&amp; facilityId != asset.facilityId)"><then>
                 <!-- clone asset in new facility/location with quantity -->
                 <service-call name="create#mantle.product.asset.Asset" out-map="newAssetOut"
                         in-map="asset.getMap() + [assetId:null, facilityId:facilityId, locationSeqId:locationSeqId,
@@ -2123,6 +2151,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="currentQoh" from="0"/>
             <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
                 <econdition field-name="productId"/><econdition field-name="facilityId"/>
+                <econdition field-name="statusId" ignore-if-empty="true"/>
                 <econdition field-name="quantityOnHandTotal" operator="not-equals" from="0"/>
                 <econdition field-name="locationSeqId" ignore-if-empty="true"/>
                 <econdition field-name="lotId" ignore-if-empty="true"/>

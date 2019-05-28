@@ -33,9 +33,9 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="paymentMethod"/>
             <entity-find-one entity-name="mantle.account.method.BankAccount" value-field="bankAccount"/>
-            <if condition="!bankAccount"><return error="true" message="Payment method [${paymentMethodId}] is not a bank account"/></if>
+            <if condition="!bankAccount"><return error="true" message="Payment method ${paymentMethodId} is not a bank account"/></if>
             <if condition="!bankAccount.posPayFormatEnumId">
-                <return error="true" message="No Pos. Pay File Format set for bank account [${paymentMethodId}]"/></if>
+                <return error="true" message="No Pos. Pay File Format set for bank account ${paymentMethodId}"/></if>
 
             <entity-find entity-name="mantle.account.payment.Payment" list="originalPaymentList" for-update="true">
                 <econdition field-name="fromPartyId" from="paymentMethod.ownerPartyId"/>
@@ -51,10 +51,10 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="!formatServiceName">
                 <set field="supportedFormats" from="['PmftBankOfAmericaAr', 'PmftCityBankCnb', 'PmftSunTrustCpr',
-                        'PmftWachoviaAr', 'PmftWellsFargoArp']"/>
+                        'PmftWachoviaAr', 'PmftWellsFargoArp', 'PmftZionsBankCsv']"/>
                 <if condition="bankAccount.posPayFormatEnumId in supportedFormats">
                     <then><set field="formatServiceName" value="mantle.account.PositivePayServices.generate#${bankAccount.posPayFormatEnumId}"/></then>
-                    <else><return error="true" message="Pos. Pay File Format [${bankAccount.posPayFormatEnumId}] not supported"/></else>
+                    <else><return error="true" message="Positive Pay File Format ${bankAccount.posPayFormatEnumId} not supported and no format service specified"/></else>
                 </if>
             </if>
 
@@ -65,7 +65,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="paymentList" from="[]"/>
             <iterate list="originalPaymentList" entry="payment">
                 <if condition="!payment.paymentRefNum">
-                    <message>Payment [${payment.paymentId}] has no check number (Reference Number), skipping</message>
+                    <message>Payment ${payment.paymentId} has no check number (Reference Number), skipping</message>
                     <continue/>
                 </if>
 
@@ -84,7 +84,8 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
 
             <!-- no payments? return now with a message -->
-            <if condition="!paymentList"><return message="No pending payments found for payment method [${paymentMethodId}]"/></if>
+            <if condition="!paymentList">
+                <return type="warning" message="No pending payments found for payment method ${paymentMethodId}"/></if>
             <set field="entryCount" from="paymentList.size()"/>
 
             <!-- create a PaymentMethodFile record, get the paymentMethodFileId (used in the file) -->
@@ -99,6 +100,43 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- save file info on PaymentMethodFile, update statusId and set paymentMethodFileId on Payment records -->
             <service-call name="mantle.account.PaymentMethodServices.update#PaymentMethodFileComplete" in-map="context"/>
+        </actions>
+    </service>
+    <service verb="send" noun="PositivePayJob" authenticate="anonymous-all">
+        <description>For a ServiceJob to automatically send positive pay files, based on PaymentMethodFileType SystemMessage config</description>
+        <in-parameters>
+            <parameter name="paymentMethodId" required="true"/>
+            <parameter name="paymentInstrumentEnumId" default-value="PiCompanyCheck"/>
+            <parameter name="lookBackDays" type="Integer"/>
+            <parameter name="formatServiceName"><description>Extension mechanism, generally empty and determined based
+                on BankAccount.posPayFormatEnumId</description></parameter>
+            <parameter name="systemMessageTypeId"><description>If not specified looked up in PaymentMethodFileType</description></parameter>
+            <parameter name="systemMessageRemoteId"><description>If not specified looked up in PaymentMethodFileType</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="paymentMethodFileId"/>
+            <parameter name="systemMessageId"/>
+        </out-parameters>
+        <actions>
+            <if condition="lookBackDays">
+                <script>
+                    Calendar lookBackCal = ec.user.nowCalendar
+                    lookBackCal.add(Calendar.DAY_OF_MONTH, -lookBackDays)
+                    fromDate = new java.sql.Timestamp(lookBackCal.getTimeInMillis())
+                </script>
+            </if>
+            <log message="Generating PositivePay file for payment method ${paymentMethodId} instrument ${paymentInstrumentEnumId} look back days ${lookBackDays} fromDate ${fromDate}"/>
+
+            <!-- returns paymentMethodFileId or null if no applicable Payment records -->
+            <!-- NOTE: run in new TX so that is committed (record exists) before async create of SystemMessage done by produce service below -->
+            <service-call name="mantle.account.PositivePayServices.generate#PositivePayFile"
+                    in-map="context" out-map="context" transaction="force-new"/>
+            <if condition="!paymentMethodFileId">
+                <log message="In send#PositivePayJob no file generated, not sending"/>
+                <return/>
+            </if>
+
+            <service-call name="mantle.account.PaymentMethodServices.produce#PaymentMethodFileSystemMessage" in-map="context" out-map="context"/>
         </actions>
     </service>
 
@@ -659,5 +697,40 @@ along with this software (see the LICENSE.md file). If not, see
                 fileText = ftSb.toString()
             ]]></script>
         </actions>
+    </service>
+
+    <service verb="generate" noun="PmftZionsBankCsv">
+        <implements service="mantle.account.PositivePayServices.generate#PositivePayInterface"/>
+        <actions><script><![CDATA[
+            import org.apache.commons.csv.CSVPrinter
+            import org.apache.commons.csv.CSVFormat
+            import org.apache.commons.csv.CSVRecord
+
+            StringBuilder outSb = new StringBuilder()
+            CSVPrinter printer = CSVFormat.DEFAULT.withHeader("Check Number", "Amount", "Date", "Payee", "Account", "Void").print(outSb)
+
+            String accountNumber =  bankAccount.accountNumber
+
+            for (Map payment in paymentList) {
+                // Get amount String (10 chars, last 2 are cents)
+                String amountStr = ec.l10n.format(payment.amount, '0.00')
+                String dateStr = ec.l10n.format(payment.effectiveDate, 'MM/dd/yyyy')
+
+                boolean isVoid = payment.statusId == 'PmntVoid'
+                boolean isCancel = payment.statusId == 'PmntCancelled'
+                String voidStr = isVoid || isCancel ? 'V' : 'N'
+
+                String payeeName = ""
+                Map otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
+                if (otherParty) {
+                    payeeName = otherParty.firstName ? otherParty.firstName + " " + otherParty.lastName : otherParty.organizationName
+                    if (payeeName.length() > 40) payeeName = payeeName.substring(0, 40)
+                }
+
+                printer.printRecord(payment.paymentRefNum, amountStr, dateStr, payeeName, accountNumber, voidStr)
+            }
+
+            fileText = outSb.toString()
+        ]]></script></actions>
     </service>
 </services>

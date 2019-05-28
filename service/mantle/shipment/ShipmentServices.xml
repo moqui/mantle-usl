@@ -126,7 +126,7 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="shipmentItemSourceId"/></out-parameters>
         <actions>
-            <if condition="quantity &lt; 0.0"><return error="true" message="Quantity cannot be less than zero"/></if>
+            <if condition="quantity &lt; 0.0"><return error="true" message="Quantity cannot be less than zero for shipment ${shipmentId} product ${productId} (${quantity})"/></if>
 
             <!-- get the shipment type and if outgoing don't allow quantity increase over what is on related order items -->
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
@@ -217,11 +217,7 @@ along with this software (see the LICENSE.md file). If not, see
                             <set field="sis.quantityNotHandled" from="(sis.quantityNotHandled ?: 0.0) - currentChange"/>
                             <if condition="sis.quantity &gt; 0.0 &amp;&amp; sis.quantityNotHandled == 0.0">
                                 <set field="sis.statusId" from="isOutgoing ? 'SisPacked' : 'SisReceived'"/></if>
-                            <if condition="sis.quantity == 0.0 &amp;&amp; !sis.orderId"><then>
-                                <entity-delete value-field="sis"/>
-                            </then><else>
-                                <entity-update value-field="sis"/>
-                            </else></if>
+                            <entity-update value-field="sis"/>
                             <set field="reduceRemaining" from="reduceRemaining - currentChange"/>
                             <if condition="reduceRemaining == 0.0"><break/></if>
                         </if>
@@ -442,7 +438,13 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- pack all items (creating ShipmentPackageContent and AssetIssuance records) -->
             <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
-                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/></entity-find>
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderPartSeqId"/>
+                <econdition field-name="itemTypeEnumId" operator="in" from="productItemTypes"/>
+                <!-- order by productId for consistent order to avoid circular locks and lock wait timeout errors when concurrently
+                    processing orders with the same products in a different order -->
+                <order-by field-name="productId"/>
+            </entity-find>
             <iterate list="orderItemList" entry="orderItem">
                 <if condition="orderItem.productId &amp;&amp; productItemTypes.contains(orderItem.itemTypeEnumId)">
                     <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentProduct"
@@ -481,13 +483,48 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
             <if condition="!(orderPart.statusId in ['OrderApproved', 'OrderSent'] || orderHeader.statusId in ['OrderApproved', 'OrderSent'])">
-                <return error="true" message="Cannot create Shipment for Order Part in status ${orderPart.statusId}"/></if>
+                <return type="danger" message="Cannot create Shipment for Order Part in status ${orderPart.statusId}"/></if>
 
             <!-- does the OrderPart have shippable items? -->
             <entity-find-related value-field="orderPart" relationship-name="mantle.order.OrderItem" list="orderItemList"
                     order-by-list="['orderItemSeqId']"/>
             <if condition="!orderItemList.find({ it.product?.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse'] })">
-                <return error="true" message="Order ${orderId} part ${orderPartSeqId} has no shippable product items (type asset or asset use)"/></if>
+                <return type="warning" message="Order ${orderId} part ${orderPartSeqId} has no shippable product items (type asset or asset use)"/></if>
+
+            <!-- and not already on a Shipment? -->
+            <set field="totalQtyToShip" from="0.0"/>
+            <set field="activeShipmentIds" from="new TreeSet()"/>
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
+            <iterate list="orderItemList" entry="orderItem">
+                <!-- if no productId or not a product item type skip it -->
+                <if condition="!orderItem.productId || !productItemTypes.contains(orderItem.itemTypeEnumId)"><continue/></if>
+
+                <!-- see if Product is a physical item -->
+                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
+                    <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
+                <if condition="!(product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse'])"><continue/></if>
+
+                <!-- determine quantityNotShipped -->
+                <set field="quantityNotShipped" from="(orderItem.quantity != null ? orderItem.quantity : 1.0) * (orderItem.selectedAmount ?: 1.0)"/>
+                <entity-find entity-name="mantle.shipment.ShipmentAndItemSource" list="existingSisList">
+                    <econdition field-name="orderId"/><econdition field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
+                    <econdition field-name="shipmentStatusId" operator="not-in" value="ShipRejected,ShipCancelled"/>
+                    <econdition field-name="statusId" operator="not-equals" value="SisCancelled"/>
+                </entity-find>
+                <iterate list="existingSisList" entry="existingSis">
+                    <set field="quantityNotShipped" from="quantityNotShipped - existingSis.quantity"/>
+                    <if condition="existingSis.quantity"><script>activeShipmentIds.add(existingSis.shipmentId)</script></if>
+                </iterate>
+
+                <!-- if no quantity not shipped skip the item -->
+                <if condition="quantityNotShipped &lt;= 0"><continue/></if>
+                <set field="totalQtyToShip" from="totalQtyToShip + quantityNotShipped"/>
+            </iterate>
+            <if condition="totalQtyToShip == 0.0">
+                <return type="warning" message="Order ${orderId} part ${orderPartSeqId} is already on shipments ${activeShipmentIds}"/></if>
 
             <!-- is this an outgoing Shipment (use ShpTpSales) or incoming (use ShpTpPurchase) order based on internal org? -->
             <!-- TODO: what to do if both are internal orgs? need a flag or something for which side we're dealing with... -->
@@ -1515,6 +1552,11 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="sisQtyHandled" from="sis.quantity - sis.quantityNotHandled"/>
                     <set field="quantityHandled" from="quantityHandled + sisQtyHandled"/>
                 </iterate>
+                <if condition="quantityHandled &lt; 0.0">
+                    <!-- normally this should never happen but can with transfer shipment with data in a funny state -->
+                    <log level="warn" message="In reduce#QuantitiesToHandled calculated quantity ${quantityHandled} less than zero for shipment ${shipmentId} product ${shipmentItem.productId}"/>
+                    <set field="quantityHandled" from="0.0"/>
+                </if>
                 <if condition="shipmentItem.quantity != quantityHandled">
                     <service-call name="mantle.shipment.ShipmentServices.update#ShipmentItem"
                             in-map="[shipmentId:shipmentId, productId:shipmentItem.productId, quantity:quantityHandled]"/>

@@ -490,6 +490,8 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="acctgTransId" required="true"/>
             <parameter name="verifyOnly" type="Boolean" default="false"/>
+            <parameter name="forcePost" type="Boolean" default="false">
+                <description>Post the transaction even if period closed</description></parameter>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.ledger.transaction.AcctgTrans" value-field="acctgTrans" for-update="true"/>
@@ -504,7 +506,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- check the scheduled posting date, but only if it's set -->
             <if condition="acctgTrans.scheduledPostingDate != null &amp;&amp; ec.user.nowTimestamp.before(acctgTrans.scheduledPostingDate)">
-                <message>Not posting transaction ${acctgTransId}, before scheduled posting date.</message>
+                <message type="danger">Not posting transaction ${acctgTransId}, before scheduled posting date.</message>
                 <set field="useErrorJournal" from="true"/>
             </if>
 
@@ -512,7 +514,7 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.LedgerServices.calculate#AcctgTransTrialBalance" out-map="context"
                     in-map="[acctgTransId:acctgTransId]"/>
             <if condition="debitTotal != creditTotal">
-                <message>Not posting transaction ${acctgTransId}, credit total ${creditTotal} and debit total ${debitTotal} not equal.</message>
+                <message type="danger">Not posting transaction ${acctgTransId}, credit total ${creditTotal} and debit total ${debitTotal} not equal.</message>
                 <set field="useErrorJournal" from="true"/>
             </if>
 
@@ -525,7 +527,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <script>glAccountById.put(glAccountId, glAccount)</script>
 
                 <if condition="glAccount.disallowPosting == 'Y'">
-                    <message>GL Account ${glAccount.glAccountId} does not allow posting</message>
+                    <message type="danger">GL Account ${glAccount.glAccountId} does not allow posting</message>
                     <log message="In AcctgTrans ${acctgTransId} GL Account ${glAccount.glAccountId} does not allow posting"/>
                     <set field="useErrorJournal" from="true"/>
                 </if>
@@ -539,7 +541,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="partyAcctgPreference?.errorGlJournalId"><then>
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
                                   in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
-                    <message>Accounting transaction ${acctgTransId} has been saved in Error Journal ${partyAcctgPreference.errorGlJournalId}.</message>
+                    <message type="warning">Accounting transaction ${acctgTransId} has been saved in Error Journal ${partyAcctgPreference.errorGlJournalId}.</message>
                     <return/>
                 </then><else>
                     <!-- if no errorGlJournalId return error -->
@@ -557,26 +559,40 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate entry="timePeriod" list="timePeriodList">
                 <!-- make sure the TimePeriod isn't closed -->
                 <if condition="timePeriod.isClosed == 'Y' &amp;&amp; !(acctgTrans.acctgTransTypeEnumId in ['AttPeriodClosing', 'AttNetIncomeClosing'])">
-                    <message>Not posting transaction ${acctgTransId}, time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message>
-                    <set field="useErrorJournal" from="true"/>
+                    <if condition="forcePost"><then>
+                        <!-- check permission, danger messages and error journal if no permission -->
+                        <if condition="!ec.user.hasPermission('GL_POST_CLOSED')">
+                            <message type="danger">Not posting transaction ${acctgTransId}, time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message>
+                            <message type="danger">Ignoring force post because user does not have permission.</message>
+                            <set field="useErrorJournal" from="true"/>
+                            <break/>
+                        </if>
+                    </then><else>
+                        <message type="danger">Not posting transaction ${acctgTransId}, time period closed ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}.</message>
+                        <set field="useErrorJournal" from="true"/>
+                        <break/>
+                    </else></if>
                 </if>
             </iterate>
 
             <!-- make sure the glAccountId and amount fields are set -->
             <iterate entry="acctgTransEntry" list="acctgTransEntryList">
                 <if condition="!acctgTransEntry.glAccountId">
-                    <message>Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no glAccountId.</message>
+                    <message type="warning">Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no glAccountId.</message>
                     <set field="useErrorJournal" from="true"/>
                 </if>
                 <if condition="acctgTransEntry.amount == null">
-                    <message>Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no amount.</message>
+                    <message type="warning">Accounting transaction entry ${acctgTransId}:${acctgTransEntry.acctgTransEntrySeqId} has no amount.</message>
                     <set field="useErrorJournal" from="true"/>
                 </if>
             </iterate>
 
             <if condition="verifyOnly">
-                <if condition="useErrorJournal || ec.message.hasError()">
-                    <message>Accounting transaction ${acctgTransId} is verified for posting.</message></if>
+                <if condition="useErrorJournal || ec.message.hasError()"><then>
+                    <message type="danger">Accounting transaction ${acctgTransId} has issues and may not be posted.</message>
+                </then><else>
+                    <message type="success">Accounting transaction ${acctgTransId} is verified for posting.</message>
+                </else></if>
                 <return/>
             </if>
 
@@ -586,7 +602,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="partyAcctgPreference?.errorGlJournalId"><then>
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
                             in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
-                    <message>Accounting transaction ${acctgTransId} has been saved in Error Journal ${partyAcctgPreference.errorGlJournalId}.</message>
+                    <message type="warning">Accounting transaction ${acctgTransId} has been saved in Error Journal ${partyAcctgPreference.errorGlJournalId}.</message>
                     <script>ec.message.clearErrors()</script>
                     <return/>
                 </then><else>
@@ -688,10 +704,10 @@ along with this software (see the LICENSE.md file). If not, see
                     subsequentPeriodListArray.add(subsequentPeriodIds)
                     String curSubPeriodId = timePeriod.timePeriodId
                     while (curSubPeriodId) {
-                    Map subNextResult = ec.service.sync().name("mantle.party.TimeServices.get#NextTimePeriod")
-                    .parameter("timePeriodId", curSubPeriodId).call()
-                    curSubPeriodId = subNextResult.nextTimePeriodId
-                    if (curSubPeriodId) subsequentPeriodIds.add(curSubPeriodId)
+                        Map subNextResult = ec.service.sync().name("mantle.party.TimeServices.get#NextTimePeriod")
+                                .parameter("timePeriodId", curSubPeriodId).call()
+                        curSubPeriodId = subNextResult.nextTimePeriodId
+                        if (curSubPeriodId) subsequentPeriodIds.add(curSubPeriodId)
                     }
                 </script>
             </iterate>
