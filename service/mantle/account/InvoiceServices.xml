@@ -1657,6 +1657,47 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="reverse" noun="Invoice">
+        <description>
+            Reverse an invoice making a payable invoice receivable or a receivable invoice payable.
+            Reverses from and to parties and negates all InvoiceItem amounts.
+            May only be run on invoices not applied to anything, and in the InvoiceInProcess, InvoiceIncoming, or InvoiceReceived statuses.
+            Should only be run on invoices with a negative total but that is not enforced.
+        </description>
+        <in-parameters><parameter name="invoiceId" required="true"/></in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice" for-update="true"/>
+
+            <!-- check status -->
+            <if condition="!(invoice.statusId in ['InvoiceInProcess', 'InvoiceIncoming', 'InvoiceReceived'])">
+                <return type="danger" message="Cannot reverse invoice ${invoiceId} in status ${invoice.status?.description}, must be In Process, Incoming, or Received"/></if>
+
+            <!-- check applications - should never happen given status but just in case -->
+            <entity-find-count entity-name="mantle.account.payment.PaymentApplication" count-field="applCount">
+                <econditions combine="or">
+                    <econdition field-name="invoiceId"/>
+                    <econdition field-name="toInvoiceId" from="invoiceId"/>
+                </econditions>
+                <econdition field-name="amountApplied" operator="not-equals" from="0.0"/>
+            </entity-find-count>
+            <if condition="applCount">
+                <return type="danger" message="Cannot reverse invoice ${invoiceId} because it is already applied"/></if>
+
+            <!-- swap from/to parties, switch status -->
+            <set field="targetStatusId" from="invoice.statusId == 'InvoiceInProcess' ? 'InvoiceIncoming' : 'InvoiceInProcess'"/>
+            <service-call name="update#mantle.account.invoice.Invoice"
+                    in-map="[invoiceId:invoiceId, fromPartyId:invoice.toPartyId, toPartyId:invoice.fromPartyId, statusId:targetStatusId]"/>
+
+            <!-- negate all item amounts -->
+            <entity-find entity-name="mantle.account.invoice.InvoiceItem" list="invoiceItemList" for-update="true">
+                <econdition field-name="invoiceId"/></entity-find>
+            <iterate list="invoiceItemList" entry="invoiceItem">
+                <service-call name="update#mantle.account.invoice.InvoiceItem"
+                        in-map="[invoiceId:invoiceId, invoiceItemSeqId:invoiceItem.invoiceItemSeqId, amount:-invoiceItem.amount]"/>
+            </iterate>
+        </actions>
+    </service>
+
     <service verb="cancel" noun="Invoice">
         <description>Set to Cancelled status if not already in Cancelled. Un-apply payment invoice if any applied. May
             be called directly or through SECA rule on Cancelled status.</description>

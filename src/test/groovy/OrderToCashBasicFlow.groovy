@@ -427,7 +427,7 @@ class OrderToCashBasicFlow extends Specification {
                         productId="DEMO_1_1" statusId="SisPacked" quantityNotHandled="0" shipmentId="${shipResult.shipmentId}"/>
                 </items>
                 <items invoiceItemSeqId="02" parentItemSeqId="01" amount="1.189" quantity="1" description="Test Tax 7%" itemTypeEnumId="ItemSalesTax">
-                    <orderItemBillings orderItemSeqId="04" amount="1.19" quantity="1" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55501"/>
+                    <orderItemBillings orderItemSeqId="04" amount="1.189" quantity="1" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55501"/>
                 </items>
                 <items invoiceItemSeqId="03" amount="7.77" quantity="4" productId="DEMO_3_1" description="Demo Product Three-One" itemTypeEnumId="ItemProduct" assetId="DEMO_3_1A">
                     <orderItemBillings orderItemSeqId="02" amount="7.77" quantity="4" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" assetIssuanceId="55501" orderItemBillingId="55502"/>
@@ -441,7 +441,7 @@ class OrderToCashBasicFlow extends Specification {
                     <orderItemBillings orderItemSeqId="05" amount="-1.23" quantity="4" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55503"/>
                 </items>
                 <items invoiceItemSeqId="05" parentItemSeqId="03" amount="0.458" quantity="4" description="Test Tax 7%" itemTypeEnumId="ItemSalesTax">
-                    <orderItemBillings orderItemSeqId="06" amount="0.46" quantity="4" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55504"/>
+                    <orderItemBillings orderItemSeqId="06" amount="0.458" quantity="4" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" orderItemBillingId="55504"/>
                 </items>
                 <items invoiceItemSeqId="06" amount="12.12" quantity="5" productId="DEMO_2_1" description="Demo Product Two-One" itemTypeEnumId="ItemProduct" assetId="55500">
                     <orderItemBillings orderItemSeqId="03" amount="12.12" quantity="5" orderId="${cartOrderId}" shipmentId="${shipResult.shipmentId}" assetIssuanceId="55502" orderItemBillingId="55505"/>
@@ -735,8 +735,8 @@ class OrderToCashBasicFlow extends Specification {
         // record sent refund Payment
         Map refundPmtResult = ec.service.sync().name("mantle.account.PaymentServices.create#Payment")
                 .parameters([paymentTypeEnumId:'PtRefund', statusId:'PmntDelivered', fromPartyId:'ORG_ZIZI_RETAIL',
-                             toPartyId:'JoeDist', effectiveDate:new Timestamp(effectiveTime),
-                             paymentInstrumentEnumId:'PiCompanyCheck', amount:overpayAmount]).call()
+                             toPartyId:'JoeDist', effectiveDate:new Timestamp(effectiveTime), paymentRefNum:"1000",
+                             paymentInstrumentEnumId:'PiCompanyCheck', paymentMethodId:"ZIRET_BA", amount:overpayAmount]).call()
         // apply refund Payment to overpay Payment
         Map refundApplResult = ec.service.sync().name("mantle.account.PaymentServices.apply#PaymentToPayment")
                 .parameters([paymentId:refundPmtResult.paymentId, toPaymentId:b2bPaymentId]).call()
