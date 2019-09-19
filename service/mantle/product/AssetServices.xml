@@ -232,24 +232,32 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="reserve" noun="AssetsForOrder" no-tx-cache="true">
         <description>Triggered by an SECA rule on OrderHeader status change to OrderPlaced (see ProductAsset.secas.xml)</description>
-        <in-parameters><parameter name="orderId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="forceReserve" type="Boolean" default="false">
+                <description>Ignore validations on ProductStore.reservationAutoEnumId, presence of productStoreId or vendorPartyId in OrgInternal role</description></parameter>
+        </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <set field="productStore" from="orderHeader.'mantle.product.store.ProductStore'"/>
-            <if condition="productStore == null"><then>
-                <set field="orderParts" from="orderHeader.parts"/>
-                <iterate list="orderParts" entry="orderPart">
-                    <!-- if vendorPartyId is not an internal org this is not a sales order, so don't do inventory res (return) -->
-                    <entity-find-one entity-name="mantle.party.PartyRole" value-field="orgPartyRole" cache="true">
-                        <field-map field-name="partyId" from="orderPart.vendorPartyId"/>
-                        <field-map field-name="roleTypeId" value="OrgInternal"/>
-                    </entity-find-one>
-                    <if condition="orgPartyRole == null"><return/></if>
-                </iterate>
-            </then><else>
-                <!-- if store setup for no reservation return now -->
-                <if condition="productStore.reservationOrderEnumId == 'AsResOrdNoRes'"><return/></if>
-            </else></if>
+
+            <!-- return early if doesn't appear to be sales order (vendor OrgInternal) or store setting is no res -->
+            <if condition="!forceReserve">
+                <if condition="productStore == null"><then>
+                    <set field="orderParts" from="orderHeader.parts"/>
+                    <iterate list="orderParts" entry="orderPart">
+                        <!-- if vendorPartyId is not an internal org this is not a sales order, so don't do inventory res (return) -->
+                        <entity-find-one entity-name="mantle.party.PartyRole" value-field="orgPartyRole" cache="true">
+                            <field-map field-name="partyId" from="orderPart.vendorPartyId"/>
+                            <field-map field-name="roleTypeId" value="OrgInternal"/>
+                        </entity-find-one>
+                        <if condition="orgPartyRole == null"><return/></if>
+                    </iterate>
+                </then><else>
+                    <!-- if store setup for no reservation return now -->
+                    <if condition="productStore.reservationOrderEnumId == 'AsResOrdNoRes'"><return/></if>
+                </else></if>
+            </if>
 
             <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
                 <econdition field-name="orderId"/><order-by field-name="orderPartSeqId"/></entity-find>
@@ -257,8 +265,8 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="orderPartList" entry="orderPart">
                 <!-- check OrderPart.reservationAutoEnumId vs current status -->
                 <set field="reservationAutoEnumId" from="orderPart.reservationAutoEnumId ?: productStore?.reservationAutoEnumId ?: 'AsResAutoPlaced'"/>
-                <if condition="reservationAutoEnumId == 'AsResAutoNone'"><continue/></if>
-                <if condition="reservationAutoEnumId == 'AsResAutoApproved'"><then>
+                <if condition="!forceReserve &amp;&amp; reservationAutoEnumId == 'AsResAutoNone'"><continue/></if>
+                <if condition="!forceReserve &amp;&amp; reservationAutoEnumId == 'AsResAutoApproved'"><then>
                     <set field="resStatusList" from="['OrderApproved', 'OrderSent']"/>
                 </then><else>
                     <set field="resStatusList" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderHold']"/>
@@ -274,7 +282,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
                 <iterate list="orderItemList" entry="orderItem">
                     <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
-                            in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, productStore:productStore]"/>
+                            in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, productStore:productStore, forceReserve:forceReserve]"/>
                 </iterate>
             </iterate>
 
@@ -331,6 +339,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <description>Don't reserve to this Asset, for displace/etc</description>
                 <parameter name="assetId"/>
             </parameter>
+            <parameter name="forceReserve" type="Boolean" default="false">
+                <description>Ignore validations on ProductStore.reservationAutoEnumId, presence of productStoreId or vendorPartyId in OrgInternal role</description></parameter>
         </in-parameters>
         <actions>
             <set field="nowTimestamp" from="ec.user.nowTimestamp"/>
@@ -433,7 +443,13 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="partyId" from="organizationPartyId"/>
                 <field-map field-name="roleTypeId" value="OrgInternal"/>
             </entity-find-one>
-            <if condition="productStore == null &amp;&amp; orgPartyRole == null"><return/></if>
+            <if condition="productStore == null &amp;&amp; orgPartyRole == null">
+                <if condition="forceReserve"><then>
+                    <log message="Reserving inventory for order ${orderId} item ${orderItemSeqId} with no productStoreId and vendor is not OrgInternal (forceReserve is true)"/>
+                </then><else>
+                    <return/>
+                </else></if>
+            </if>
 
             <set field="ownerPartyIdSet" from="new HashSet()"/>
             <script>if (organizationPartyId) ownerPartyIdSet.add(organizationPartyId)</script>
