@@ -1325,6 +1325,45 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.shipment.ShipmentServices.pack#Shipment" in-map="[shipmentId:shipmentId]" transaction="force-new"/></if>
 
             <!-- if CC payment(s) make sure captured (Delivered) before getting labels, etc -->
+            <!-- new logic: get total of invoices, make sure payments greater where CC is Delivered or Confirmed, other instruments in any active status -->
+            <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="sisInvoiceList">
+                <econdition field-name="shipmentId"/>
+                <econdition field-name="invoiceId" operator="is-not-null"/>
+                <select-field field-name="invoiceId"/>
+            </entity-find>
+            <if condition="sisInvoiceList">
+                <entity-find entity-name="mantle.account.invoice.Invoice" list="invoiceList">
+                    <econdition field-name="invoiceId" operator="in" from="sisInvoiceList*.invoiceId"/>
+                    <econdition field-name="statusId" operator="not-equals" value="InvoiceCancelled"/>
+                    <select-field field-name="invoiceTotal"/>
+                </entity-find>
+                <set field="invoiceTotal" from="invoiceList*.invoiceTotal.sum()"/>
+
+                <if condition="invoiceTotal">
+                    <entity-find entity-name="mantle.shipment.ShipmentOrderPayment" list="shipmentPaymentList" distinct="true">
+                        <econdition field-name="shipmentId"/>
+                        <select-field field-name="paymentId,paymentInstrumentEnumId,statusId,amount"/>
+                    </entity-find>
+                    <set field="paymentTotal" from="0.0"/>
+                    <iterate list="shipmentPaymentList" entry="shipmentPayment">
+                        <if condition="shipmentPayment.paymentInstrumentEnumId == 'PiCreditCard'"><then>
+                            <if condition="shipmentPayment.statusId in ['PmntDelivered', 'PmntConfirmed']">
+                                <set field="paymentTotal" from="paymentTotal + shipmentPayment.amount"/></if>
+                        </then><else>
+                            <if condition="!(shipmentPayment.statusId in ['PmntCancelled', 'PmntVoid', 'PmntDeclined'])">
+                                <set field="paymentTotal" from="paymentTotal + shipmentPayment.amount"/></if>
+                        </else></if>
+                    </iterate>
+
+                    <if condition="paymentTotal &lt; invoiceTotal">
+                        <return type="warning" message="Captured credit card and other payments total ${paymentTotal} is less than shipment invoice total ${invoiceTotal} so not automatically getting labels"/>
+                    </if>
+                </if>
+            </if>
+
+
+
+            <!-- old approach instead of looking at invoices, problematic because a single declined payment will block it even if other payments done:
             <entity-find entity-name="mantle.shipment.ShipmentOrderPayment" list="shipmentPaymentList" distinct="true">
                 <econdition field-name="shipmentId"/>
                 <econdition field-name="statusId" operator="not-in" value="PmntCancelled,PmntVoid"/>
@@ -1340,6 +1379,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </iterate>
             <if condition="foundBadCc"><return/></if>
+            -->
 
             <!-- get and print labels -->
             <if condition="getLabels">
