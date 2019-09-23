@@ -488,7 +488,7 @@ class OrderToCashBasicFlow extends Specification {
                 <entries acctgTransEntrySeqId="03" amount="31.08" debitCreditFlag="C" glAccountId="411000000" productId="DEMO_3_1" 
                         description="Demo Product Three-One" reconcileStatusId="AterNot" invoiceItemSeqId="03" isSummary="N" 
                         glAccountTypeEnumId="GatSales" assetId="DEMO_3_1A"/>
-                <entries acctgTransEntrySeqId="04" amount="4.92" debitCreditFlag="D" glAccountId="522000000" 
+                <entries acctgTransEntrySeqId="04" amount="4.92" debitCreditFlag="D" glAccountId="522200000"
                         description="Discount why? Because we love you." reconcileStatusId="AterNot" invoiceItemSeqId="04" isSummary="N" 
                         glAccountTypeEnumId="GatDiscounts"/>
                 <entries acctgTransEntrySeqId="05" amount="1.83" debitCreditFlag="C" glAccountId="224000000" 
@@ -497,7 +497,7 @@ class OrderToCashBasicFlow extends Specification {
                 <entries acctgTransEntrySeqId="06" amount="60.6" debitCreditFlag="C" glAccountId="411000000" productId="DEMO_2_1" 
                         description="Demo Product Two-One" reconcileStatusId="AterNot" invoiceItemSeqId="06" isSummary="N" 
                         glAccountTypeEnumId="GatSales" assetId="55500"/>
-                <entries acctgTransEntrySeqId="07" amount="6.7" debitCreditFlag="D" glAccountId="522000000" 
+                <entries acctgTransEntrySeqId="07" amount="6.7" debitCreditFlag="D" glAccountId="522200000"
                         description="Discount why? Because we love you." reconcileStatusId="AterNot" invoiceItemSeqId="07" isSummary="N" 
                         glAccountTypeEnumId="GatDiscounts"/>
                 <entries acctgTransEntrySeqId="08" amount="3.77" debitCreditFlag="C" glAccountId="224000000" 

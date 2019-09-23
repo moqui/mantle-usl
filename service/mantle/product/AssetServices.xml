@@ -197,8 +197,12 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="asset.quantityOnHandTotal" from="(asset.quantityOnHandTotal ?: 0) + (quantityOnHandDiff ?: 0)"/>
             </then><else>
                 <!-- sum all records, update with new totals -->
-                <entity-find-one entity-name="mantle.product.asset.AssetDetailSummary" value-field="assetDetailSummary"/>
-                <if condition="assetDetailSummary != null"><then>
+                <entity-find entity-name="mantle.product.asset.AssetDetailSummary" list="assetDetailSummaryList">
+                    <econdition field-name="assetId"/>
+                    <select-field field-name="availableToPromiseTotal,quantityOnHandTotal"/>
+                </entity-find>
+                <if condition="assetDetailSummaryList.size() &gt; 0"><then>
+                    <set field="assetDetailSummary" from="assetDetailSummaryList[0]"/>
                     <set field="asset.availableToPromiseTotal" from="assetDetailSummary.availableToPromiseTotal ?: 0"/>
                     <set field="asset.quantityOnHandTotal" from="assetDetailSummary.quantityOnHandTotal ?: 0"/>
                 </then><else>
@@ -228,24 +232,32 @@ along with this software (see the LICENSE.md file). If not, see
 
     <service verb="reserve" noun="AssetsForOrder" no-tx-cache="true">
         <description>Triggered by an SECA rule on OrderHeader status change to OrderPlaced (see ProductAsset.secas.xml)</description>
-        <in-parameters><parameter name="orderId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="forceReserve" type="Boolean" default="false">
+                <description>Ignore validations on ProductStore.reservationAutoEnumId, presence of productStoreId or vendorPartyId in OrgInternal role</description></parameter>
+        </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <set field="productStore" from="orderHeader.'mantle.product.store.ProductStore'"/>
-            <if condition="productStore == null"><then>
-                <set field="orderParts" from="orderHeader.parts"/>
-                <iterate list="orderParts" entry="orderPart">
-                    <!-- if vendorPartyId is not an internal org this is not a sales order, so don't do inventory res (return) -->
-                    <entity-find-one entity-name="mantle.party.PartyRole" value-field="orgPartyRole" cache="true">
-                        <field-map field-name="partyId" from="orderPart.vendorPartyId"/>
-                        <field-map field-name="roleTypeId" value="OrgInternal"/>
-                    </entity-find-one>
-                    <if condition="orgPartyRole == null"><return/></if>
-                </iterate>
-            </then><else>
-                <!-- if store setup for no reservation return now -->
-                <if condition="productStore.reservationOrderEnumId == 'AsResOrdNoRes'"><return/></if>
-            </else></if>
+
+            <!-- return early if doesn't appear to be sales order (vendor OrgInternal) or store setting is no res -->
+            <if condition="!forceReserve">
+                <if condition="productStore == null"><then>
+                    <set field="orderParts" from="orderHeader.parts"/>
+                    <iterate list="orderParts" entry="orderPart">
+                        <!-- if vendorPartyId is not an internal org this is not a sales order, so don't do inventory res (return) -->
+                        <entity-find-one entity-name="mantle.party.PartyRole" value-field="orgPartyRole" cache="true">
+                            <field-map field-name="partyId" from="orderPart.vendorPartyId"/>
+                            <field-map field-name="roleTypeId" value="OrgInternal"/>
+                        </entity-find-one>
+                        <if condition="orgPartyRole == null"><return/></if>
+                    </iterate>
+                </then><else>
+                    <!-- if store setup for no reservation return now -->
+                    <if condition="productStore.reservationOrderEnumId == 'AsResOrdNoRes'"><return/></if>
+                </else></if>
+            </if>
 
             <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
                 <econdition field-name="orderId"/><order-by field-name="orderPartSeqId"/></entity-find>
@@ -253,8 +265,8 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="orderPartList" entry="orderPart">
                 <!-- check OrderPart.reservationAutoEnumId vs current status -->
                 <set field="reservationAutoEnumId" from="orderPart.reservationAutoEnumId ?: productStore?.reservationAutoEnumId ?: 'AsResAutoPlaced'"/>
-                <if condition="reservationAutoEnumId == 'AsResAutoNone'"><continue/></if>
-                <if condition="reservationAutoEnumId == 'AsResAutoApproved'"><then>
+                <if condition="!forceReserve &amp;&amp; reservationAutoEnumId == 'AsResAutoNone'"><continue/></if>
+                <if condition="!forceReserve &amp;&amp; reservationAutoEnumId == 'AsResAutoApproved'"><then>
                     <set field="resStatusList" from="['OrderApproved', 'OrderSent']"/>
                 </then><else>
                     <set field="resStatusList" from="['OrderPlaced', 'OrderProcessing', 'OrderApproved', 'OrderSent', 'OrderHold']"/>
@@ -270,7 +282,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
                 <iterate list="orderItemList" entry="orderItem">
                     <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
-                            in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, productStore:productStore]"/>
+                            in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, productStore:productStore, forceReserve:forceReserve]"/>
                 </iterate>
             </iterate>
 
@@ -327,6 +339,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <description>Don't reserve to this Asset, for displace/etc</description>
                 <parameter name="assetId"/>
             </parameter>
+            <parameter name="forceReserve" type="Boolean" default="false">
+                <description>Ignore validations on ProductStore.reservationAutoEnumId, presence of productStoreId or vendorPartyId in OrgInternal role</description></parameter>
         </in-parameters>
         <actions>
             <set field="nowTimestamp" from="ec.user.nowTimestamp"/>
@@ -429,7 +443,13 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="partyId" from="organizationPartyId"/>
                 <field-map field-name="roleTypeId" value="OrgInternal"/>
             </entity-find-one>
-            <if condition="productStore == null &amp;&amp; orgPartyRole == null"><return/></if>
+            <if condition="productStore == null &amp;&amp; orgPartyRole == null">
+                <if condition="forceReserve"><then>
+                    <log message="Reserving inventory for order ${orderId} item ${orderItemSeqId} with no productStoreId and vendor is not OrgInternal (forceReserve is true)"/>
+                </then><else>
+                    <return/>
+                </else></if>
+            </if>
 
             <set field="ownerPartyIdSet" from="new HashSet()"/>
             <script>if (organizationPartyId) ownerPartyIdSet.add(organizationPartyId)</script>
@@ -2153,14 +2173,28 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
                 <econdition field-name="productId"/><econdition field-name="facilityId"/>
                 <econdition field-name="statusId" ignore-if-empty="true"/>
-                <econdition field-name="quantityOnHandTotal" operator="not-equals" from="0"/>
+                <!-- can't filter by this with physicalInventoryDate in the past: <econdition field-name="quantityOnHandTotal" operator="not-equals" from="0.0"/> -->
+                <econdition field-name="receivedDate" operator="less-equals" from="physicalInventoryDate" or-null="true"/>
                 <econdition field-name="locationSeqId" ignore-if-empty="true"/>
                 <econdition field-name="lotId" ignore-if-empty="true"/>
             </entity-find>
-            <iterate list="assetList" entry="asset"><set field="currentQoh" from="currentQoh + asset.quantityOnHandTotal"/></iterate>
+            <iterate list="assetList" entry="asset">
+                <!-- old approach using quantityOnHandTotal, won't work for back-dated physical inventory:
+                <set field="currentQoh" from="currentQoh + asset.quantityOnHandTotal"/>
+                -->
+                <!-- calculate as of physicalInventoryDate -->
+                <entity-find entity-name="mantle.product.asset.AssetDetailSummary" list="detailSummaryList">
+                    <econdition field-name="assetId" from="asset.assetId"/>
+                    <econdition field-name="effectiveDate" operator="less-equals" from="physicalInventoryDate"/>
+                    <select-field field-name="quantityOnHandTotal"/>
+                </entity-find>
+                <if condition="detailSummaryList.size() &gt; 0">
+                    <set field="currentQoh" from="currentQoh + (detailSummaryList.get(0).quantityOnHandTotal ?: 0.0)"/>
+                </if>
+            </iterate>
 
             <set field="quantityChange" from="quantity - currentQoh"/>
-            <if condition="quantityChange">
+            <if condition="quantityChange != 0.0">
                 <service-call name="mantle.product.AssetServices.record#PhysicalInventoryChange" in-map="context"/></if>
         </actions>
     </service>
@@ -2201,12 +2235,26 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.facility.Facility" value-field="facility"/>
                 <set field="ownerPartyId" from="facility.ownerPartyId"/>
             </if>
+
             <set field="assetIdList" from="[]"/>
+            <if condition="!assetList">
+                <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
+                    <econdition field-name="productId"/><econdition field-name="facilityId"/>
+                    <econdition field-name="locationSeqId" ignore-if-empty="true"/>
+                    <econdition field-name="lotId" ignore-if-empty="true"/>
+                    <!-- with physicalInventoryDate in the past this won't work: <econdition field-name="quantityOnHandTotal" operator="not-equals" from="0.0"/> -->
+                    <econdition field-name="receivedDate" operator="less-equals" from="physicalInventoryDate" or-null="true"/>
+                    <econdition field-name="ownerPartyId" ignore-if-empty="true"/>
+                    <order-by field-name="receivedDate"/><!-- oldest first -->
+                    <order-by field-name="-assetId"/><!-- by ID to make sure we have a consistent order for locking -->
+                </entity-find>
+            </if>
 
             <!-- <log level="warn" message="======= Changing product [${productId}] in facility [${facilityId}:${locationSeqId}] by ${quantityChange}; assetList: ${assetList}"/> -->
             <if condition="quantityChange &gt; 0.0"><then>
                 <if condition="assetList"><then>
                     <set field="quantityRemaining" from="quantityChange"/>
+                    <!-- NOTE: consider reversing assetList to increase quantity newest first instead of oldest first -->
                     <iterate list="assetList" entry="asset">
                         <!-- NOTE: no real reason for iterating here, will always add it all to the first Asset record; leaving it for now to make more complex logic easier in the future -->
                         <set field="quantityDiff" from="quantityRemaining"/>
@@ -2217,6 +2265,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <if condition="quantityRemaining == 0"><break/></if>
                     </iterate>
                 </then><else>
+                    <!-- NOTE: with the change to query assetList above instead of only using passed assetList this will not happen as frequently but is still needed -->
                     <set field="quantityRemaining" from="0.0"/>
                     <!-- no passed assetList and quantityChange > 0, create new Asset -->
                     <service-call name="mantle.product.AssetServices.create#ProductAssetAdHoc" out-map="context"
@@ -2231,31 +2280,30 @@ along with this software (see the LICENSE.md file). If not, see
                     <script>assetIdList.add(assetId)</script>
                 </else></if>
             </then><else-if condition="quantityChange &lt; 0.0">
-                <if condition="!assetList">
-                    <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
-                        <econdition field-name="productId"/><econdition field-name="facilityId"/>
-                        <econdition field-name="locationSeqId" ignore-if-empty="true"/>
-                        <econdition field-name="lotId" ignore-if-empty="true"/>
-                        <econdition field-name="quantityOnHandTotal" operator="not-equals" from="0"/>
-                        <econdition field-name="ownerPartyId" ignore-if-empty="true"/>
-                        <order-by field-name="receivedDate"/><!-- oldest first -->
-                        <order-by field-name="-quantityOnHandTotal"/><!-- then by most QOH (should be rare in real world, useful mostly for consistency in tests) -->
-                        <order-by field-name="-assetId"/><!-- by ID to make sure we have a consistent order for locking -->
-                    </entity-find>
-                </if>
-
                 <!-- lock the records we need -->
                 <set field="quantityRemaining" from="-quantityChange"/>
                 <set field="lockedAssetList" from="[]"/>
+                <set field="lockedAssetQoh" from="[:]"/>
                 <iterate list="assetList" entry="asset">
-                    <set field="quantityDiff" from="quantityRemaining &gt; asset.quantityOnHandTotal ? asset.quantityOnHandTotal : quantityRemaining"/>
+                    <!-- calculate quantityOnHandTotal as of physicalInventoryDate instead of using current -->
+                    <entity-find entity-name="mantle.product.asset.AssetDetailSummary" list="detailSummaryList">
+                        <econdition field-name="assetId" from="asset.assetId"/>
+                        <econdition field-name="effectiveDate" operator="less-equals" from="physicalInventoryDate"/>
+                        <select-field field-name="quantityOnHandTotal"/>
+                    </entity-find>
+                    <set field="quantityOnHandTotal" from="detailSummaryList.size() &gt; 0 ? (detailSummaryList.get(0).quantityOnHandTotal ?: 0.0) : 0.0"/>
+
+                    <set field="quantityDiff" from="quantityRemaining &gt; quantityOnHandTotal ? quantityOnHandTotal : quantityRemaining"/>
                     <if condition="quantityDiff != 0.0">
                         <!-- get a locked record -->
                         <entity-find-one entity-name="mantle.product.asset.Asset" value-field="lockedAsset" for-update="true">
                             <field-map field-name="assetId" from="asset.assetId"/></entity-find-one>
-                        <set field="quantityDiff" from="quantityRemaining &gt; lockedAsset.quantityOnHandTotal ? lockedAsset.quantityOnHandTotal : quantityRemaining"/>
+                        <set field="quantityDiff" from="quantityRemaining &gt; quantityOnHandTotal ? quantityOnHandTotal : quantityRemaining"/>
                         <if condition="quantityDiff != 0.0">
-                            <script>lockedAssetList.add(lockedAsset)</script>
+                            <script>
+                                lockedAssetList.add(lockedAsset)
+                                lockedAssetQoh.put(lockedAsset.assetId, quantityOnHandTotal)
+                            </script>
                             <set field="quantityRemaining" from="quantityRemaining - quantityDiff"/>
                         </if>
                     </if>
@@ -2265,7 +2313,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- do the actual quantity changes -->
                 <set field="quantityRemaining" from="-quantityChange"/>
                 <iterate list="lockedAssetList" entry="asset">
-                    <set field="quantityDiff" from="quantityRemaining &gt; asset.quantityOnHandTotal ? asset.quantityOnHandTotal : quantityRemaining"/>
+                    <set field="quantityOnHandTotal" from="lockedAssetQoh.get(asset.assetId)"/>
+                    <set field="quantityDiff" from="quantityRemaining &gt; quantityOnHandTotal ? quantityOnHandTotal : quantityRemaining"/>
                     <if condition="quantityDiff != 0.0">
                         <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="context +
                                 [assetId:asset.assetId, quantityDiff:-quantityDiff]"/>

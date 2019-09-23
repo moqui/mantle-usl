@@ -35,6 +35,10 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shipmentItemSourceList" type="List"><parameter name="shipmentItemSource" type="Map"/></parameter>
             <parameter name="receivingShipmentIdSet" type="Set"><parameter name="receivingShipmentId"/></parameter>
             <parameter name="shippingShipmentIdSet" type="Set"><parameter name="shippingShipmentId"/></parameter>
+
+            <parameter name="refundPaymentIdSet" type="Set"><parameter name="refundPaymentId"/></parameter>
+            <parameter name="returnItemBillingList" type="List"><parameter name="returnItemBilling" type="Map"/></parameter>
+            <parameter name="creditMemoIdSet" type="Set"><parameter name="invoiceId"/></parameter>
         </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.order.return.ReturnHeader" value-field="returnHeader"/>
@@ -65,6 +69,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="salesOrderIdSet" from="new TreeSet()"/>
             <set field="replacementOrderIdSet" from="new TreeSet()"/>
             <set field="purchaseOrderIdSet" from="new TreeSet()"/>
+            <set field="refundPaymentIdSet" from="new TreeSet()"/>
             <entity-find entity-name="mantle.order.return.ReturnItem" list="returnItemList">
                 <econdition field-name="returnId"/></entity-find>
             <iterate list="returnItemList" entry="returnItem"><script>
@@ -74,6 +79,7 @@ along with this software (see the LICENSE.md file). If not, see
                 } else {
                     if (returnItem.orderId) purchaseOrderIdSet.add(returnItem.orderId)
                 }
+                if (returnItem.refundPaymentId) refundPaymentIdSet.add(returnItem.refundPaymentId)
             </script></iterate>
 
             <set field="receivingShipmentIdSet" from="new TreeSet()"/>
@@ -84,6 +90,10 @@ along with this software (see the LICENSE.md file). If not, see
                 if (isVendorOrgInternal) { receivingShipmentIdSet.add(sis.shipmentId) }
                 else { shippingShipmentIdSet.add(sis.shipmentId)}
             </script></iterate>
+
+            <entity-find entity-name="mantle.order.return.ReturnItemBilling" list="returnItemBillingList">
+                <econdition field-name="returnId"/><order-by field-name="returnItemSeqId"/></entity-find>
+            <set field="creditMemoIdSet" from="new TreeSet(returnItemBillingList*.invoiceId)"/>
         </actions>
     </service>
 
@@ -216,6 +226,10 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <set field="isProductItemType" from="item.itemTypeEnumId in productItemTypes"/>
 
+                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
+                    <field-map field-name="productId" from="item.productId"/></entity-find-one>
+                <set field="isShippable" from="isProductItemType &amp;&amp; product != null ? product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse'] : false"/>
+
                 <set field="returnedQuantity" from="0.0"/>
                 <set field="returnedTotal" from="0.0"/>
                 <entity-find entity-name="mantle.order.return.ReturnItemQuantity" list="riqList">
@@ -238,8 +252,8 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <if condition="returnableQuantity &gt; 0.0 || (!isProductItemType &amp;&amp; returnableTotal &gt; 0.0)">
                     <script>orderItemInfoList.add([orderId:item.orderId, orderItemSeqId:item.orderItemSeqId,
-                            itemTypeEnumId:item.itemTypeEnumId, isProductItemType:isProductItemType, productId:item.productId,
-                            invoiceQuantity:invoiceQuantity, invoiceTotal:invoiceTotal,
+                            itemTypeEnumId:item.itemTypeEnumId, isProductItemType:isProductItemType, isShippable:isShippable,
+                            productId:item.productId, invoiceQuantity:invoiceQuantity, invoiceTotal:invoiceTotal,
                             returnedQuantity:returnedQuantity, returnableQuantity:returnableQuantity,
                             returnedTotal:returnedTotal, returnableTotal:returnableTotal])</script>
                 </if>
@@ -335,13 +349,17 @@ along with this software (see the LICENSE.md file). If not, see
                 <exclude field-name="returnQuantity"/><exclude field-name="receivedQuantity"/>
                 <exclude field-name="replacementOrderId"/><exclude field-name="refundPaymentId"/><exclude field-name="finAccountTransId"/>
                 <exclude field-name="responseAmount"/><exclude field-name="responseDate"/></auto-parameters>
-            <parameter name="statusId" default-value="ReturnCreated"/>
+            <parameter name="statusId"/>
             <parameter name="returnQuantity" type="BigDecimal" required="true"/>
             <parameter name="returnReasonEnumId" required="true"/>
             <parameter name="returnResponseEnumId" required="true"/>
         </in-parameters>
         <out-parameters><parameter name="returnItemSeqId"/></out-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.order.return.ReturnHeader" value-field="returnHeader"/>
+            <if condition="returnHeader.statusId in ['ReturnCancelled', 'ReturnCompleted', 'ReturnManResp']">
+                <return error="true" message="Cannot add items to return in status ${returnHeader.status?.description}"/></if>
+
             <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/>
             <if condition="orderItem == null"><return error="true" message="Could not find Order Item ${orderId}:${orderItemSeqId}"/></if>
 
@@ -358,6 +376,10 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="(returnedTotal + returnTotal) &gt; invoiceTotal">
                     <return error="true" message="Tried to return total more than is returnable for non-product item; total billed ${ec.l10n.format(invoiceTotal, '#,##0.00')}, already returned ${ec.l10n.format(returnedTotal, '#,##0.00')}, tried to return ${ec.l10n.format(returnTotal, '#,##0.00')}"/></if>
             </else></if>
+
+            <if condition="!statusId"><set field="statusId" from="returnHeader.statusId"/></if>
+            <if condition="statusId in ['ReturnShipped', 'ReturnReceived']">
+                <set field="statusId" value="ReturnApproved"/></if>
 
             <!-- set some general fields, create the ReturnItem -->
             <set field="itemTypeEnumId" from="orderItem.itemTypeEnumId"/>
@@ -1068,13 +1090,20 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="allItemSisList">
                 <econdition field-name="returnId"/></entity-find>
 
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
             <iterate list="returnItemList" entry="returnItem">
                 <if condition="returnItem.productId">
                     <!-- see if Product is a physical item -->
                     <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
                         <field-map field-name="productId" from="returnItem.productId"/></entity-find-one>
 
-                    <if condition="product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse']">
+                    <set field="isProductItemType" from="returnItem.itemTypeEnumId in productItemTypes"/>
+                    <set field="isShippable" from="isProductItemType &amp;&amp; product != null ? product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse'] : false"/>
+
+                    <if condition="isShippable">
                         <set field="itemSisQuantity" from="allItemSisList.findAll({ it.returnItemSeqId == returnItem.returnItemSeqId })*.quantity.sum()"/>
                         <set field="quantityToReceive" from="(returnItem.returnQuantity?:0.0) - (itemSisQuantity?:0.0)"/>
                         <if condition="quantityToReceive == 0.0"><continue/></if>
