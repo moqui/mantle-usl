@@ -531,6 +531,51 @@ along with this software (see the LICENSE.md file). If not, see
                     in-map="[shipmentId:shipmentId, shipmentRouteSegmentSeqId:shipmentRouteSegmentSeqId,
                         shipmentPackageSeqId:shipmentPackageSeqId, shippingGatewayConfigId:shippingGatewayConfigId,
                         shipmentMethodEnumId:shipmentMethodEnumId, getReturnLabels:getReturnLabels]"/>
+
+            <!-- if Shipment has productStoreId and store has a label markup setting apply it now -->
+            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipment.productStoreId">
+                <entity-find entity-name="mantle.product.store.ProductStoreSetting" list="labelMarkupSettingList" cache="true">
+                    <date-filter/>
+                    <econdition field-name="productStoreId" from="shipment.productStoreId"/>
+                    <econdition field-name="settingTypeEnumId" value="PsstShipLabelMarkup"/>
+                    <order-by field-name="-fromDate"/>
+                </entity-find>
+                <set field="labelMarkupValue" from="labelMarkupSettingList ? labelMarkupSettingList[0]?.settingValue : null"/>
+                <if condition="labelMarkupValue &amp;&amp; !labelMarkupValue.isBigDecimal()">
+                    <log level="error" message="Shipping Label Markup not a valid number ${labelMarkupValue} for store ${shipment.productStoreId}"/></if>
+                <set field="labelMarkupBd" from="labelMarkupValue &amp;&amp; labelMarkupValue.isBigDecimal() ?
+                        new BigDecimal(labelMarkupValue).divide(100.0, 4, BigDecimal.ROUND_HALF_UP) : 0.0"/>
+                <if condition="labelMarkupBd">
+                    <entity-find entity-name="mantle.shipment.ShipmentPackageRouteSeg" list="packageRouteSegList">
+                        <econdition field-name="shipmentId"/>
+                        <econdition field-name="shipmentPackageSeqId" ignore-if-empty="true"/>
+                        <econdition field-name="shipmentRouteSegmentSeqId" ignore-if-empty="true"/>
+                    </entity-find>
+                    <iterate list="packageRouteSegList" entry="packageRouteSeg">
+                        <!-- normalize and calc MAIN label amounts -->
+                        <if condition="packageRouteSeg.estimatedAmount == null &amp;&amp; packageRouteSeg.baseAmount != null">
+                            <set field="packageRouteSeg.estimatedAmount" from="packageRouteSeg.baseAmount"/></if>
+                        <if condition="packageRouteSeg.estimatedAmount != null">
+                            <if condition="packageRouteSeg.baseAmount == null">
+                                <set field="packageRouteSeg.baseAmount" from="packageRouteSeg.estimatedAmount"/></if>
+                            <set field="packageRouteSeg.estimatedAmount"
+                                    from="packageRouteSeg.baseAmount + (labelMarkupBd as BigDecimal).multiply(packageRouteSeg.baseAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                        </if>
+                        <!-- normalize and calc RETURN label amounts -->
+                        <if condition="packageRouteSeg.returnEstimatedAmount == null &amp;&amp; packageRouteSeg.returnBaseAmount != null">
+                            <set field="packageRouteSeg.returnEstimatedAmount" from="packageRouteSeg.returnBaseAmount"/></if>
+                        <if condition="packageRouteSeg.returnEstimatedAmount != null">
+                            <if condition="packageRouteSeg.returnBaseAmount == null">
+                                <set field="packageRouteSeg.returnBaseAmount" from="packageRouteSeg.returnEstimatedAmount"/></if>
+                            <set field="packageRouteSeg.returnEstimatedAmount"
+                                    from="packageRouteSeg.returnBaseAmount + (labelMarkupBd as BigDecimal).multiply(packageRouteSeg.returnBaseAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                        </if>
+                        <!-- save it -->
+                        <entity-update value-field="packageRouteSeg"/>
+                    </iterate>
+                </if>
+            </if>
         </actions>
     </service>
     <service verb="refund" noun="ShipmentLabels">
