@@ -263,9 +263,10 @@ class OrderProcureToPayBasicFlow extends Specification {
                     quantityAccepted:400, facilityId:facilityId, locationSeqId:"01010101", lotNumber:'A1111',
                     manufacturedDate:new Timestamp(effectiveTime - (3600000L*24*14)),
                     expectedEndOfLife:new Date(effectiveTime + (3600000L*24*180))]).call()
+        // receive to Receiving type location, with demo data settings will get On Hold
         ec.service.sync().name("mantle.shipment.ShipmentServices.receive#ShipmentProduct")
                 .parameters([shipmentId:shipResult.shipmentId, productId:'DEMO_3_1',
-                    quantityAccepted:100, facilityId:facilityId, locationSeqId:"01020101", lotNumber:'A2222',
+                    quantityAccepted:100, facilityId:facilityId, locationSeqId:"0801", lotNumber:'A2222',
                     manufacturedDate:new Timestamp(effectiveTime - (3600000L*24*14)),
                     expectedEndOfLife:new Date(effectiveTime + (3600000L*24*240))]).call()
 
@@ -339,11 +340,11 @@ class OrderProcureToPayBasicFlow extends Specification {
                 quantityOnHandDiff="400" availableToPromiseDiff="400" unitCost="8" shipmentId="${shipResult.shipmentId}"
                 productId="DEMO_1_1" assetReceiptId="55400"/>
 
-            <mantle.product.asset.Asset assetId="55401" assetTypeEnumId="AstTpInventory" statusId="AstAvailable"
+            <mantle.product.asset.Asset assetId="55401" assetTypeEnumId="AstTpInventory" statusId="AstOnHold"
                 ownerPartyId="ORG_ZIZI_RETAIL" productId="DEMO_3_1" hasQuantity="Y" quantityOnHandTotal="100"
                 availableToPromiseTotal="100" assetName="Demo Product Three-One" receivedDate="${effectiveTime}"
-                acquiredDate="${effectiveTime}" facilityId="${facilityId}" acquireOrderId="${purchaseOrderId}"
-                acquireOrderItemSeqId="02" acquireCost="4.5" acquireCostUomId="USD"/>
+                acquiredDate="${effectiveTime}" facilityId="${facilityId}" locationSeqId="0801" 
+                acquireOrderId="${purchaseOrderId}" acquireOrderItemSeqId="02" acquireCost="4.5" acquireCostUomId="USD"/>
             <mantle.product.receipt.AssetReceipt assetReceiptId="55401" assetId="55401" productId="DEMO_3_1"
                 orderId="${purchaseOrderId}" orderItemSeqId="02" shipmentId="${shipResult.shipmentId}"
                 receivedByUserId="EX_JOHN_DOE" receivedDate="${effectiveTime}" quantityAccepted="100"/>
@@ -412,6 +413,26 @@ class OrderProcureToPayBasicFlow extends Specification {
         dataCheckErrors.size() == 0
     }
 
+    def "move Received Inventory"() {
+        when:
+        // move to pick location to make Available with demo settings for autoStatusId
+        ec.service.sync().name("mantle.product.AssetServices.move#Product")
+                .parameters([productId:'DEMO_3_1', quantity:100, quantityAccepted:100,
+                             facilityId:facilityId, locationSeqId:"0801", toLocationSeqId:"01020101"]).call()
+
+        List<String> dataCheckErrors = []
+        long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.product.asset.Asset assetId="55401" assetTypeEnumId="AstTpInventory" statusId="AstAvailable"
+                ownerPartyId="ORG_ZIZI_RETAIL" productId="DEMO_3_1" hasQuantity="Y" quantityOnHandTotal="100"
+                availableToPromiseTotal="100" facilityId="${facilityId}" locationSeqId="01020101"/>
+        </entity-facade-xml>""").check(dataCheckErrors)
+        totalFieldsChecked += fieldsChecked
+        logger.info("Checked ${fieldsChecked} fields")
+        if (dataCheckErrors) for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+
+        then:
+        dataCheckErrors.size() == 0
+    }
 
     def "validate Assets Receipt Accounting Transactions"() {
         when:

@@ -1557,7 +1557,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="assetTypeEnumId"><description>Defaults to Product.assetTypeEnumId</description></parameter>
             <parameter name="classEnumId"><description>Defaults to Product.assetClassEnumId</description></parameter>
             <parameter name="statusId"><description>If assetTypeEnumId == AstTpInventory then defaults to AstAvailable,
-                otherwise defaults to AstInStorage.</description></parameter>
+                otherwise defaults to AstInStorage unless there is a FacilityLocationType.autoStatusId that applies and that will override this parameter.</description></parameter>
             <parameter name="receivedDate"><description>If statusId == AstIncoming then defaults to null, otherwise defaults to now.</description></parameter>
 
             <parameter name="assetName"><description>Defaults to OrderItem.itemDescription if available.</description></parameter>
@@ -1620,6 +1620,23 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!ownerPartyId"><set field="ownerPartyId" from="workEffort?.ownerPartyId"/></if>
             <!-- get ownerPartyId from Facility if needed (final default, who owns the facility it's going into) -->
             <if condition="!ownerPartyId"><set field="ownerPartyId" from="facility?.ownerPartyId"/></if>
+
+            <if condition="locationSeqId">
+                <!-- make sure location exists -->
+                <entity-find-one entity-name="mantle.facility.FacilityLocation" value-field="checkFacLoc">
+                    <field-map field-name="facilityId"/><field-map field-name="locationSeqId"/></entity-find-one>
+                <if condition="checkFacLoc == null"><return error="true" message="Location [${locationSeqId}] is not valid in facility ${ec.resource.expand('FacilityNameTemplate', '', asset.facility)}"/></if>
+
+                <!-- see if the target location's type has an autoStatusId in the Facility -->
+                <if condition="checkFacLoc.locationTypeEnumId">
+                    <entity-find-one entity-name="mantle.facility.FacilityLocationType" value-field="facLocType">
+                        <field-map field-name="facilityId"/>
+                        <field-map field-name="locationTypeEnumId" from="checkFacLoc.locationTypeEnumId"/>
+                    </entity-find-one>
+                    <set field="autoStatusId" from="facLocType?.autoStatusId"/>
+                    <if condition="autoStatusId"><set field="statusId" from="autoStatusId"/></if>
+                </if>
+            </if>
 
             <!-- set default status, receivedDate, hasQuantity, and assetName -->
             <if condition="!statusId"><set field="statusId" from="assetTypeEnumId == 'AstTpInventory' ? 'AstAvailable' : 'AstInStorage'"/></if>
@@ -2081,6 +2098,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="checkFacLoc == null"><return error="true" message="Location [${locationSeqId}] is not valid in facility ${ec.resource.expand('FacilityNameTemplate', '', asset.facility)}"/></if>
             </if>
 
+            <!-- see if the target location's type has an autoStatusId in the Facility -->
+            <if condition="checkFacLoc?.locationTypeEnumId">
+                <entity-find-one entity-name="mantle.facility.FacilityLocationType" value-field="facLocType">
+                    <field-map field-name="facilityId"/>
+                    <field-map field-name="locationTypeEnumId" from="checkFacLoc.locationTypeEnumId"/>
+                </entity-find-one>
+                <set field="autoStatusId" from="facLocType?.autoStatusId"/>
+            </if>
+
             <!-- default quantity to QOH (note: used to do this only if hasQuantity != 'N', even for serialized always do for AssetDetail, etc) -->
             <if condition="!quantity"><set field="quantity" from="asset.quantityOnHandTotal"/></if>
             <!-- default quantity to QOH -->
@@ -2091,11 +2117,13 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- for partial quantity or facilityId change reduce quantity on original and create new with given quantity -->
-            <if condition="forceNewAsset || (quantity &amp;&amp; quantity &lt; asset.quantityOnHandTotal) || (facilityId &amp;&amp; facilityId != asset.facilityId)"><then>
+            <if condition="forceNewAsset || (quantity &amp;&amp; quantity &lt; asset.quantityOnHandTotal) ||
+                    (facilityId &amp;&amp; facilityId != asset.facilityId)"><then>
                 <!-- clone asset in new facility/location with quantity -->
                 <service-call name="create#mantle.product.asset.Asset" out-map="newAssetOut"
                         in-map="asset.getMap() + [assetId:null, facilityId:facilityId, locationSeqId:locationSeqId,
-                                containerId:containerId, quantityOnHandTotal:0, availableToPromiseTotal:0]"/>
+                                containerId:containerId, quantityOnHandTotal:0, availableToPromiseTotal:0,
+                                statusId:(autoStatusId ?: asset.statusId)]"/>
                 <set field="newAssetId" from="newAssetOut.assetId"/>
                 <service-call name="create#mantle.product.asset.AssetDetail" out-map="context"
                         in-map="[assetId:newAssetId, effectiveDate:ec.user.nowTimestamp, quantityOnHandDiff:quantity,
@@ -2131,10 +2159,24 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[assetId:assetId, effectiveDate:ec.user.nowTimestamp, quantityOnHandDiff:-quantity,
                                  availableToPromiseDiff:-quantity, productId:productId, otherAssetId:newAssetId]"/>
             </then><else>
+                <!-- make sure can change from asset.statusId to autoStatusId -->
+                <if condition="autoStatusId">
+                    <if condition="asset.statusId">
+                        <entity-find-count entity-name="moqui.basic.StatusFlowTransition" count-field="transitionCount">
+                            <econdition field-name="statusId" from="asset.statusId"/>
+                            <econdition field-name="toStatusId" from="autoStatusId"/>
+                        </entity-find-count>
+                        <if condition="transitionCount == 0">
+                            <return error="true" message="Cannot move asset ${assetId} with status ${asset.statusId} to target location ${locationSeqId} of type ${checkFacLoc?.locationTypeEnumId} with auto status ${autoStatusId}"/></if>
+                    </if>
+
+                    <set field="statusId" from="autoStatusId"/>
+                </if>
                 <service-call name="update#mantle.product.asset.Asset" in-map="context"/>
             </else></if>
 
-            <entity-find-one entity-name="mantle.product.asset.Asset" value-field="newAsset"/>
+            <entity-find-one entity-name="mantle.product.asset.Asset" value-field="newAsset">
+                <field-map field-name="assetId" from="newAssetId ?: assetId"/></entity-find-one>
             <set field="newFacLoc" from="newAsset.location"/>
             <message>Moved asset ${ec.resource.expand('AssetNameTemplate', '', asset)} from ${ec.resource.expand('FacilityLocationNameTemplate', '', facLoc?:[:])} to ${ec.resource.expand('FacilityLocationNameTemplate', '', newFacLoc?:[:])}${container ? ' in container ' + (container.serialNumber ?: container.description ?: containerId) : ''}.</message>
         </actions>
