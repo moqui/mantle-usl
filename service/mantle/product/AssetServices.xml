@@ -61,8 +61,10 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="get" noun="AvailableInventory">
         <in-parameters>
             <parameter name="productId" required="true"/>
-            <parameter name="facilityId" required="true"/>
-            <parameter name="ownerPartyId"><description>Defaults to Facility.ownerPartyId; if Facility.assetAllowOtherOwner = Y this is ignored</description></parameter>
+            <parameter name="facilityId"/>
+            <parameter name="productStoreId"><description>If specified get facilities and vendor from store, must specify products or categories separately</description></parameter>
+            <parameter name="vendorPartyId"><description>Defaults to ProductStore.organizationPartyId; used for ownerPartyId filter and AssetPool lookup by Vendor</description></parameter>
+            <parameter name="customerPartyId"><description>Used for AssetPool lookup by Customer</description></parameter>
         </in-parameters>
         <out-parameters><parameter name="availableToPromiseTotal" type="BigDecimal"/></out-parameters>
         <actions>
@@ -70,36 +72,64 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="assetAllowOtherOwner" from="facility.assetAllowOtherOwner"/>
             <if condition="!ownerPartyId"><set field="ownerPartyId" from="facility.ownerPartyId"/> </if>
 
-            <entity-find entity-name="mantle.product.asset.AssetQuantitySummary" list="quantSumList">
-                <econdition field-name="productId"/>
-                <econdition field-name="facilityId"/>
-                <econdition field-name="ownerPartyId" ignore="assetAllowOtherOwner == 'Y'" ignore-if-empty="true"/>
-                <econdition field-name="statusId" value="AstAvailable"/>
-                <select-field field-name="availableToPromiseTotal"/>
-            </entity-find>
-            <if condition="quantSumList.size() &gt; 0"><then>
-                <set field="availableToPromiseTotal" from="quantSumList[0].availableToPromiseTotal"/>
-            </then><else>
-                <set field="availableToPromiseTotal" from="0.0"/>
-            </else></if>
-        </actions>
-    </service>
-    <service verb="get" noun="AvailableByStore">
-        <in-parameters>
-            <parameter name="productId" required="true"/>
-            <parameter name="productStoreId" required="true"/>
-            <parameter name="productStore" type="EntityValue"/>
-        </in-parameters>
-        <out-parameters><parameter name="availableToPromiseTotal" type="BigDecimal"/></out-parameters>
-        <actions>
-            <if condition="productStore == null"><entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore" cache="true"/></if>
-            <!-- TODO: support multiple inventory facilities for store, get total across all -->
-            <set field="facilityId" from="productStore.inventoryFacilityId"/>
+            <set field="facilityIdSet" from="new HashSet()"/>
+            <if condition="facilityId"><script>facilityIdSet.add(facilityId)</script></if>
 
-            <service-call name="mantle.product.AssetServices.get#AvailableInventory" out-map="context"
-                    in-map="[productId:productId, facilityId:facilityId, ownerPartyId:productStore.organizationPartyId]"/>
+            <!-- ProductStore based values -->
+            <if condition="productStoreId">
+                <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore"/>
+                <if condition="!vendorPartyId"><set field="vendorPartyId" from="productStore?.organizationPartyId"/></if>
+                <if condition="facilityIdSet.size() == 0">
+                    <!-- get facilities from store -->
+                    <if condition="productStore.inventoryFacilityId">
+                        <script>facilityIdSet.add(productStore.inventoryFacilityId)</script></if>
+                    <entity-find entity-name="mantle.product.store.ProductStoreFacility" list="productStoreFacilityList">
+                        <date-filter/><econdition field-name="productStoreId"/></entity-find>
+                    <if condition="productStoreFacilityList">
+                        <script>facilityIdSet.addAll(productStoreFacilityList*.facilityId)</script></if>
+                </if>
+            </if>
+
+            <!-- compile set of ownerPartyId values -->
+            <set field="ownerPartyIdSet" from="new HashSet()"/>
+            <if condition="vendorPartyId">
+                <script>ownerPartyIdSet.add(vendorPartyId)</script>
+                <!-- look for parent org(s) if any, include assets from parent org too -->
+                <entity-find entity-name="mantle.party.PartyRelationship" list="parentRelList" cache="true">
+                    <date-filter/>
+                    <econdition field-name="relationshipTypeEnumId" value="PrtOrgRollup"/>
+                    <econdition field-name="fromPartyId" from="vendorPartyId"/>
+                    <econdition field-name="toPartyId" operator="is-not-null"/>
+                </entity-find>
+                <script>if (parentRelList) ownerPartyIdSet.addAll(parentRelList*.toPartyId)</script>
+            </if>
+
+            <!-- compile set of assetPoolId values -->
+            <service-call name="mantle.product.AssetServices.get#AssetPools" out-map="poolsOut"
+                    in-map="[productStoreId:productStoreId, vendorPartyId:vendorPartyId, customerPartyId:customerPartyId]"/>
+            <set field="assetPoolIdSet" from="poolsOut.assetPoolIdSet"/>
+
+            <set field="availableToPromiseTotal" from="0.0"/>
+            <!-- to support assetAllowOtherOwner may need to do query per Facility... -->
+            <iterate list="facilityIdSet" entry="facilityId">
+                <entity-find-one entity-name="mantle.facility.Facility" value-field="facility" cache="true"/>
+
+                <entity-find entity-name="mantle.product.asset.AssetQuantitySummary" list="quantSumList">
+                    <econdition field-name="productId"/>
+                    <econdition field-name="facilityId"/>
+                    <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIdSet"
+                            ignore="facility?.assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
+                    <econdition field-name="assetPoolId" operator="in" from="assetPoolIdSet" ignore="!assetPoolIdSet" or-null="true"/>
+                    <econdition field-name="assetPoolId" operator="is-null" ignore="assetPoolIdSet"/>
+                    <econdition field-name="statusId" value="AstAvailable"/>
+                    <select-field field-name="availableToPromiseTotal"/>
+                </entity-find>
+                <if condition="quantSumList.size() &gt; 0">
+                    <set field="availableToPromiseTotal" from="availableToPromiseTotal + quantSumList[0].availableToPromiseTotal"/></if>
+            </iterate>
         </actions>
     </service>
+    <!-- NOTE: get#AvailableByStore removed as is no longer used and get#AvailableInventory may be used instead -->
     <service verb="get" noun="AvailableForOrder">
         <in-parameters>
             <parameter name="productId" required="true"/>
@@ -111,21 +141,15 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="availableToPromiseTotal" type="BigDecimal"/></out-parameters>
         <actions>
+            <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/></if>
             <if condition="orderPart == null"><entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/></if>
 
-            <set field="facilityId" from="orderPart.facilityId"/>
-            <if condition="!facilityId"><then>
-                <if condition="orderHeader == null"><entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/></if>
-                <if condition="!orderHeader?.productStoreId">
-                    <return type="warning" message="Cannot get available inventory for order ${orderId} part ${orderPartSeqId}, no facility on order part and no store on header"/></if>
+            <if condition="!orderPart.facilityId &amp;&amp; !orderHeader.productStoreId">
+                <return type="warning" message="Cannot get available inventory for order ${orderId} part ${orderPartSeqId}, no facility on order part and no store on header"/></if>
 
-                <!-- get inventory by store, let it handle specifics -->
-                <service-call name="mantle.product.AssetServices.get#AvailableByStore" out-map="context"
-                        in-map="[productId:productId, productStoreId:orderHeader.productStoreId]"/>
-            </then><else>
-                <service-call name="mantle.product.AssetServices.get#AvailableInventory" out-map="context"
-                        in-map="[productId:productId, facilityId:facilityId, ownerPartyId:orderPart.vendorPartyId]"/>
-            </else></if>
+            <service-call name="mantle.product.AssetServices.get#AvailableInventory" out-map="context"
+                    in-map="[productId:productId, facilityId:orderPart.facilityId, productStoreId:orderHeader.productStoreId,
+                        vendorPartyId:orderPart.vendorPartyId, customerPartyId:orderPart.customerPartyId]"/>
 
             <!-- get current quantity reserved (for updates) -->
             <if condition="orderItemSeqId">
@@ -140,6 +164,118 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="availableToPromiseTotal" from="(availableToPromiseTotal ?: 0.0) + (resQuantity ?: 0.0) - (resQuantityNotAvailable ?: 0.0)"/>
                 </if>
             </if>
+        </actions>
+    </service>
+
+    <service verb="get" noun="AvailableInventoryMulti">
+        <in-parameters>
+            <parameter name="productIds" type="Collection"><description>At least one product required, can get from category</description></parameter>
+            <parameter name="productCategoryIds" type="Collection"/>
+            <parameter name="expandVariants" type="Boolean" default="false"/>
+            <parameter name="productStoreId"><description>If specified get facilities and vendor from store, must specify products or categories separately</description></parameter>
+            <parameter name="facilityIds" type="Collection"><description>At least one facility required, can get from store</description></parameter>
+            <parameter name="vendorPartyId"><description>Defaults to ProductStore.organizationPartyId; used for ownerPartyId filter and AssetPool lookup by Vendor</description></parameter>
+            <parameter name="customerPartyId"><description>Used for AssetPool lookup by Customer</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="availableByProductId" type="Map">
+                <description>Key is productId, value is BigDecimal for available to promise total quantity</description></parameter>
+        </out-parameters>
+        <actions>
+            <!-- compile set of productId values -->
+            <set field="productIdSet" from="new HashSet()"/>
+            <if condition="productIds"><script>productIdSet.addAll(productIds)</script></if>
+            <if condition="productCategoryIds">
+                <entity-find entity-name="mantle.product.category.ProductCategoryMember" list="pcmList" distinct="true">
+                    <date-filter/>
+                    <econdition field-name="productCategoryId" operator="in" from="productCategoryIds"/>
+                    <select-field field-name="productId"/>
+                </entity-find>
+                <if condition="pcmList"><script>productIdSet.addAll(pcmList*.productId)</script></if>
+            </if>
+            <if condition="expandVariants">
+                <set field="newProductIdSet" from="new HashSet()"/>
+                <!-- go through each product, get cached product record and if productTypeEnumId = PtVirtual look up variants -->
+                <iterate list="productIdSet" entry="productId">
+                    <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
+                    <if condition="product.productTypeEnumId == 'PtVirtual'"><then>
+                        <entity-find entity-name="mantle.product.ProductAssoc" list="variantAssocList" cache="true">
+                            <date-filter/>
+                            <econdition field-name="productId"/>
+                            <econdition field-name="productAssocTypeEnumId" value="PatVariant"/>
+                        </entity-find>
+                        <if condition="variantAssocList">
+                            <script>newProductIdSet.addAll(variantAssocList*.toProductId)</script></if>
+                    </then><else>
+                        <script>newProductIdSet.add(productId)</script>
+                    </else></if>
+                </iterate>
+                <set field="productIdSet" from="newProductIdSet"/>
+            </if>
+
+            <!-- compile set of facilityId values -->
+            <set field="facilityIdSet" from="new HashSet()"/>
+            <if condition="facilityIds"><script>facilityIdSet.addAll(facilityIds)</script></if>
+
+            <!-- ProductStore based values -->
+            <if condition="productStoreId">
+                <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore"/>
+                <if condition="!vendorPartyId"><set field="vendorPartyId" from="productStore?.organizationPartyId"/></if>
+                <!-- get facilities from store if none specified in parameter -->
+                <if condition="facilityIdSet.size() == 0">
+                    <if condition="productStore.inventoryFacilityId">
+                        <script>facilityIdSet.add(productStore.inventoryFacilityId)</script></if>
+                    <entity-find entity-name="mantle.product.store.ProductStoreFacility" list="productStoreFacilityList">
+                        <date-filter/><econdition field-name="productStoreId"/></entity-find>
+                    <if condition="productStoreFacilityList">
+                        <script>facilityIdSet.addAll(productStoreFacilityList*.facilityId)</script></if>
+                </if>
+            </if>
+
+            <!-- compile set of ownerPartyId values -->
+            <set field="ownerPartyIdSet" from="new HashSet()"/>
+            <if condition="vendorPartyId">
+                <script>ownerPartyIdSet.add(vendorPartyId)</script>
+                <!-- look for parent org(s) if any, include assets from parent org too -->
+                <entity-find entity-name="mantle.party.PartyRelationship" list="parentRelList" cache="true">
+                    <date-filter/>
+                    <econdition field-name="relationshipTypeEnumId" value="PrtOrgRollup"/>
+                    <econdition field-name="fromPartyId" from="vendorPartyId"/>
+                    <econdition field-name="toPartyId" operator="is-not-null"/>
+                </entity-find>
+                <script>if (parentRelList) ownerPartyIdSet.addAll(parentRelList*.toPartyId)</script>
+            </if>
+
+            <!-- compile set of assetPoolId values -->
+            <service-call name="mantle.product.AssetServices.get#AssetPools" out-map="poolsOut"
+                    in-map="[productStoreId:productStoreId, vendorPartyId:vendorPartyId, customerPartyId:customerPartyId]"/>
+            <set field="assetPoolIdSet" from="poolsOut.assetPoolIdSet"/>
+
+            <!-- prep the output Map -->
+            <set field="availableByProductId" from="[:]"/>
+            <!-- to support assetAllowOtherOwner may need to do query per Facility... -->
+            <iterate list="facilityIdSet" entry="facilityId">
+                <entity-find-one entity-name="mantle.facility.Facility" value-field="facility" cache="true"/>
+
+                <entity-find entity-name="mantle.product.asset.AssetSummaryView" list="assetSummaryList">
+                    <econdition field-name="facilityId"/>
+                    <econdition field-name="productId" operator="in" from="productIdSet"/>
+                    <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIdSet"
+                            ignore="facility?.assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
+                    <econdition field-name="assetPoolId" operator="in" from="assetPoolIdSet" ignore="!assetPoolIdSet" or-null="true"/>
+                    <econdition field-name="assetPoolId" operator="is-null" ignore="assetPoolIdSet"/>
+                    <econdition field-name="availableToPromiseTotal" operator="not-equals" from="0.0"/>
+                    <econdition field-name="statusId" value="AstAvailable"/>
+                    <select-field field-name="productId,availableToPromiseTotal"/>
+                    <order-by field-name="productId"/>
+                </entity-find>
+                <script><![CDATA[
+                    for (int i = 0; i < assetSummaryList.size(); i++) {
+                        Map assetSummary = (Map) assetSummaryList.get(i)
+                        addToBigDecimalInMap(assetSummary.productId, assetSummary.availableToPromiseTotal, availableByProductId)
+                    }
+                    ]]></script>
+            </iterate>
         </actions>
     </service>
 
@@ -266,119 +402,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="customerPoolPartyList">
                     <script>assetPoolIdSet.addAll(customerPoolPartyList*.assetPoolId)</script></if>
             </if>
-        </actions>
-    </service>
-
-    <service verb="get" noun="AvailableInventory">
-        <in-parameters>
-            <parameter name="productIds" type="Collection"><description>At least one product required, can get from category</description></parameter>
-            <parameter name="productCategoryIds" type="Collection"/>
-            <parameter name="expandVariants" type="Boolean" default="false"/>
-            <parameter name="productStoreId"><description>If specified get facilities and vendor from store, must specify products or categories seperately</description></parameter>
-            <parameter name="facilityIds" type="Collection"><description>At least one facility required, can get from store</description></parameter>
-            <parameter name="vendorPartyId"><description>Defaults to ProductStore.organizationPartyId; used for ownerPartyId filter and AssetPool lookup by Vendor</description></parameter>
-            <parameter name="customerPartyId"><description>Used for AssetPool lookup by Customer</description></parameter>
-        </in-parameters>
-        <out-parameters>
-            <parameter name="availableByProductId" type="Map">
-                <description>Key is productId, value is BigDecimal for available to promise total quantity</description></parameter>
-        </out-parameters>
-        <actions>
-            <!-- compile set of productId values -->
-            <set field="productIdSet" from="new HashSet()"/>
-            <if condition="productIds"><script>productIdSet.addAll(productIds)</script></if>
-            <if condition="productCategoryIds">
-                <entity-find entity-name="mantle.product.category.ProductCategoryMember" list="pcmList" distinct="true">
-                    <date-filter/>
-                    <econdition field-name="productCategoryId" operator="in" from="productCategoryIds"/>
-                    <select-field field-name="productId"/>
-                </entity-find>
-                <if condition="pcmList"><script>productIdSet.addAll(pcmList*.productId)</script></if>
-            </if>
-            <if condition="expandVariants">
-                <set field="newProductIdSet" from="new HashSet()"/>
-                <!-- go through each product, get cached product record and if productTypeEnumId = PtVirtual look up variants -->
-                <iterate list="productIdSet" entry="productId">
-                    <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
-                    <if condition="product.productTypeEnumId == 'PtVirtual'"><then>
-                        <entity-find entity-name="mantle.product.ProductAssoc" list="variantAssocList" cache="true">
-                            <date-filter/>
-                            <econdition field-name="productId"/>
-                            <econdition field-name="productAssocTypeEnumId" value="PatVariant"/>
-                        </entity-find>
-                        <if condition="variantAssocList">
-                            <script>newProductIdSet.addAll(variantAssocList*.toProductId)</script></if>
-                    </then><else>
-                        <script>newProductIdSet.add(productId)</script>
-                    </else></if>
-                </iterate>
-                <set field="productIdSet" from="newProductIdSet"/>
-            </if>
-
-            <!-- compile set of facilityId values -->
-            <set field="facilityIdSet" from="new HashSet()"/>
-            <if condition="facilityIds"><script>facilityIdSet.addAll(facilityIds)</script></if>
-
-            <!-- ProductStore based values -->
-            <if condition="productStoreId">
-                <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore"/>
-                <if condition="!vendorPartyId"><set field="vendorPartyId" from="productStore?.organizationPartyId"/></if>
-                <!-- get facilities from store if none specified in parameter -->
-                <if condition="!facilityIdSet">
-                    <if condition="productStore.inventoryFacilityId">
-                        <script>facilityIdSet.add(productStore.inventoryFacilityId)</script></if>
-                    <entity-find entity-name="mantle.product.store.ProductStoreFacility" list="productStoreFacilityList">
-                        <date-filter/><econdition field-name="productStoreId"/></entity-find>
-                    <if condition="productStoreFacilityList">
-                        <script>facilityIdSet.addAll(productStoreFacilityList*.facilityId)</script></if>
-                </if>
-            </if>
-
-            <!-- compile set of ownerPartyId values -->
-            <set field="ownerPartyIdSet" from="new HashSet()"/>
-            <if condition="vendorPartyId">
-                <script>ownerPartyIdSet.add(vendorPartyId)</script>
-                <!-- look for parent org(s) if any, include assets from parent org too -->
-                <entity-find entity-name="mantle.party.PartyRelationship" list="parentRelList" cache="true">
-                    <date-filter/>
-                    <econdition field-name="relationshipTypeEnumId" value="PrtOrgRollup"/>
-                    <econdition field-name="fromPartyId" from="vendorPartyId"/>
-                    <econdition field-name="toPartyId" operator="is-not-null"/>
-                </entity-find>
-                <script>if (parentRelList) ownerPartyIdSet.addAll(parentRelList*.toPartyId)</script>
-            </if>
-
-            <!-- compile set of assetPoolId values -->
-            <service-call name="mantle.product.AssetServices.get#AssetPools" out-map="poolsOut"
-                    in-map="[productStoreId:productStoreId, vendorPartyId:vendorPartyId, customerPartyId:customerPartyId]"/>
-            <set field="assetPoolIdSet" from="poolsOut.assetPoolIdSet"/>
-
-            <!-- prep the output Map -->
-            <set field="availableByProductId" from="[:]"/>
-            <!-- to support assetAllowOtherOwner may need to do query per Facility... -->
-            <iterate list="facilityIdSet" entry="facilityId">
-                <entity-find-one entity-name="mantle.facility.Facility" value-field="facility" cache="true"/>
-
-                <entity-find entity-name="mantle.product.asset.AssetSummaryView" list="assetSummaryList">
-                    <econdition field-name="facilityId"/>
-                    <econdition field-name="productId" operator="in" from="productIdSet"/>
-                    <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIdSet"
-                            ignore="facility?.assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
-                    <econdition field-name="assetPoolId" operator="in" from="assetPoolIdSet" ignore="!assetPoolIdSet" or-null="true"/>
-                    <econdition field-name="assetPoolId" operator="is-null" ignore="assetPoolIdSet"/>
-                    <econdition field-name="availableToPromiseTotal" operator="not-equals" from="0.0"/>
-                    <econdition field-name="statusId" value="AstAvailable"/>
-                    <select-field field-name="productId,availableToPromiseTotal"/>
-                    <order-by field-name="productId"/>
-                </entity-find>
-                <script><![CDATA[
-                    for (int i = 0; i < assetSummaryList.size(); i++) {
-                        Map assetSummary = (Map) assetSummaryList.get(i)
-                        addToBigDecimalInMap(assetSummary.productId, assetSummary.availableToPromiseTotal, availableByProductId)
-                    }
-                ]]></script>
-            </iterate>
-
         </actions>
     </service>
 
