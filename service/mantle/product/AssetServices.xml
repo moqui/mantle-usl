@@ -287,6 +287,7 @@ along with this software (see the LICENSE.md file). If not, see
             <auto-parameters entity-name="mantle.product.asset.Asset" include="nonpk">
                 <exclude field-name="productId"/><exclude field-name="hasQuantity"/>
                 <exclude field-name="quantityOnHandTotal"/><exclude field-name="availableToPromiseTotal"/>
+                <!-- NOTE: use update#AssetAcquireCost to change acquireCost and ownerPartyId -->
                 <exclude field-name="acquireCost"/><exclude field-name="ownerPartyId"/>
                 <!-- NOTE: use move#Asset to change facilityId, locationSeqId, assetPoolId (much more complex logic there) -->
                 <exclude field-name="facilityId"/><exclude field-name="locationSeqId"/>
@@ -308,11 +309,37 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true"/>
             <set field="asset.acquireCost" from="acquireCost"/>
-            <set field="asset.ownerPartyId" from="ownerPartyId"/>
+            <if condition="ownerPartyId"><set field="asset.ownerPartyId" from="ownerPartyId"/></if>
             <entity-update value-field="asset"/>
 
             <service-call name="mantle.ledger.AssetAutoPostServices.repost#Asset" in-map="[assetId:assetId]"/>
             <!-- TODO: consider re-evaluating all reservations if ownerPartyId changes, may need to bump or inventory may be available for not available reservations -->
+        </actions>
+    </service>
+    <service verb="update" noun="ProductAcquireCost" transaction-timeout="600">
+        <description>For given productId and optional facilityId, receivedDate_from, and receivedDate_thru: update (or set)
+            all Asset.acquireCost and re-post all GL transactions for receipt, issuance, and physical inventory changes.</description>
+        <in-parameters>
+            <parameter name="productId" required="true"/>
+            <parameter name="facilityId"/>
+            <parameter name="receivedDate_from" type="Timestamp"/>
+            <parameter name="receivedDate_thru" type="Timestamp"/>
+            <parameter name="acquireCost" type="BigDecimal" required="true"/>
+            <parameter name="ownerPartyId"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
+                <econdition field-name="productId"/>
+                <econdition field-name="facilityId" ignore-if-empty="true"/>
+                <econdition field-name="receivedDate" operator="greater-equals" from="receivedDate_from" ignore-if-empty="true"/>
+                <econdition field-name="receivedDate" operator="less-equals" from="receivedDate_thru" ignore-if-empty="true"/>
+                <select-field field-name="assetId"/>
+            </entity-find>
+            <iterate list="assetList" entry="asset">
+                <service-call name="mantle.product.AssetServices.update#AssetAcquireCost"
+                        in-map="[assetId:asset.assetId, acquireCost:acquireCost, ownerPartyId:ownerPartyId]"/>
+            </iterate>
+            <message>Updated Acquire Cost to ${acquireCost?.toPlainString()} on ${assetList.size()} Asset records for Product ${productId}, Facility ${facilityId?:'*'}, Received From ${receivedDate_from?:'*'} Thru ${receivedDate_thru?:'*'}</message>
         </actions>
     </service>
 
@@ -332,8 +359,8 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- View queries won't work with transaction cache (for data updated within the tx), so if active use different approach -->
             <if condition="ec.transaction.isTransactionCacheActive()"><then>
                 <!-- incremental update -->
-                <set field="asset.availableToPromiseTotal" from="(asset.availableToPromiseTotal ?: 0) + (availableToPromiseDiff ?: 0)"/>
-                <set field="asset.quantityOnHandTotal" from="(asset.quantityOnHandTotal ?: 0) + (quantityOnHandDiff ?: 0)"/>
+                <set field="asset.availableToPromiseTotal" from="(asset.availableToPromiseTotal ?: 0.0) + (availableToPromiseDiff ?: 0.0)"/>
+                <set field="asset.quantityOnHandTotal" from="(asset.quantityOnHandTotal ?: 0.0) + (quantityOnHandDiff ?: 0.0)"/>
             </then><else>
                 <!-- sum all records, update with new totals -->
                 <entity-find entity-name="mantle.product.asset.AssetDetailSummary" list="assetDetailSummaryList">
@@ -342,11 +369,11 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
                 <if condition="assetDetailSummaryList.size() &gt; 0"><then>
                     <set field="assetDetailSummary" from="assetDetailSummaryList[0]"/>
-                    <set field="asset.availableToPromiseTotal" from="assetDetailSummary.availableToPromiseTotal ?: 0"/>
-                    <set field="asset.quantityOnHandTotal" from="assetDetailSummary.quantityOnHandTotal ?: 0"/>
+                    <set field="asset.availableToPromiseTotal" from="assetDetailSummary.availableToPromiseTotal ?: 0.0"/>
+                    <set field="asset.quantityOnHandTotal" from="assetDetailSummary.quantityOnHandTotal ?: 0.0"/>
                 </then><else>
-                    <set field="asset.availableToPromiseTotal" from="(asset.availableToPromiseTotal ?: 0) + (availableToPromiseDiff ?: 0)"/>
-                    <set field="asset.quantityOnHandTotal" from="(asset.quantityOnHandTotal ?: 0) + (quantityOnHandDiff ?: 0)"/>
+                    <set field="asset.availableToPromiseTotal" from="(asset.availableToPromiseTotal ?: 0.0) + (availableToPromiseDiff ?: 0.0)"/>
+                    <set field="asset.quantityOnHandTotal" from="(asset.quantityOnHandTotal ?: 0.0) + (quantityOnHandDiff ?: 0.0)"/>
                 </else></if>
             </else></if>
 
@@ -362,6 +389,54 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- <set field="message" from="'========== end update#AssetFromDetail ' + assetId + ': ' + availableToPromiseDiff + '/' + quantityOnHandDiff + ' :: ' + asset.availableToPromiseTotal + '/' + asset.quantityOnHandTotal"/><log message="${message}"/> -->
+        </actions>
+    </service>
+    <service verb="recalculate" noun="AllAssetTotals" transaction-timeout="1800">
+        <description>Recalculate availableToPromiseTotal and quantityOnHandTotal from AssetDetail records, optionally constrained by parameters</description>
+        <in-parameters>
+            <parameter name="facilityId"/>
+            <parameter name="productId"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
+                <econdition field-name="hasQuantity" value="Y"/>
+                <econdition field-name="facilityId" ignore-if-empty="true"/>
+                <econdition field-name="productId" ignore-if-empty="true"/>
+                <select-field field-name="assetId,productId,facilityId,availableToPromiseTotal,quantityOnHandTotal"/>
+            </entity-find>
+
+            <set field="recordsChecked" from="assetList.size()"/>
+            <set field="recordsUpdated" from="0"/>
+            <message>Checking ${recordsChecked} Asset record totals for Product ${productId?:'*'} Facility ${facilityId?:'*'}</message>
+
+            <iterate list="assetList" entry="asset">
+                <entity-find entity-name="mantle.product.asset.AssetDetailSummary" list="assetDetailSummaryList">
+                    <econdition field-name="assetId" from="asset.assetId"/>
+                    <select-field field-name="availableToPromiseTotal,quantityOnHandTotal"/>
+                </entity-find>
+                <if condition="assetDetailSummaryList.size() &gt; 0"><then>
+                    <set field="assetDetailSummary" from="assetDetailSummaryList[0]"/>
+                    <set field="calcAtp" from="assetDetailSummary.availableToPromiseTotal ?: 0.0"/>
+                    <set field="calcQoh" from="assetDetailSummary.quantityOnHandTotal ?: 0.0"/>
+                    <if condition="asset.availableToPromiseTotal != calcAtp || asset.quantityOnHandTotal != calcQoh">
+                        <log message="Asset ${asset.assetId} Product ${asset.productId} Facility ${asset.facilityId} has incorrect totals: ATP is ${asset.availableToPromiseTotal}, should be ${calcAtp}; QOH is ${asset.quantityOnHandTotal}, should be ${calcQoh}; updating"/>
+                        <set field="recordsUpdated" from="recordsUpdated + 1"/>
+                        <set field="asset.availableToPromiseTotal" from="calcAtp"/>
+                        <set field="asset.quantityOnHandTotal" from="calcQoh"/>
+                        <entity-update value-field="asset"/>
+                    </if>
+                </then><else>
+                    <if condition="asset.availableToPromiseTotal != 0.0 || asset.quantityOnHandTotal != 0.0">
+                        <log message="Asset ${asset.assetId} Product ${asset.productId} Facility ${asset.facilityId} has no Detail records and non-zero totals: ATP is ${asset.availableToPromiseTotal}; QOH is ${asset.quantityOnHandTotal}; setting both to zero"/>
+                        <set field="recordsUpdated" from="recordsUpdated + 1"/>
+                        <set field="asset.availableToPromiseTotal" from="0.0"/>
+                        <set field="asset.quantityOnHandTotal" from="0.0"/>
+                        <entity-update value-field="asset"/>
+                    </if>
+                </else></if>
+            </iterate>
+
+            <message>Checking ${recordsChecked} Asset record totals for Product ${productId?:'*'} Facility ${facilityId?:'*'}, updated ${recordsUpdated} with incorrect totals</message>
         </actions>
     </service>
 
