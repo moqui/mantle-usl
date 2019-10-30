@@ -99,7 +99,7 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="create" noun="ShipmentItem">
-        <description>Create a ShipmentItem and a single ShipmentItemSource with quantityNotHandled defaulting to the full quantity.</description>
+        <description>Create a ShipmentItem (or add quantity if exists for productId) and create a single ShipmentItemSource with quantityNotHandled defaulting to the full quantity.</description>
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
             <parameter name="productId" required="true"/>
@@ -110,7 +110,16 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="shipmentItemSourceId"/></out-parameters>
         <actions>
-            <service-call name="create#mantle.shipment.ShipmentItem" in-map="context" out-map="context"/>
+            <entity-find-one entity-name="mantle.shipment.ShipmentItem" value-field="shipmentItem">
+                <field-map field-name="shipmentId"/><field-map field-name="productId"/></entity-find-one>
+            <if condition="shipmentItem != null"><then>
+                <set field="shipmentItem.quantity" from="shipmentItem.quantity + quantity"/>
+                <entity-update value-field="shipmentItem"/>
+            </then><else>
+                <service-call name="create#mantle.shipment.ShipmentItem"
+                        in-map="[shipmentId:shipmentId, productId:productId, quantity:quantity]"/>
+            </else></if>
+
             <set field="quantityNotHandled" from="quantityNotHandled != null ? quantityNotHandled : quantity"/>
             <service-call name="create#mantle.shipment.ShipmentItemSource" in-map="context" out-map="context"/>
         </actions>
@@ -793,6 +802,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="assetId"><description>Specify to pack a certain asset, may or may not be reserved. Packing
                 a specific quantity of an asset assumes physical presence of the asset so other reservations are moved
                 as needed.</description></parameter>
+            <parameter name="forceIssueOther" type="Boolean" default="false"/>
+            <parameter name="forceAddToPackage" type="Boolean" default="true"><description>Add to new package if no shipmentPackageSeqId specified</description></parameter>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.shipment.ShipmentItemSource" value-field="shipmentItemSource"/>
@@ -832,7 +843,6 @@ along with this software (see the LICENSE.md file). If not, see
                     <return error="true" message="Quantity specified (${quantity}) is greater than asset [${assetId}] quantity on hand (${asset.quantityOnHandTotal}), not packing"/></if>
 
                 <!-- handle reservations, moving other reservations as needed to handle current quantity assumed to be physically present -->
-                <!-- call displace#AssetReservations -->
                 <service-call name="mantle.product.AssetServices.displace#AssetReservations"
                         in-map="[assetId:assetId, orderId:shipmentItemSource.orderId,
                                 orderItemSeqId:shipmentItemSource.orderItemSeqId, quantity:quantity]"/>
@@ -911,7 +921,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.product.AssetServices.issue#Asset"
                         in-map="[shipmentId:shipmentItemSource.shipmentId, shipmentItemSourceId:shipmentItemSourceId,
                             quantity:quantityToIssue, issuedDate:packDate, assetId:assetId,
-                            orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId]"/>
+                            orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId,
+                            invoiceId:shipmentItemSource.invoiceId, invoiceItemSeqId:shipmentItemSource.invoiceItemSeqId]"/>
+            </if>
+
+            <!-- if quantityRemaining (no reservations or specified assetId) use logic similar to reserve to find Assets to pack/issue -->
+            <if condition="quantityRemaining">
+                <service-call name="mantle.product.AssetServices.issue#AnyAssetForShipmentItemSource" out-map="issueAnyOut"
+                        in-map="[shipmentItemSourceId:shipmentItemSourceId, quantity:quantityRemaining, issuedDate:packDate, forceIssueOther:forceIssueOther]"/>
+                <set field="quantityRemaining" from="issueAnyOut.quantityRemaining"/>
             </if>
 
             <!-- quantityRemaining? something didn't work, wasn't able to get all so return an error and roll back -->
@@ -920,9 +938,11 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- add to specified package, or in new package if none specified -->
-            <service-call name="mantle.shipment.ShipmentServices.add#ItemToPackage"
-                    in-map="[shipmentId:shipmentItemSource.shipmentId, productId:shipmentItemSource.productId,
-                        shipmentPackageSeqId:shipmentPackageSeqId, quantity:quantity]"/>
+            <if condition="forceAddToPackage || shipmentPackageSeqId">
+                <service-call name="mantle.shipment.ShipmentServices.add#ItemToPackage"
+                        in-map="[shipmentId:shipmentItemSource.shipmentId, productId:shipmentItemSource.productId,
+                            shipmentPackageSeqId:shipmentPackageSeqId, quantity:quantity]"/>
+            </if>
 
             <!-- update quantityNotHandled to get ready for the next pack call -->
             <set field="shipmentItemSource.quantityNotHandled" from="shipmentItemSource.quantityNotHandled - quantity"/>
