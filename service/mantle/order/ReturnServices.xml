@@ -353,6 +353,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="returnQuantity" type="BigDecimal" required="true"/>
             <parameter name="returnReasonEnumId" required="true"/>
             <parameter name="returnResponseEnumId" required="true"/>
+            <parameter name="responseImmediate" default-value="N"/>
         </in-parameters>
         <out-parameters><parameter name="returnItemSeqId"/></out-parameters>
         <actions>
@@ -427,7 +428,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="childRetAmount != 0.0">
                     <service-call name="create#mantle.order.return.ReturnItem" in-map="[returnId:returnId, parentItemSeqId:returnItemSeqId,
                             statusId:statusId, returnReasonEnumId:returnReasonEnumId, returnResponseEnumId:returnResponseEnumId,
-                            orderId:childOrderItem.orderId, orderItemSeqId:childOrderItem.orderItemSeqId,
+                            responseImmediate:responseImmediate, orderId:childOrderItem.orderId, orderItemSeqId:childOrderItem.orderItemSeqId,
                             itemTypeEnumId:childOrderItem.itemTypeEnumId, description:childOrderItem.itemDescription,
                             returnQuantity:1.0, returnPrice:childRetAmount]"/>
                 </if>
@@ -470,8 +471,27 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="returnItemList" entry="otherItem">
                 <if condition="!(otherItem.statusId in itemStatusIds)">
                     <set field="allMatch" from="false"/></if></iterate>
-            <if condition="allMatch"><service-call name="update#mantle.order.return.ReturnHeader" out-map="context"
-                    in-map="[returnId:returnId, statusId:statusId]"/></if>
+            <if condition="allMatch">
+                <entity-find-one entity-name="mantle.order.return.ReturnHeader" value-field="returnHeader"/>
+                <if condition="returnHeader.statusId == statusId"><return/></if>
+                <entity-find-one entity-name="moqui.basic.StatusItem" value-field="curStatusItem">
+                    <field-map field-name="statusId" from="returnHeader.statusId"/></entity-find-one>
+                <entity-find-one entity-name="moqui.basic.StatusItem" value-field="statusItem">
+                    <field-map field-name="statusId"/></entity-find-one>
+                <if condition="statusItem.sequenceNum &lt; curStatusItem.sequenceNum"><return/></if>
+
+                <entity-find entity-name="moqui.basic.StatusFlowTransition" list="transitionList">
+                    <econdition field-name="statusId" from="returnHeader.statusId"/>
+                    <econdition field-name="toStatusId" from="statusId"/>
+                </entity-find>
+                <if condition="transitionList.size() == 0">
+                    <log level="warn" message="In checkUpdate#ReturnHeaderStatus return ${returnId} tried to change from status ${returnHeader.statusId} to ${statusId} which has no transition, not updating ReturnHeader.statusId"/>
+                    <return/>
+                </if>
+
+                <service-call name="update#mantle.order.return.ReturnHeader" out-map="context"
+                        in-map="[returnId:returnId, statusId:statusId]"/>
+            </if>
         </actions>
     </service>
 
@@ -1001,6 +1021,39 @@ along with this software (see the LICENSE.md file). If not, see
                     in-map="[returnId:returnId, returnItemSeqId:returnItemSeqId, statusId:statusId]"/>
         </actions>
     </service>
+
+    <service verb="update" noun="ReturnItem">
+        <in-parameters>
+            <parameter name="returnId" required="true"/>
+            <parameter name="returnItemSeqId" required="true"/>
+            <auto-parameters entity-name="mantle.order.return.ReturnItem" include="nonpk">
+                <!-- exclude automatically maintained fields -->
+                <exclude field-name="statusId"/>
+                <exclude field-name="responseDate"/><exclude field-name="responseAmount"/>
+                <exclude field-name="replacementOrderId"/><exclude field-name="finAccountTransId"/>
+                <exclude field-name="refundPaymentId"/><exclude field-name="invoiceId"/></auto-parameters>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.return.ReturnItem" value-field="returnItem"/>
+            <!-- TODO further restrict fields updatable based on statusId (itemChangeable), responseAmount, etc; like restrictions on EditReturnItems screen
+            <set field="itemChangeable" from="returnItem.statusId in ['ReturnCreated', 'ReturnRequested', 'ReturnApproved']"/>
+            -->
+
+            <!-- if responseImmediate set also set on child items -->
+            <if condition="responseImmediate &amp;&amp; responseImmediate != returnItem.responseImmediate">
+                <entity-find entity-name="mantle.order.return.ReturnItem" list="childItemList">
+                    <econdition field-name="returnId"/>
+                    <econdition field-name="parentItemSeqId" from="returnItemSeqId"/>
+                </entity-find>
+                <iterate list="childItemList" entry="childItem">
+                    <service-call name="mantle.order.ReturnServices.update#ReturnItem"
+                            in-map="[returnId:returnId, returnItemSeqId:childItem.returnItemSeqId, responseImmediate:responseImmediate]"/>
+                </iterate>
+            </if>
+
+            <service-call name="update#mantle.order.return.ReturnItem" in-map="context"/>
+        </actions>
+    </service>
     <service verb="delete" noun="ReturnItem">
         <in-parameters>
             <parameter name="returnId" required="true"/>
@@ -1009,12 +1062,12 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.order.return.ReturnItem" value-field="returnItem"/>
             <if condition="returnItem == null"><return error="true" message="Return item ${returnId}:${returnItemSeqId} not found"/></if>
-            <if condition="!(returnItem.statusId in ['ReturnCreated', 'ReturnRequested'])">
-                <return error="true" message="Items may be deleted only when item is in Created and Requested statuses"/></if>
+            <if condition="!(returnItem.statusId in ['ReturnCreated', 'ReturnRequested', 'ReturnCancelled'])">
+                <return error="true" message="Items may be deleted only when item is in Created, Requested, and Cancelled statuses"/></if>
 
             <entity-find-one entity-name="mantle.order.return.ReturnHeader" value-field="returnHeader"/>
-            <if condition="!(returnHeader.statusId in ['ReturnCreated', 'ReturnRequested'])">
-                <return error="true" message="Items may be deleted only when return is in Created and Requested statuses"/></if>
+            <if condition="!(returnHeader.statusId in ['ReturnCreated', 'ReturnRequested', 'ReturnCancelled'])">
+                <return error="true" message="Items may be deleted only when return is in Created, Requested, and Cancelled statuses"/></if>
 
             <!-- delete child items first -->
             <entity-find entity-name="mantle.order.return.ReturnItem" list="childItemList">
