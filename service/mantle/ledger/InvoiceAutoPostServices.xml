@@ -347,9 +347,10 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
-            <if condition="invoice == null"><return error="true" message="Could not find Invoice with ID [${invoiceId}]"/></if>
+            <if condition="invoice == null"><return error="true" message="Could not find Invoice with ID ${invoiceId}"/></if>
             <entity-find-one entity-name="mantle.account.invoice.InvoiceItem" value-field="invoiceItem"/>
-            <if condition="invoiceItem == null"><return error="true" message="Could not find Invoice Item with ID [${invoiceId}:${invoiceItemSeqId}]"/></if>
+            <if condition="invoiceItem == null"><return error="true" message="Could not find Invoice Item with ID ${invoiceId}:${invoiceItemSeqId}"/></if>
+            <if condition="invoiceItem.isAdjustment != 'Y'"><return error="true" message="Invoice Item with ID ${invoiceId}:${invoiceItemSeqId} is not an Adjustment item, cannot post separately to GL"/></if>
 
             <!-- is there a OrgInternal PartyRole for from/to parties, and PartyAcctgPreference for the from/to parties or parent orgs of them? -->
             <entity-find-one entity-name="mantle.party.PartyRole" value-field="fromPartyRole">
@@ -691,6 +692,48 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.ledger.InvoiceAutoPostServices.post#Invoice" in-map="[invoiceId:invoiceId]"/>
         </actions>
     </service>
+    <service verb="repost" noun="InvoiceAdjustment">
+        <description>For use when Invoice Adjustment and its Accounting Transactions get out of whack. Delete existing and post a new one.</description>
+        <in-parameters>
+            <parameter name="invoiceId" required="true"/>
+            <parameter name="invoiceItemSeqId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice" for-update="true"/>
+            <if condition="invoice == null"><return error="true" message="Could not find Invoice with ID ${invoiceId}"/></if>
+            <if condition="invoice.statusId in ['InvoiceInProcess', 'InvoiceWriteOff', 'InvoiceIncoming', 'InvoiceReceived', 'InvoiceCancelled']">
+                <return error="true" message="Invoice ${invoiceId} cannot be posted in status ${invoice.statusId}"/></if>
+
+            <entity-find-one entity-name="mantle.account.invoice.InvoiceItem" value-field="invoiceItem"/>
+            <if condition="invoiceItem == null">
+                <return error="true" message="Could not find Invoice Item with ID ${invoiceId}:${invoiceItemSeqId}"/></if>
+            <if condition="invoiceItem.isAdjustment != 'Y'">
+                <return error="true" message="Invoice Item with ID ${invoiceId}:${invoiceItemSeqId} is not an Adjustment item, cannot post separately to GL"/></if>
+
+            <entity-find entity-name="mantle.ledger.transaction.AcctgTransAndEntry" list="existingTransList">
+                <econdition field-name="invoiceId"/>
+                <econdition field-name="invoiceItemSeqId"/>
+                <econdition field-name="acctgTransTypeEnumId" value="AttInvoiceAdjust"/>
+                <econdition field-name="reversedByAcctgTransId" from="null"/>
+                <econdition field-name="reverseOfAcctgTransId" from="null"/>
+            </entity-find>
+            <if condition="existingTransList"><then>
+                <!-- unpost and delete existing, put distinct IDs in a set to only do each once -->
+                <set field="acctgTransIdSet" from="new TreeSet(existingTransList*.acctgTransId)"/>
+                <iterate list="acctgTransIdSet" entry="acctgTransId">
+                    <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTransId]"/>
+                    <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTransId]"/>
+                </iterate>
+            </then><else>
+                <log level="warn" message="In repost#InvoiceAdjustment ${invoiceId}:${invoiceItemSeqId} no existing AcctgTrans records found"/>
+            </else></if>
+
+            <!-- now post the Invoice Adjustment again -->
+            <service-call name="mantle.ledger.InvoiceAutoPostServices.post#InvoiceAdjustment"
+                    in-map="[invoiceId:invoiceId, invoiceItemSeqId:invoiceItemSeqId]"/>
+        </actions>
+    </service>
+
     <service verb="repost" noun="AllInvoices" transaction-timeout="1800">
         <description>This is for testing and perhaps maintenance purposes only.
             Reposting all invoices will destroy any manual changes to the related accounting transactions.</description>
