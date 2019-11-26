@@ -404,24 +404,6 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <service verb="checkSet" noun="ShipmentDeliveredByPackages">
-        <in-parameters><parameter name="shipmentId"/></in-parameters>
-        <actions>
-            <!-- see if all packages are delivered, if so update Shipment status to ShipDelivered (if statusId in ShipPacked, ShipShipped) -->
-            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
-            <if condition="shipment.statusId in ['ShipPacked', 'ShipShipped']">
-                <entity-find entity-name="mantle.shipment.ShipmentPackageRouteSeg" list="checkSprsList">
-                    <econdition field-name="shipmentId"/></entity-find>
-                <set field="foundNotDelivered" from="false"/>
-                <iterate list="checkSprsList" entry="checkSprs"><if condition="checkSprs.trackingStatusEnumId != 'ShTsDelivered'">
-                    <set field="foundNotDelivered" from="true"/></if></iterate>
-                <if condition="checkSprsList &amp;&amp; !foundNotDelivered">
-                    <service-call name="update#mantle.shipment.Shipment" in-map="[shipmentId:shipment.shipmentId, statusId:'ShipDelivered']"/>
-                </if>
-            </if>
-        </actions>
-    </service>
-
     <!-- ============================================= -->
     <!-- ========== Order Shipment Services ========== -->
     <!-- ============================================= -->
@@ -1475,7 +1457,10 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="ship" noun="Shipment">
-        <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="actualStartDate" type="Timestamp"/>
+        </in-parameters>
         <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
             <service-call name="update#mantle.shipment.Shipment" in-map="[shipmentId:shipmentId, statusId:'ShipShipped']" out-map="context"/>
@@ -1483,16 +1468,20 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.shipment.ShipmentRouteSegment" list="shipmentRouteSegmentList">
                 <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
             <if condition="shipmentRouteSegmentList"><then>
+                <set field="firstRouteSegment" from="shipmentRouteSegmentList.get(0)"/>
                 <service-call name="update#mantle.shipment.ShipmentRouteSegment"
-                        in-map="[shipmentId:shipmentId, shipmentRouteSegmentSeqId:shipmentRouteSegmentList[0].shipmentRouteSegmentSeqId,
-                             actualStartDate:shipmentRouteSegmentList[0].actualStartDate?:ec.user.nowTimestamp]"/>
+                        in-map="[shipmentId:shipmentId, shipmentRouteSegmentSeqId:firstRouteSegment.shipmentRouteSegmentSeqId,
+                             actualStartDate:(actualStartDate ?: firstRouteSegment.actualStartDate ?: ec.user.nowTimestamp)]"/>
             </then><else>
                 <log level="warn" message="No ShipmentRouteSegment found for Shipment ${shipmentId}, not setting actualStartDate"/>
             </else></if>
         </actions>
     </service>
     <service verb="deliver" noun="Shipment">
-        <in-parameters><parameter name="shipmentId" required="true"/></in-parameters>
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="actualArrivalDate" type="Timestamp"/>
+        </in-parameters>
         <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
@@ -1503,8 +1492,45 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.shipment.ShipmentServices.reduce#QuantitiesToHandled" in-map="[shipmentId:shipmentId]"/></if>
 
             <service-call name="update#mantle.shipment.Shipment" in-map="[shipmentId:shipmentId, statusId:'ShipDelivered']" out-map="context"/>
+
+            <entity-find entity-name="mantle.shipment.ShipmentRouteSegment" list="shipmentRouteSegmentList">
+                <econdition field-name="shipmentId"/><order-by field-name="shipmentRouteSegmentSeqId"/></entity-find>
+            <if condition="shipmentRouteSegmentList"><then>
+                <set field="lastRouteSegment" from="shipmentRouteSegmentList.get(shipmentRouteSegmentList.size()-1)"/>
+                <service-call name="update#mantle.shipment.ShipmentRouteSegment"
+                        in-map="[shipmentId:shipmentId, shipmentRouteSegmentSeqId:lastRouteSegment.shipmentRouteSegmentSeqId,
+                             actualArrivalDate:(actualArrivalDate ?: lastRouteSegment.actualArrivalDate ?: ec.user.nowTimestamp)]"/>
+            </then><else>
+                <log level="warn" message="No ShipmentRouteSegment found for Shipment ${shipmentId}, not setting actualStartDate"/>
+            </else></if>
         </actions>
     </service>
+    <service verb="checkSet" noun="ShipmentDeliveredByPackages">
+        <in-parameters><parameter name="shipmentId"/></in-parameters>
+        <actions>
+            <!-- see if all packages are delivered, if so update Shipment status to ShipDelivered (if statusId in ShipPacked, ShipShipped) -->
+            <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+            <if condition="shipment.statusId in ['ShipPacked', 'ShipShipped']">
+                <entity-find entity-name="mantle.shipment.ShipmentPackageRouteSeg" list="checkSprsList">
+                    <econdition field-name="shipmentId"/></entity-find>
+                <set field="foundNotDelivered" from="false"/>
+                <set field="trackingStatusDate" from="null"/>
+                <iterate list="checkSprsList" entry="checkSprs">
+                    <if condition="checkSprs.trackingStatusEnumId == 'ShTsDelivered'"><then>
+                        <if condition="trackingStatusDate == null || trackingStatusDate &lt; checkSprs.trackingStatusDate">
+                            <set field="trackingStatusDate" from="checkSprs.trackingStatusDate"/></if>
+                    </then><else>
+                        <set field="foundNotDelivered" from="true"/>
+                    </else></if>
+                </iterate>
+                <if condition="checkSprsList &amp;&amp; !foundNotDelivered">
+                    <service-call name="mantle.shipment.ShipmentServices.deliver#Shipment"
+                            in-map="[shipmentId:shipment.shipmentId, actualArrivalDate:trackingStatusDate]"/>
+                </if>
+            </if>
+        </actions>
+    </service>
+
 
     <service verb="cancel" noun="Shipment">
         <!-- TODO: consider changing most of this to always run on through SECA on update#mantle.shipment.Shipment with statusId changed to ShipCancelled -->
