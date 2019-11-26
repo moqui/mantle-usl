@@ -285,8 +285,8 @@ class OrderProcureToPayBasicFlow extends Specification {
                     expectedEndOfLife:(eolDate), salvageValue:1500, depreciationTypeEnumId:'DtpStraightLine']).call()
         equip2AssetId = receiveEquip2Out.assetIdList[0]
 
-        ec.service.sync().name("update#mantle.shipment.Shipment")
-                .parameters([shipmentId:shipResult.shipmentId, statusId:'ShipDelivered']).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.deliver#Shipment")
+                .parameters([shipmentId:shipResult.shipmentId]).call()
 
 
         List<String> dataCheckErrors = []
