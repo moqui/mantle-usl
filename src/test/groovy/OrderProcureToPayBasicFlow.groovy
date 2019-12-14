@@ -864,8 +864,8 @@ class OrderProcureToPayBasicFlow extends Specification {
             <mantle.product.asset.Asset assetId="${equip1AssetId}" acquireCost="10000" salvageValue="1500" depreciation="283.33"/>
             <mantle.product.asset.AssetDepreciation assetId="${equip1AssetId}" timePeriodId="${currentFiscalMonthId}"
                     annualDepreciation="3400" yearsRemaining="5" isLastYearPeriod="N"
-                    monthlyDepreciation="283.33" acctgTransId="55413" usefulLifeYears="5"/>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55413" amountUomId="USD" isPosted="Y" postedDate="${effectiveTime}"
+                    monthlyDepreciation="283.33" acctgTransId="55411" usefulLifeYears="5"/>
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55411" amountUomId="USD" isPosted="Y" postedDate="${effectiveTime}"
                     acctgTransTypeEnumId="AttDepreciation" glFiscalTypeEnumId="GLFT_ACTUAL" organizationPartyId="ORG_ZIZI_RETAIL"
                     transactionDate="${deprOut.transactionDate.time}">
                 <mantle.ledger.transaction.AcctgTransEntry amount="283.33" productId="EQUIP_1" glAccountId="182000000"
@@ -877,8 +877,8 @@ class OrderProcureToPayBasicFlow extends Specification {
             </mantle.ledger.transaction.AcctgTrans>
 
             <mantle.product.asset.AssetDepreciation assetId="${equip2AssetId}" timePeriodId="${currentFiscalMonthId}" annualDepreciation="1700"
-                    yearsRemaining="5" isLastYearPeriod="N" monthlyDepreciation="141.67" usefulLifeYears="5" acctgTransId="55414"/>
-            <mantle.ledger.transaction.AcctgTrans acctgTransId="55414" postedDate="${effectiveTime}" amountUomId="USD"
+                    yearsRemaining="5" isLastYearPeriod="N" monthlyDepreciation="141.67" usefulLifeYears="5" acctgTransId="55412"/>
+            <mantle.ledger.transaction.AcctgTrans acctgTransId="55412" postedDate="${effectiveTime}" amountUomId="USD"
                     isPosted="Y" assetId="${equip2AssetId}" acctgTransTypeEnumId="AttDepreciation" glFiscalTypeEnumId="GLFT_ACTUAL"
                     transactionDate="${deprOut.transactionDate.time}" organizationPartyId="ORG_ZIZI_RETAIL">
                 <mantle.ledger.transaction.AcctgTransEntry amount="141.67" productId="EQUIP_1" glAccountId="182000000"
