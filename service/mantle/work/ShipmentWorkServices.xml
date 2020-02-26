@@ -131,6 +131,91 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="make" noun="ShipmentLoadOrderConditions">
+        <in-parameters>
+            <parameter name="excludeOnPicklist" type="Boolean" default="true"/>
+            <parameter name="inventoryCategoryId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="excludeOnPicklistCond" type="org.moqui.entity.EntityCondition"/>
+            <parameter name="inventoryCategoryCond" type="org.moqui.entity.EntityCondition"/>
+        </out-parameters>
+        <actions>
+            <if condition="excludeOnPicklist"><then>
+                <!-- scenarios for orders already on picklist via Shipment/SIS:
+                    * no related Shipment (shipWorkEffortId == null, SIS.quantity == null)
+                    a single order could have all 4 of these, since finding by reverse logic (looking for records to include) is tricky
+                    1. ignore: related Shipment NOT on picklist and active (shipWorkEffortId == null, SIS.quantity > 0.0)
+                    2. ignore: related Shipment NOT on picklist but cancelled (shipWorkEffortId == null, SIS.quantity == 0.0)
+                    3. ignore: related Shipment on picklist but cancelled (shipWorkEffortId != null, SIS.quantity == 0.0)
+                    4. exclude: related Shipment on picklist and active (shipWorkEffortId != null, SIS.quantity > 0.0)
+                -->
+                <set field="excludeOnPicklistCond" from="ec.entity.getConditionFactory().makeConditionWhere('''NOT EXISTS
+                    (SELECT SHMT.SHIPMENT_ID
+                     FROM SHIPMENT_ITEM_SOURCE SHIS INNER JOIN SHIPMENT SHMT ON SHIS.SHIPMENT_ID = SHMT.SHIPMENT_ID
+                     WHERE SHIS.ORDER_ID = OITM.ORDER_ID AND SHIS.ORDER_ITEM_SEQ_ID = OITM.ORDER_ITEM_SEQ_ID
+                        AND (SHMT.SHIP_WORK_EFFORT_ID IS NOT NULL OR SHMT.STATUS_ID NOT IN ('ShipInput', 'ShipScheduled', 'ShipRejected', 'ShipCancelled'))
+                        AND SHIS.QUANTITY > 0)''')"/>
+            </then><else>
+                <set field="excludeOnPicklistCond" from="ec.entity.getConditionFactory().makeConditionWhere('''NOT EXISTS
+                    (SELECT SHMT.SHIPMENT_ID
+                     FROM SHIPMENT_ITEM_SOURCE SHIS INNER JOIN SHIPMENT SHMT ON SHIS.SHIPMENT_ID = SHMT.SHIPMENT_ID
+                     WHERE SHIS.ORDER_ID = OITM.ORDER_ID AND SHIS.ORDER_ITEM_SEQ_ID = OITM.ORDER_ITEM_SEQ_ID
+                        AND SHMT.STATUS_ID NOT IN ('ShipInput', 'ShipScheduled', 'ShipRejected', 'ShipCancelled') AND SHIS.QUANTITY > 0)''')"/>
+            </else></if>
+
+            <if condition="inventoryCategoryId">
+                <!-- NOTE: because there are URL parameters and will be included in the SQL literally make sure each is a valid productCategoryId to prevent SQL injection, also don't allow single quote -->
+                <set field="categoryIdList" from="inventoryCategoryId.split(',') as List"/>
+                <set field="categoryIdSb" from="new StringBuilder()"/>
+                <iterate list="categoryIdList" entry="categoryId">
+                    <if condition="!categoryId"><continue/></if>
+                    <if condition="categoryId.contains('\'')"><return error="true" message="Invalid Category ID ${categoryId}"/></if>
+                    <entity-find-one entity-name="mantle.product.category.ProductCategory" value-field="productCategory">
+                        <field-map field-name="productCategoryId" from="categoryId"/></entity-find-one>
+                    <if condition="productCategory == null"><return error="true" message="Invalid Category ID ${categoryId}"/></if>
+
+                    <if condition="categoryIdSb.length() &gt; 0"><script>categoryIdSb.append(",")</script></if>
+                    <script>categoryIdSb.append("'").append((String) categoryId).append("'")</script>
+                </iterate>
+
+                <if condition="categoryIdSb.length() &gt; 0">
+                    <set field="nowString" from="ec.l10n.format(ec.user.nowTimestamp, 'yyyy-MM-dd HH:mm:ss', null, ec.entity.databaseTimeZone)"/>
+                    <!-- NOTE: this must join with OPRT and not OITM to avoid messing up pick location totals, etc -->
+                    <!-- include only OrderParts that:
+                        1. have at least one ItemProduct item with a Product in one of the selected inventory categories
+                        2. have no items with a Product in a different inventory category
+                        3. have no items with a Product in no inventory category (double sub-select, yeah!)
+                    -->
+                    <script><![CDATA[
+                    inventoryCategoryCond = ec.entity.getConditionFactory().makeConditionWhere("""EXISTS (
+                            SELECT OITM_PCM.ORDER_ITEM_SEQ_ID FROM ORDER_ITEM OITM_PCM
+                                INNER JOIN PRODUCT_CATEGORY_MEMBER PCM ON PCM.PRODUCT_ID = OITM_PCM.PRODUCT_ID
+                            WHERE OITM_PCM.ORDER_ID = OPRT.ORDER_ID AND OITM_PCM.ORDER_PART_SEQ_ID = OPRT.ORDER_PART_SEQ_ID AND OITM_PCM.ITEM_TYPE_ENUM_ID = 'ItemProduct'
+                                AND PCM.PRODUCT_CATEGORY_ID IN (${categoryIdSb.toString()})
+                                AND (PCM.FROM_DATE IS NULL OR PCM.FROM_DATE <= '${nowString}') AND (PCM.THRU_DATE IS NULL OR PCM.THRU_DATE >= '${nowString}')
+                        ) AND NOT EXISTS (
+                            SELECT OITM_PCM.ORDER_ITEM_SEQ_ID FROM ORDER_ITEM OITM_PCM
+                                INNER JOIN PRODUCT_CATEGORY_MEMBER PCM ON PCM.PRODUCT_ID = OITM_PCM.PRODUCT_ID
+                                INNER JOIN PRODUCT_CATEGORY PCAT ON PCM.PRODUCT_CATEGORY_ID = PCAT.PRODUCT_CATEGORY_ID AND PCAT.PRODUCT_CATEGORY_TYPE_ENUM_ID = 'PctInventoryGroup'
+                            WHERE OITM_PCM.ORDER_ID = OPRT.ORDER_ID AND OITM_PCM.ORDER_PART_SEQ_ID = OPRT.ORDER_PART_SEQ_ID AND OITM_PCM.ITEM_TYPE_ENUM_ID = 'ItemProduct'
+                                AND PCM.PRODUCT_CATEGORY_ID NOT IN (${categoryIdSb.toString()})
+                                AND (PCM.FROM_DATE IS NULL OR PCM.FROM_DATE <= '${nowString}') AND (PCM.THRU_DATE IS NULL OR PCM.THRU_DATE >= '${nowString}')
+                        ) AND NOT EXISTS (
+                            SELECT OITM_PCM.ORDER_ITEM_SEQ_ID FROM ORDER_ITEM OITM_PCM
+                            WHERE OITM_PCM.ORDER_ID = OPRT.ORDER_ID AND OITM_PCM.ORDER_PART_SEQ_ID = OPRT.ORDER_PART_SEQ_ID AND OITM_PCM.ITEM_TYPE_ENUM_ID = 'ItemProduct'
+                                AND NOT EXISTS (
+                                    SELECT PCM.PRODUCT_CATEGORY_ID FROM PRODUCT_CATEGORY_MEMBER PCM
+                                        INNER JOIN PRODUCT_CATEGORY PCAT ON PCM.PRODUCT_CATEGORY_ID = PCAT.PRODUCT_CATEGORY_ID AND PCAT.PRODUCT_CATEGORY_TYPE_ENUM_ID = 'PctInventoryGroup'
+                                    WHERE PCM.PRODUCT_ID = OITM_PCM.PRODUCT_ID AND
+                                        (PCM.FROM_DATE IS NULL OR PCM.FROM_DATE <= '${nowString}') AND (PCM.THRU_DATE IS NULL OR PCM.THRU_DATE >= '${nowString}')
+                                )
+                        )""")
+                ]]></script>
+                </if>
+            </if>
+        </actions>
+    </service>
     <service verb="create" noun="ShipmentLoadsForOrders" transaction-timeout="600">
         <in-parameters>
             <parameter name="facilityId" required="true"/>
@@ -159,22 +244,10 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
             <set field="itemTypeEnumIdList" from="productItemTypeEgms*.enumId"/>
 
-            <!-- NOTE: see similar entity-find in Picklist/AddOrder.xml in SimpleScreens -->
-            <!-- TODO: move CustomSqlLogic from AddOrder.xml to service and use here as well; needed for inventoryCategoryId -->
-            <if condition="excludeOnPicklist == 'false'"><then>
-                <set field="excludeOnPicklistCond" from="ec.entity.getConditionFactory().makeConditionWhere('''NOT EXISTS
-                    (SELECT SHMT.SHIPMENT_ID
-                     FROM SHIPMENT_ITEM_SOURCE SHIS INNER JOIN SHIPMENT SHMT ON SHIS.SHIPMENT_ID = SHMT.SHIPMENT_ID
-                     WHERE SHIS.ORDER_ID = OITM.ORDER_ID AND SHIS.ORDER_ITEM_SEQ_ID = OITM.ORDER_ITEM_SEQ_ID
-                        AND SHMT.STATUS_ID NOT IN ('ShipInput', 'ShipScheduled', 'ShipRejected', 'ShipCancelled') AND SHIS.QUANTITY > 0)''')"/>
-            </then><else>
-                <set field="excludeOnPicklistCond" from="ec.entity.getConditionFactory().makeConditionWhere('''NOT EXISTS
-                    (SELECT SHMT.SHIPMENT_ID
-                     FROM SHIPMENT_ITEM_SOURCE SHIS INNER JOIN SHIPMENT SHMT ON SHIS.SHIPMENT_ID = SHMT.SHIPMENT_ID
-                     WHERE SHIS.ORDER_ID = OITM.ORDER_ID AND SHIS.ORDER_ITEM_SEQ_ID = OITM.ORDER_ITEM_SEQ_ID
-                        AND (SHMT.SHIP_WORK_EFFORT_ID IS NOT NULL OR SHMT.STATUS_ID NOT IN ('ShipInput', 'ShipScheduled', 'ShipRejected', 'ShipCancelled'))
-                        AND SHIS.QUANTITY > 0)''')"/>
-            </else></if>
+            <service-call name="mantle.work.ShipmentWorkServices.make#ShipmentLoadOrderConditions" out-map="context"
+                    in-map="[excludeOnPicklist:excludeOnPicklist, inventoryCategoryId:inventoryCategoryId]"/>
+            <log message="excludeOnPicklistCond ${excludeOnPicklistCond} type ${excludeOnPicklistCond?.class?.name}"/>
+
             <entity-find entity-name="mantle.order.OrderPartFindView" list="orderPartList" limit="500">
                 <search-form-inputs default-order-by="${orderByField}"
                         paginate="false" input-fields-map="inputFieldsMap"
@@ -189,7 +262,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="quantity" operator="greater-equals" from="inputFieldsMap.findQuantity_from" ignore-if-empty="true"/>
                 <econdition field-name="quantity" operator="less-equals" from="inputFieldsMap.findQuantity_thru" ignore-if-empty="true"/>
                 <econdition field-name="locationTypeEnumId" value="FltPick"/>
+
                 <econdition-object field="excludeOnPicklistCond"/><!-- NOTE: ignored if null -->
+                <econdition-object field="inventoryCategoryCond"/>
 
                 <having-econditions>
                     <econdition field-name="quantityTotal" to-field-name="resQuantity" ignore="excludeNotPickLoc == 'false'"/>
