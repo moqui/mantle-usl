@@ -52,9 +52,13 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="allowBulkLocations" type="Boolean" default="true"/>
         </in-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort" for-update="true"/>
+            <if condition="workEffort.statusId in ['WeInProgress', 'WeComplete', 'WeClosed', 'WeCancelled']">
+                <return type="danger" message="Cannot add Shipment to Picklist ${workEffortId} in status ${workEffort.status?.description ?: workEffort.statusId}"/></if>
+
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
             <if condition="shipment.statusId in ['ShipShipped', 'ShipDelivered', 'ShipRejected','ShipCancelled']">
-                <return message="Shipment ${shipmentId} is in status ${shipment.status?.description ?: shipment.statusId}, not shipping" type="warning"/></if>
+                <return type="danger" message="Cannot add Shipment ${shipmentId} in status ${shipment.status?.description ?: shipment.statusId}"/></if>
 
             <!-- TODO if !allowBulkLocations return with warning if any inventory reserved against bulk location -->
 
@@ -98,9 +102,13 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shipmentIdList"/>
         </out-parameters>
         <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort" for-update="true"/>
+            <if condition="workEffort.statusId in ['WeInProgress', 'WeComplete', 'WeClosed', 'WeCancelled']">
+                <return type="danger" message="Cannot add Order to Picklist ${workEffortId} in status ${workEffort.status?.description ?: workEffort.statusId}"/></if>
+
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
             <if condition="orderPart.statusId != 'OrderApproved'">
-                <return message="Order ${orderId} part ${orderPartSeqId} is not in Approved status, not shipping" type="warning"/></if>
+                <return type="danger" message="Order ${orderId} part ${orderPartSeqId} is not in Approved status, not shipping"/></if>
 
             <!-- find existing shipment(s) for items in this order part -->
             <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
@@ -475,6 +483,79 @@ along with this software (see the LICENSE.md file). If not, see
                     <service-call name="update#mantle.work.effort.WorkEffort"
                             in-map="[workEffortId:workEffortId, statusId:'WeInProgress']"/>
                 </if>
+            </else></if>
+        </actions>
+    </service>
+
+    <service verb="complete" noun="ShipmentLoadShip">
+        <description>Force to Complete status, removing Shipments in Input and Scheduled statuses (not Picked or later).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="oldStatusId"/>
+            <parameter name="statusChanged" type="Boolean"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort" for-update="true"/>
+            <if condition="workEffort?.purposeEnumId != 'WepShipmentShip'">
+                <return type="danger" message="Work Effort ${workEffortId} is not a Picklist (Shipment Load/Ship)"/></if>
+            <if condition="workEffort.statusId in ['WeComplete', 'WeClosed', 'WeCancelled']">
+                <return type="danger" message="Cannot Complete Picklist ${workEffortId} in status ${workEffort.status?.description ?: workEffort.statusId}"/></if>
+
+            <entity-find entity-name="mantle.shipment.Shipment" list="shipmentList">
+                <econdition field-name="shipWorkEffortId" from="workEffortId"/></entity-find>
+            <set field="statusIdSet" from="new HashSet()"/>
+            <iterate list="shipmentList" entry="shipment">
+                <if condition="shipment.statusId in ['ShipInput', 'ShipScheduled']"><then>
+                    <set field="shipment.shipWorkEffortId" from="null"/>
+                    <set field="shipment.binLocationNumber" from="null"/>
+                    <entity-update value-field="shipment"/>
+                </then><else>
+                    <script>statusIdSet.add(shipment.statusId)</script>
+                </else></if>
+            </iterate>
+
+            <if condition="statusIdSet.size() == 0 || (statusIdSet.size() == 1 &amp;&amp; statusIdSet.contains('ShipCancelled'))"><then>
+                <service-call name="update#mantle.work.effort.WorkEffort" in-map="[workEffortId:workEffortId, statusId:'WeCancelled']"/>
+            </then><else>
+                <service-call name="update#mantle.work.effort.WorkEffort" in-map="[workEffortId:workEffortId, statusId:'WeComplete']"/>
+            </else></if>
+        </actions>
+    </service>
+    <service verb="close" noun="ShipmentLoadShip">
+        <description>Force to Closed status, removing Shipments in Input, Scheduled, Picked, and Packed statuses (not Shipped or later).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="oldStatusId"/>
+            <parameter name="statusChanged" type="Boolean"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort" for-update="true"/>
+            <if condition="workEffort?.purposeEnumId != 'WepShipmentShip'">
+                <return type="danger" message="Work Effort ${workEffortId} is not a Picklist (Shipment Load/Ship)"/></if>
+            <if condition="workEffort.statusId in ['WeClosed', 'WeCancelled']">
+                <return type="danger" message="Cannot Close Picklist ${workEffortId} in status ${workEffort.status?.description ?: workEffort.statusId}"/></if>
+
+            <entity-find entity-name="mantle.shipment.Shipment" list="shipmentList">
+                <econdition field-name="shipWorkEffortId" from="workEffortId"/></entity-find>
+            <set field="statusIdSet" from="new HashSet()"/>
+            <iterate list="shipmentList" entry="shipment">
+                <if condition="shipment.statusId in ['ShipInput', 'ShipScheduled', 'ShipPicked', 'ShipPacked']"><then>
+                    <set field="shipment.shipWorkEffortId" from="null"/>
+                    <set field="shipment.binLocationNumber" from="null"/>
+                    <entity-update value-field="shipment"/>
+                </then><else>
+                    <script>statusIdSet.add(shipment.statusId)</script>
+                </else></if>
+            </iterate>
+
+            <if condition="statusIdSet.size() == 0 || (statusIdSet.size() == 1 &amp;&amp; statusIdSet.contains('ShipCancelled'))"><then>
+                <service-call name="update#mantle.work.effort.WorkEffort" in-map="[workEffortId:workEffortId, statusId:'WeCancelled']"/>
+            </then><else>
+                <service-call name="update#mantle.work.effort.WorkEffort" in-map="[workEffortId:workEffortId, statusId:'WeClosed']"/>
             </else></if>
         </actions>
     </service>
