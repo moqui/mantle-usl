@@ -232,7 +232,7 @@ class ReturnToResponseBasicFlow extends Specification {
                     <receipts assetReceiptId="55700" productId="DEMO_1_1" quantityAccepted="1"
                         acctgTransResultEnumId="AtrNoAcquireCost" quantityRejected="0" assetId="55700" shipmentId="55700"
                         receivedByUserId="EX_JOHN_DOE" receivedDate="${effectiveTime}"/>
-                    <mantle.product.asset.AssetDetail assetDetailId="55700" productId="DEMO_1_1" assetId="55700"
+                    <mantle.product.asset.AssetDetail assetDetailId="55701" productId="DEMO_1_1" assetId="55700"
                         availableToPromiseDiff="1" shipmentId="55700" assetReceiptId="55700" effectiveDate="${effectiveTime}"
                         quantityOnHandDiff="1"/>
                 </items>
@@ -241,7 +241,7 @@ class ReturnToResponseBasicFlow extends Specification {
                     <receipts assetReceiptId="55702" productId="DEMO_3_1" quantityAccepted="2"
                         acctgTransResultEnumId="AtrNoAcquireCost" quantityRejected="0" assetId="55702" shipmentId="55700"
                         receivedByUserId="EX_JOHN_DOE" receivedDate="${effectiveTime}"/>
-                    <mantle.product.asset.AssetDetail assetDetailId="55702" productId="DEMO_3_1" assetId="55702"
+                    <mantle.product.asset.AssetDetail assetDetailId="55703" productId="DEMO_3_1" assetId="55702"
                         availableToPromiseDiff="2" shipmentId="55700" assetReceiptId="55702" effectiveDate="${effectiveTime}"
                         quantityOnHandDiff="2"/>
                 </items>
@@ -250,7 +250,7 @@ class ReturnToResponseBasicFlow extends Specification {
                     <receipts assetReceiptId="55701" productId="DEMO_2_1" quantityAccepted="2"
                         acctgTransResultEnumId="AtrNoAcquireCost" quantityRejected="0" assetId="55701" shipmentId="55700"
                         receivedByUserId="EX_JOHN_DOE" receivedDate="${effectiveTime}"/>
-                    <mantle.product.asset.AssetDetail assetDetailId="55701" productId="DEMO_2_1" assetId="55701"
+                    <mantle.product.asset.AssetDetail assetDetailId="55702" productId="DEMO_2_1" assetId="55701"
                         availableToPromiseDiff="2" shipmentId="55700" assetReceiptId="55701" effectiveDate="${effectiveTime}"
                         quantityOnHandDiff="2"/>
                 </items>
@@ -277,7 +277,7 @@ class ReturnToResponseBasicFlow extends Specification {
                     <reservations assetReservationId="55700" assetId="55400" reservedDate="${effectiveTime}" quantity="1"
                             productId="DEMO_1_1" sequenceNum="0" quantityNotIssued="1" quantityNotAvailable="0"
                             reservationOrderEnumId="AsResOrdFifoRec">
-                        <mantle.product.asset.AssetDetail assetDetailId="55703" assetId="55400" productId="DEMO_1_1"
+                        <mantle.product.asset.AssetDetail assetDetailId="55700" assetId="55400" productId="DEMO_1_1"
                             availableToPromiseDiff="-1" effectiveDate="${effectiveTime}"/>
                     </reservations>
                 </items>
