@@ -658,7 +658,7 @@ along with this software (see the LICENSE.md file). If not, see
             Called by SECA rule on ReturnHeader Approved and ReturnItem Received statuses.
             If ReturnItem.responseImmediate = 'Y' process on Approved status or later (Shipped, Received, Completed).
             If ReturnItem.responseImmediate = 'N' (or null) process on Received status or later (Completed).
-            Only processes responses for items with no response already (responseDate != null).
+            Only processes responses for items with no response already (responseDate == null).
         </description>
         <in-parameters>
             <parameter name="returnId" required="true"/>
@@ -681,23 +681,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="returnItemSeqId" ignore-if-empty="true"/>
                 <order-by field-name="returnItemSeqId"/>
             </entity-find>
-            <!-- These more complex conditions won't work with transaction cache, so filter manually after find:
-                <econdition field-name="responseDate" from="null"/>
-                <econditions combine="or">
-                    <econdition field-name="statusId" operator="in" value="ReturnReceived,ReturnCompleted"/>
-                    <econditions combine="and">
-                        <econdition field-name="statusId" operator="in" value="ReturnApproved,ReturnShipped"/>
-                        <econdition field-name="responseImmediate" value="Y"/>
-                    </econditions>
-                </econditions>
-
-            <filter-map-list list="returnItemList" to-list="creditItemList">
-                <field-map field-name="returnResponseEnumId" value="RrspCredit"/></filter-map-list>
-            <filter-map-list list="returnItemList" to-list="refundItemList">
-                <field-map field-name="returnResponseEnumId" value="RrspRefund"/></filter-map-list>
-            <filter-map-list list="returnItemList" to-list="replaceItemList">
-                <field-map field-name="returnResponseEnumId" value="RrspReplace"/></filter-map-list>
-            -->
+            <set field="originalReplacementOrderIdSet" from="new HashSet(returnItemList*.replacementOrderId)"/>
+            <script>originalReplacementOrderIdSet.remove(null)</script>
 
             <!-- split list into credit, refund, replace; check credit and refund items for unpaid invoices to adjust instead -->
             <set field="creditItemList" from="[]"/>
@@ -707,8 +692,10 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="returnInvoiceId" from="null"/>
             <iterate list="returnItemList" entry="returnItem">
                 <if condition="returnItem.responseDate != null"><continue/></if>
+                <!-- only process response for items in status Received or Completed OR in status Approved or Shipped and are either Replace items or have responseImmediate == Y -->
+                <!-- Replace items are included in the earlier status so we can create a Replacement Order in Placed status right away -->
                 <set field="validStatus" from="returnItem.statusId in ['ReturnReceived', 'ReturnCompleted'] ||
-                    (returnItem.responseImmediate == 'Y' &amp;&amp; returnItem.statusId in ['ReturnApproved', 'ReturnShipped'])"/>
+                    ((returnItem.responseImmediate == 'Y' || returnItem.returnResponseEnumId == 'RrspReplace') &amp;&amp; returnItem.statusId in ['ReturnApproved', 'ReturnShipped'])"/>
                 <if condition="!validStatus"><continue/></if>
 
                 <!-- see if the invoice for returned order item is not yet paid, if so cancel/credit instead of credit or refund -->
@@ -938,16 +925,38 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- Replace (Order); consolidate all -->
             <if condition="replaceItemList">
-                <service-call name="mantle.order.OrderServices.create#Order" out-map="context"
-                        in-map="[vendorPartyId:returnHeader.vendorPartyId, customerPartyId:returnHeader.customerPartyId]"/>
-                
+                <!-- split into two lists for Placed vs Approved replacement orders (break down big 'validStatus' condition):
+                    1. Approved: item status is ReturnReceived or ReturnCompleted OR responseImmediate == 'Y'
+                    2. Placed: not in #1 (responseImmediate != 'Y' and in earlier status)
+                -->
+                <set field="approvedItemSet" from="new HashSet()"/>
+                <set field="placedItemSet" from="new HashSet()"/>
+                <iterate list="replaceItemList" entry="replaceItem">
+                    <if condition="replaceItem.responseImmediate == 'Y' || replaceItem.statusId in ['ReturnReceived', 'ReturnCompleted']"><then>
+                        <script>approvedItemSet.add(replaceItem.returnItemSeqId)</script>
+                    </then><else>
+                        <script>placedItemSet.add(replaceItem.returnItemSeqId)</script>
+                    </else></if>
+                </iterate>
+
+                <if condition="approvedItemSet">
+                    <service-call name="mantle.order.OrderServices.create#Order" out-map="approvedOrderOut"
+                            in-map="[vendorPartyId:returnHeader.vendorPartyId, customerPartyId:returnHeader.customerPartyId]"/>
+                </if>
+                <if condition="placedItemSet">
+                    <service-call name="mantle.order.OrderServices.create#Order" out-map="placedOrderOut"
+                            in-map="[vendorPartyId:returnHeader.vendorPartyId, customerPartyId:returnHeader.customerPartyId]"/>
+                </if>
+
                 <iterate list="replaceItemList" entry="returnItem">
+                    <set field="replaceOrderId" from="approvedItemSet.contains(returnItem.returnItemSeqId) ? approvedOrderOut.orderId : placedOrderOut.orderId"/>
                     <set field="itemQuantity" from="returnItem.receivedQuantity ?: returnItem.returnQuantity"/>
 
                     <service-call name="mantle.order.OrderServices.add#OrderProductQuantity"
-                            in-map="[orderId:orderId, productId:returnItem.productId, quantity:itemQuantity, unitAmount:0.0]"/>
+                            in-map="[orderId:replaceOrderId, productId:(returnItem.replacementProductId ?: returnItem.productId),
+                                quantity:itemQuantity, unitAmount:0.0]"/>
 
-                    <set field="returnItem.replacementOrderId" from="orderId"/>
+                    <set field="returnItem.replacementOrderId" from="replaceOrderId"/>
                     <set field="returnItem.responseDate" from="responseDate"/>
                     <entity-update value-field="returnItem"/>
 
@@ -956,15 +965,49 @@ along with this software (see the LICENSE.md file). If not, see
                                 in-map="[returnId:returnId, returnItemSeqId:returnItem.returnItemSeqId]"/></if>
                 </iterate>
 
-                <service-call name="mantle.order.OrderServices.set#OrderBillingShippingInfo"
-                        in-map="[orderId:orderId, shippingPostalContactMechId:returnHeader.postalContactMechId,
+                <if condition="approvedOrderOut">
+                    <service-call name="mantle.order.OrderServices.set#OrderBillingShippingInfo"
+                            in-map="[orderId:approvedOrderOut.orderId, shippingPostalContactMechId:returnHeader.postalContactMechId,
                             shippingTelecomContactMechId:returnHeader.telecomContactMechId,
                             shippingFacilityId:returnHeader.facilityId, carrierPartyId:returnHeader.carrierPartyId,
                             shipmentMethodEnumId:returnHeader.shipmentMethodEnumId]"/>
-                <!-- place and approve order, come from here ready to ship -->
-                <service-call name="mantle.order.OrderServices.place#Order" in-map="[orderId:orderId]"/>
-                <service-call name="mantle.order.OrderServices.approve#Order" in-map="[orderId:orderId]"/>
+                    <!-- place and approve order, come from here ready to ship -->
+                    <service-call name="mantle.order.OrderServices.place#Order" in-map="[orderId:approvedOrderOut.orderId]"/>
+                    <service-call name="mantle.order.OrderServices.approve#Order" in-map="[orderId:approvedOrderOut.orderId]"/>
+                </if>
+                <if condition="placedOrderOut">
+                    <service-call name="mantle.order.OrderServices.set#OrderBillingShippingInfo"
+                            in-map="[orderId:placedOrderOut.orderId, shippingPostalContactMechId:returnHeader.postalContactMechId,
+                            shippingTelecomContactMechId:returnHeader.telecomContactMechId,
+                            shippingFacilityId:returnHeader.facilityId, carrierPartyId:returnHeader.carrierPartyId,
+                            shipmentMethodEnumId:returnHeader.shipmentMethodEnumId]"/>
+                    <!-- place order only, will be approved later -->
+                    <service-call name="mantle.order.OrderServices.place#Order" in-map="[orderId:placedOrderOut.orderId]"/>
+                </if>
             </if>
+
+            <!-- if there are one or more associated Replacement Orders in the Placed status and they now qualify for Approved then Approve -->
+            <iterate list="originalReplacementOrderIdSet" entry="originalReplacementOrderId">
+                <entity-find-one entity-name="mantle.order.OrderHeader" value-field="replaceOrderHeader">
+                    <field-map field-name="orderId" from="originalReplacementOrderId"/></entity-find-one>
+                <if condition="replaceOrderHeader == null">
+                    <log level="error" message="In process responses for return ${returnId} could not find replacement OrderHeader ${originalReplacementOrderId}"/>
+                    <continue/>
+                </if>
+                <if condition="replaceOrderHeader.statusId == 'OrderPlaced'">
+                    <set field="curOrderReturnItemList" from="returnItemList.findAll({ it.replacementOrderId == originalReplacementOrderId })"/>
+                    <set field="approveOrder" from="true"/>
+                    <iterate list="curOrderReturnItemList" entry="curOrderReturnItem">
+                        <if condition="!(curOrderReturnItem.statusId in ['ReturnReceived', 'ReturnCompleted'])">
+                            <set field="approveOrder" from="false"/>
+                            <break/>
+                        </if>
+                    </iterate>
+                    <if condition="approveOrder">
+                        <service-call name="mantle.order.OrderServices.approve#Order" in-map="[orderId:originalReplacementOrderId]"/>
+                    </if>
+                </if>
+            </iterate>
 
             <!-- if returnInvoiceId set statusId to InvoiceApproved, trigger payment applications based on forInvoiceId -->
             <if condition="returnInvoiceId">
