@@ -31,6 +31,7 @@ class OrderToCashBasicFlow extends Specification {
     @Shared protected final static Logger logger = LoggerFactory.getLogger(OrderToCashBasicFlow.class)
     @Shared ExecutionContext ec
     @Shared String cartOrderId = null, cartOrderPartSeqId
+    @Shared String inventoryOrderId = null
     @Shared Map setInfoOut, shipResult
     @Shared String b2bPaymentId, b2bShipmentId, b2bCredMemoId
     @Shared long effectiveTime = System.currentTimeMillis()
@@ -49,7 +50,7 @@ class OrderToCashBasicFlow extends Specification {
         ec.entity.tempSetSequencedIdPrimary("mantle.shipment.Shipment", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.shipment.ShipmentItemSource", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.Asset", 55500, 10)
-        ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetDetail", 55500, 10)
+        ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.AssetDetail", 55500, 50)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.asset.PhysicalInventory", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.issuance.AssetReservation", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.product.issuance.AssetIssuance", 55500, 10)
@@ -57,7 +58,7 @@ class OrderToCashBasicFlow extends Specification {
         ec.entity.tempSetSequencedIdPrimary("mantle.account.payment.Payment", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.account.payment.PaymentApplication", 55500, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.order.OrderHeader", 55500, 10)
-        ec.entity.tempSetSequencedIdPrimary("mantle.order.OrderItemBilling", 55500, 10)
+        ec.entity.tempSetSequencedIdPrimary("mantle.order.OrderItemBilling", 55500, 20)
     }
 
     def cleanupSpec() {
@@ -546,38 +547,6 @@ class OrderToCashBasicFlow extends Specification {
         dataCheckErrors.size() == 0
     }
 
-    def "reserve Asset With Displace Reservation"() {
-        when:
-        // NOTE: orders used here are from AssetReservationMultipleThreads (base id 53000)
-        // use asset DEMO_1_1A with 0 ATP at this point (90 QOH, 2 reservations for orders)
-        // use order with 60 currently reserved against asset 55400
-
-        EntityList beforeResList = ec.entity.find("mantle.product.issuance.AssetReservation")
-                .condition("assetId", "DEMO_1_1A").orderBy("assetId").list()
-        for (EntityValue res in beforeResList) logger.warn("Res before: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity} - QOH:${res.asset.quantityOnHandTotal}")
-
-        beforeResList = ec.entity.find("mantle.product.issuance.AssetReservation")
-                .condition("assetId", "55400").orderBy("assetId").list()
-        for (EntityValue res in beforeResList) logger.warn("Res before: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
-
-        EntityValue beforeRes = beforeResList.find({it.quantity == 60})
-        String orderId = beforeRes.orderId
-        String orderItemSeqId = beforeRes.orderItemSeqId
-
-        ec.service.sync().name("mantle.product.AssetServices.reserve#AssetForOrderItem")
-                .parameters([orderId:orderId, orderItemSeqId:orderItemSeqId, assetId:"DEMO_1_1A", resetReservations:true]).call()
-
-        EntityList afterResList = ec.entity.find("mantle.product.issuance.AssetReservation")
-                .condition("orderId", orderId).condition("orderItemSeqId", orderItemSeqId).orderBy("assetId").list()
-        for (EntityValue res in afterResList) logger.info("Res after: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
-        EntityValue afterRes = afterResList.find({it.assetId == "DEMO_1_1A"})
-
-        then:
-        afterRes != null
-        afterRes?.assetId == "DEMO_1_1A"
-        afterRes?.quantity == 60.0
-    }
-
     /* ========== Business Customer Order, Credit Memo, Overpay/Refund, etc ========== */
 
     def "create and Ship Business Customer Order"() {
@@ -782,5 +751,164 @@ class OrderToCashBasicFlow extends Specification {
         then:
         refundApplResult.amountApplied == overpayAmount
         dataCheckErrors.size() == 0
+    }
+
+    /* ========== Inventory Reservation and Issuance Tests: pack/issue and unpack, cancel Shipment in late status ========== */
+
+    def "create Inventory Tests Sales Order"() {
+        when:
+        ec.user.loginUser("john.doe", "moqui")
+
+        Map addOut1 = ec.service.sync().name("mantle.order.OrderServices.add#OrderProductQuantity")
+                .parameters([productId:"DEMO_UNIT", quantity:10, customerPartyId:"CustJqp",
+                        currencyUomId:"USD", productStoreId:"POPC_DEFAULT"]).call()
+
+        inventoryOrderId = addOut1.orderId
+
+        ec.service.sync().name("mantle.order.OrderServices.set#OrderBillingShippingInfo")
+                .parameters([orderId:inventoryOrderId, paymentMethodId:'CustJqpCc', shippingPostalContactMechId:'CustJqpAddr',
+                        shippingTelecomContactMechId:'CustJqpTeln', carrierPartyId:'_NA_', shipmentMethodEnumId:'ShMthGround']).call()
+
+        ec.service.sync().name("mantle.order.OrderServices.place#Order").parameters([orderId:inventoryOrderId, requireInventory:false]).call()
+        ec.service.sync().name("mantle.order.OrderServices.approve#Order").parameters([orderId:inventoryOrderId]).call()
+
+        // NOTE: this has sequenced IDs so is sensitive to run order!
+        List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.order.OrderHeader orderId="${inventoryOrderId}" entryDate="${effectiveTime}" placedDate="${effectiveTime}"
+                statusId="OrderApproved" currencyUomId="USD" productStoreId="POPC_DEFAULT" grandTotal="10.00"/>
+            <mantle.order.OrderPart orderId="${inventoryOrderId}" orderPartSeqId="01" vendorPartyId="ORG_ZIZI_RETAIL"
+                customerPartyId="CustJqp" shipmentMethodEnumId="ShMthGround" postalContactMechId="CustJqpAddr"
+                telecomContactMechId="CustJqpTeln" partTotal="10.00"/>
+            <mantle.order.OrderItem orderId="${inventoryOrderId}" orderItemSeqId="01" orderPartSeqId="01" itemTypeEnumId="ItemProduct"
+                productId="DEMO_UNIT" itemDescription="Demo Product One Unit" quantity="10" unitAmount="1.00"
+                isModifiedPrice="N"/>
+
+            <mantle.product.issuance.AssetReservation assetReservationId="55505" orderId="55502" orderItemSeqId="01"
+                reservedDate="${effectiveTime}" quantity="10" quantityNotAvailable="0" quantityNotIssued="10" assetId="DEMO_UNITA"
+                productId="DEMO_UNIT" sequenceNum="0" reservationOrderEnumId="AsResOrdFifoRec"/>
+            <mantle.product.asset.AssetDetail assetDetailId="55513" assetId="DEMO_UNITA" orderId="55502" orderItemSeqId="01" 
+                productId="DEMO_UNIT" assetReservationId="55505" availableToPromiseDiff="-10" effectiveDate="${effectiveTime}"/>
+        </entity-facade-xml>""").check()
+        logger.info("create Inventory Tests Sales Order data check results: ")
+        for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+
+        // TODO: check QOH - ATP = Reservations
+
+        then:
+        dataCheckErrors.size() == 0
+    }
+
+    def "ship Inventory Sales Order and Cancel Shipment"() {
+        when:
+        ec.user.loginUser("john.doe", "moqui")
+
+        Map shipResult = ec.service.sync().name("mantle.shipment.ShipmentServices.create#OrderPartShipment")
+                .parameters([orderId:inventoryOrderId, orderPartSeqId:"01", createPackage:true]).call()
+
+        ec.service.sync().name("mantle.shipment.ShipmentServices.pack#ShipmentProduct")
+                .parameters([productId:'DEMO_UNIT', quantity:10, shipmentId:shipResult.shipmentId, shipmentPackageSeqId:shipResult.shipmentPackageSeqId]).call()
+
+        ec.service.sync().name("mantle.shipment.ShipmentServices.pack#Shipment").parameters([shipmentId:shipResult.shipmentId]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.ship#Shipment").parameters([shipmentId:shipResult.shipmentId]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.cancel#Shipment").parameters([shipmentId:shipResult.shipmentId]).call()
+
+        // NOTE: this has sequenced IDs so is sensitive to run order!
+        List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+            <mantle.product.issuance.AssetIssuance assetIssuanceId="55505" assetId="DEMO_UNITA" orderId="55502" orderItemSeqId="01" 
+                    issuedDate="${effectiveTime}" shipmentId="55502" shipmentItemSourceId="55505" 
+                    productId="DEMO_UNIT" quantity="0" quantityCancelled="10" assetReservationId="55505"
+                    acctgTransResultEnumId="AtrSuccess" issuedByUserId="EX_JOHN_DOE">
+                <mantle.product.asset.AssetDetail assetDetailId="55514" assetId="DEMO_UNITA" quantityOnHandDiff="-10" 
+                        productId="DEMO_UNIT" shipmentId="55502" assetReservationId="55505" effectiveDate="${effectiveTime}"/>
+                <mantle.product.asset.AssetDetail assetDetailId="55515" assetId="DEMO_UNITA" quantityOnHandDiff="10" availableToPromiseDiff="10"  
+                        productId="DEMO_UNIT" shipmentId="55502" effectiveDate="${effectiveTime}"/>
+                <mantle.order.OrderItemBilling orderItemBillingId="55511" orderId="55502" orderItemSeqId="01" amount="1" 
+                        quantity="0" shipmentId="55502" invoiceId="55503" invoiceItemSeqId="01"/>
+            </mantle.product.issuance.AssetIssuance>
+
+            <mantle.product.issuance.AssetReservation assetReservationId="55506" orderId="55502" orderItemSeqId="01" 
+                    reservedDate="${effectiveTime}" quantity="10" quantityNotAvailable="0" quantityNotIssued="10" assetId="DEMO_UNITA" 
+                    productId="DEMO_UNIT" sequenceNum="0" reservationOrderEnumId="AsResOrdFifoRec"/>
+            <mantle.product.asset.AssetDetail assetDetailId="55516" assetId="DEMO_UNITA" orderId="55502" orderItemSeqId="01"
+                    productId="DEMO_UNIT" assetReservationId="55506" availableToPromiseDiff="-10" effectiveDate="${effectiveTime}"/>
+        </entity-facade-xml>""").check()
+        logger.info("ship Inventory Sales Order and Cancel Shipment data check results: ")
+        for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+
+        // TODO: check QOH - ATP = Reservations
+
+        then:
+        dataCheckErrors.size() == 0
+    }
+
+    def "ship Partial Inventory Sales Order and Cancel Shipment"() {
+        when:
+        ec.user.loginUser("john.doe", "moqui")
+
+        Map shipResult = ec.service.sync().name("mantle.shipment.ShipmentServices.create#OrderPartShipment")
+                .parameters([orderId:inventoryOrderId, orderPartSeqId:"01", createPackage:true]).call()
+        String shipmentId = shipResult.shipmentId
+
+        // pack partial
+        ec.service.sync().name("mantle.shipment.ShipmentServices.pack#ShipmentProduct")
+                .parameters([productId:'DEMO_UNIT', quantity:5, shipmentId:shipResult.shipmentId, shipmentPackageSeqId:shipResult.shipmentPackageSeqId]).call()
+        // unpack
+        EntityList issuanceList = ec.entity.find("mantle.product.issuance.AssetIssuance").condition("shipmentId", shipmentId).list()
+        for (EntityValue issuance in issuanceList) {
+            ec.service.sync().name("mantle.shipment.ShipmentServices.unpack#ShipmentItemIssuance")
+                    .parameters([assetIssuanceId:issuance.assetIssuanceId]).call()
+        }
+
+        // pack partial again
+        ec.service.sync().name("mantle.shipment.ShipmentServices.pack#ShipmentProduct")
+                .parameters([productId:'DEMO_UNIT', quantity:5, shipmentId:shipResult.shipmentId, shipmentPackageSeqId:shipResult.shipmentPackageSeqId]).call()
+
+        ec.service.sync().name("mantle.shipment.ShipmentServices.pack#Shipment").parameters([shipmentId:shipResult.shipmentId]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.ship#Shipment").parameters([shipmentId:shipResult.shipmentId]).call()
+        ec.service.sync().name("mantle.shipment.ShipmentServices.cancel#Shipment").parameters([shipmentId:shipResult.shipmentId]).call()
+
+        // NOTE: this has sequenced IDs so is sensitive to run order!
+        List<String> dataCheckErrors = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>
+        </entity-facade-xml>""").check()
+        logger.info("ship Partial Inventory Sales Order and Cancel Shipment data check results: ")
+        for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
+
+        // TODO: check QOH - ATP = Reservations
+
+        then:
+        dataCheckErrors.size() == 0
+    }
+
+    // NOTE: do this last because deals with unpredictable data (number of AssetDetail, etc records) from the thread race in asset reservations
+    def "reserve Asset With Displace Reservation"() {
+        when:
+        // NOTE: orders used here are from AssetReservationMultipleThreads (base id 53000)
+        // use asset DEMO_1_1A with 0 ATP at this point (90 QOH, 2 reservations for orders)
+        // use order with 60 currently reserved against asset 55400
+
+        EntityList beforeResList = ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("assetId", "DEMO_1_1A").orderBy("assetId").list()
+        for (EntityValue res in beforeResList) logger.warn("Res before: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity} - QOH:${res.asset.quantityOnHandTotal}")
+
+        beforeResList = ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("assetId", "55400").orderBy("assetId").list()
+        for (EntityValue res in beforeResList) logger.warn("Res before: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
+
+        EntityValue beforeRes = beforeResList.find({it.quantity == 60})
+        String orderId = beforeRes.orderId
+        String orderItemSeqId = beforeRes.orderItemSeqId
+
+        ec.service.sync().name("mantle.product.AssetServices.reserve#AssetForOrderItem")
+                .parameters([orderId:orderId, orderItemSeqId:orderItemSeqId, assetId:"DEMO_1_1A", resetReservations:true]).call()
+
+        EntityList afterResList = ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("orderId", orderId).condition("orderItemSeqId", orderItemSeqId).orderBy("assetId").list()
+        for (EntityValue res in afterResList) logger.info("Res after: R:${res.assetReservationId} - O:${res.orderId} - A:${res.assetId} - ${res.quantity}")
+        EntityValue afterRes = afterResList.find({it.assetId == "DEMO_1_1A"})
+
+        then:
+        afterRes != null
+        afterRes?.assetId == "DEMO_1_1A"
+        afterRes?.quantity == 60.0
     }
 }
