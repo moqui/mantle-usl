@@ -792,10 +792,18 @@ class OrderToCashBasicFlow extends Specification {
         logger.info("create Inventory Tests Sales Order data check results: ")
         for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
 
-        // TODO: check QOH - ATP = Reservations
+        // check QOH - ATP = Reservations
+        def assetDetailSummaryList = ec.entity.find("mantle.product.asset.AssetDetailSummary")
+                .condition("assetId", "DEMO_UNITA").selectField("availableToPromiseTotal,quantityOnHandTotal").list()
+        BigDecimal availableToPromiseTotal = (BigDecimal) assetDetailSummaryList.get(0).availableToPromiseTotal
+        BigDecimal quantityOnHandTotal = (BigDecimal) assetDetailSummaryList.get(0).quantityOnHandTotal
+        BigDecimal reservationTotal = (BigDecimal) ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("assetId", "DEMO_UNITA").list().sum({ it.quantity })
+        logger.info("availableToPromiseTotal ${availableToPromiseTotal} quantityOnHandTotal ${quantityOnHandTotal} reservationTotal ${reservationTotal}")
 
         then:
         dataCheckErrors.size() == 0
+        quantityOnHandTotal - availableToPromiseTotal == reservationTotal
     }
 
     def "ship Inventory Sales Order and Cancel Shipment"() {
@@ -835,10 +843,18 @@ class OrderToCashBasicFlow extends Specification {
         logger.info("ship Inventory Sales Order and Cancel Shipment data check results: ")
         for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
 
-        // TODO: check QOH - ATP = Reservations
+        // check QOH - ATP = Reservations
+        def assetDetailSummaryList = ec.entity.find("mantle.product.asset.AssetDetailSummary")
+                .condition("assetId", "DEMO_UNITA").selectField("availableToPromiseTotal,quantityOnHandTotal").list()
+        BigDecimal availableToPromiseTotal = (BigDecimal) assetDetailSummaryList.get(0).availableToPromiseTotal
+        BigDecimal quantityOnHandTotal = (BigDecimal) assetDetailSummaryList.get(0).quantityOnHandTotal
+        BigDecimal reservationTotal = (BigDecimal) ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("assetId", "DEMO_UNITA").list().sum({ it.quantity })
+        logger.info("availableToPromiseTotal ${availableToPromiseTotal} quantityOnHandTotal ${quantityOnHandTotal} reservationTotal ${reservationTotal}")
 
         then:
         dataCheckErrors.size() == 0
+        quantityOnHandTotal - availableToPromiseTotal == reservationTotal
     }
 
     def "ship Partial Inventory Sales Order and Cancel Shipment"() {
@@ -873,10 +889,18 @@ class OrderToCashBasicFlow extends Specification {
         logger.info("ship Partial Inventory Sales Order and Cancel Shipment data check results: ")
         for (String dataCheckError in dataCheckErrors) logger.info(dataCheckError)
 
-        // TODO: check QOH - ATP = Reservations
+        // check QOH - ATP = Reservations
+        def assetDetailSummaryList = ec.entity.find("mantle.product.asset.AssetDetailSummary")
+                .condition("assetId", "DEMO_UNITA").selectField("availableToPromiseTotal,quantityOnHandTotal").list()
+        BigDecimal availableToPromiseTotal = (BigDecimal) assetDetailSummaryList.get(0).availableToPromiseTotal
+        BigDecimal quantityOnHandTotal = (BigDecimal) assetDetailSummaryList.get(0).quantityOnHandTotal
+        BigDecimal reservationTotal = (BigDecimal) ec.entity.find("mantle.product.issuance.AssetReservation")
+                .condition("assetId", "DEMO_UNITA").list().sum({ it.quantity })
+        logger.info("availableToPromiseTotal ${availableToPromiseTotal} quantityOnHandTotal ${quantityOnHandTotal} reservationTotal ${reservationTotal}")
 
         then:
         dataCheckErrors.size() == 0
+        quantityOnHandTotal - availableToPromiseTotal == reservationTotal
     }
 
     // NOTE: do this last because deals with unpredictable data (number of AssetDetail, etc records) from the thread race in asset reservations
