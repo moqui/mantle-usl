@@ -955,19 +955,39 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
 
             <if condition="quantityRemaining &gt; 0.0">
-                <!-- TODO: look for qualifying Asset even if no available quantity and do 'not available' reservation on that instead of creating new ad-hoc -->
+                <!-- look for qualifying Asset even if no available quantity and do 'not available' reservation on that instead of creating new ad-hoc -->
+                <entity-find entity-name="mantle.product.asset.Asset" list="existingResAssetList" limit="1">
+                    <econdition field-name="productId"/>
+                    <econdition field-name="facilityId" from="inventoryFacilityId"/>
+                    <econdition field-name="ownerPartyId" from="organizationPartyId"/>
+                    <econdition field-name="assetPoolId" from="null"/>
+                    <econdition field-name="locationSeqId" from="null"/>
+                    <econdition field-name="containerId" from="null"/>
+                    <econdition field-name="lotId" from="null"/>
+                    <!-- may be populated even for negative availability placeholder records: <econdition field-name="acquireCost" from="null"/> -->
+                    <econdition field-name="statusId" value="AstAvailable"/>
+                    <econdition field-name="hasQuantity" value="Y"/>
+                    <econdition field-name="availableToPromiseTotal" operator="less-equals" from="0.0"/>
+                    <select-field field-name="assetId"/>
+                    <!-- NOTE: order by ATP ascending, expect to be negative so highest negative value first -->
+                    <order-by field-name="availableToPromiseTotal"/>
+                </entity-find>
+                <set field="newResAssetId" from="existingResAssetList ? existingResAssetList.get(0).assetId : null"/>
+                <if condition="!newResAssetId">
+                    <!-- no asset... create a shell one to record the reservation and detail against -->
+                    <service-call name="mantle.product.AssetServices.create#ProductAssetAdHoc" out-map="assetOut"
+                            in-map="[productId:productId, facilityId:inventoryFacilityId, ownerPartyId:organizationPartyId,
+                                createdDate:nowTimestamp]"/>
+                    <set field="newResAssetId" from="assetOut.assetId"/>
+                </if>
 
-                <!-- no asset... create a shell one to record the reservation and detail against -->
-                <service-call name="mantle.product.AssetServices.create#ProductAssetAdHoc" out-map="assetOut"
-                        in-map="[productId:productId, facilityId:inventoryFacilityId, ownerPartyId:organizationPartyId,
-                            createdDate:nowTimestamp]"/>
                 <service-call name="create#mantle.product.issuance.AssetReservation" out-map="resOut" in-map="baseMap +
-                        [assetId:assetOut.assetId, reservedDate:nowTimestamp, quantity:quantityRemaining,
+                        [assetId:newResAssetId, reservedDate:nowTimestamp, quantity:quantityRemaining,
                             quantityNotAvailable:quantityRemaining, quantityNotIssued:quantityRemaining,
                             priority:orderItem.priority, sequenceNum:0,
                             reservationOrderEnumId:reservationOrderEnumId]"/>
                 <service-call name="create#mantle.product.asset.AssetDetail" in-map="baseMap +
-                        [assetId:assetOut.assetId, effectiveDate:nowTimestamp,
+                        [assetId:newResAssetId, effectiveDate:nowTimestamp,
                             availableToPromiseDiff:-quantityRemaining, assetReservationId:resOut.assetReservationId]"/>
             </if>
         </actions>
@@ -1004,7 +1024,7 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="quantityToDeduct &gt;= existingRes.quantity &amp;&amp; existingRes.quantity == existingRes.quantityNotIssued"><then>
                 <service-call name="create#mantle.product.asset.AssetDetail" in-map="[assetId:existingRes.assetId,
                                 effectiveDate:ec.user.nowTimestamp, availableToPromiseDiff:existingRes.quantity,
-                                assetReservationId:existingRes.assetReservationId, productId:existingRes.productId]"/>
+                                assetReservationId:existingRes.assetReservationId, productId:existingRes.productId, orderId:existingRes.orderId]"/>
 
                 <set field="quantityDeducted" from="existingRes.quantity"/>
                 <entity-delete value-field="existingRes"/>
@@ -1037,15 +1057,60 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <!-- TODO: more useful would be reReserve more generally, by: Product, Facility, and/or Order/Item -->
-    <!-- TODO: implement this (and populate priority on order/item and on reservation)
-    <service verb="reReserve" noun="ProductAssets">
-        <description>Clear out all reservations for a Product and re-reserve</description>
-        <in-parameters><parameter name="productId" required="true"/><parameter name="facilityId"/></in-parameters>
+    <service verb="reReserve" noun="Assets" transaction-timeout="3600">
+        <in-parameters>
+            <parameter name="facilityId"/>
+            <parameter name="productId"/>
+            <parameter name="orderId"/>
+            <parameter name="reserveOrderStatusIds" default-value="OrderPlaced,OrderHold,OrderProcessing,OrderApproved,OrderSent"/>
+            <!-- TODO: for now re-reserve order by OrderPart.priority, OrderHeader.placedDate, make that configurable or use store/etc settings somehow? -->
+            <!-- TODO: consider OrderItem.priority for reservation order? concept not yet used elsewhere... -->
+        </in-parameters>
         <actions>
+            <set field="reserveOrderStatusIdSet" from="new HashSet(((String) reserveOrderStatusIds).split(',') as List)"/>
+
+            <entity-find entity-name="mantle.product.issuance.AssetAndReservation" list="resOrderItemList" distinct="true">
+                <econdition field-name="facilityId" ignore-if-empty="true"/>
+                <econdition field-name="productId" ignore-if-empty="true"/>
+                <econdition field-name="orderId" ignore-if-empty="true"/>
+                <select-field field-name="orderId,orderItemSeqId"/>
+            </entity-find>
+            <log message="reReserve#Assets facilityId ${facilityId} productId ${productId} orderId ${orderId} OrderItems with reservations ${resOrderItemList.size()}"/>
+
+            <set field="orderItemInfoList" from="[]"/>
+            <iterate list="resOrderItemList" entry="resOrderItem">
+                <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem">
+                    <field-map field-name="orderId" from="resOrderItem.orderId"/>
+                    <field-map field-name="orderItemSeqId" from="resOrderItem.orderItemSeqId"/>
+                </entity-find-one>
+                <if condition="orderItem == null">
+                    <log level="warn" message="In reReserve#Assets could not find OrderItem ${orderId}:${orderItemSeqId}"/>
+                    <continue/>
+                </if>
+
+                <!-- remove item reservations -->
+                <service-call name="mantle.product.AssetServices.remove#OrderItemReservations"
+                        in-map="[orderId:resOrderItem.orderId, orderItemSeqId:resOrderItem.orderItemSeqId]"/>
+
+                <!-- look up OrderPart, OrderHeader to see if item qualifies for re-reserve, and get order by fields -->
+                <set field="orderPart" from="orderItem.part"/>
+                <if condition="orderPart.statusId in reserveOrderStatusIdSet">
+                    <set field="orderHeader" from="orderItem.header"/>
+                    <script>orderItemInfoList.add([orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId,
+                            priority:orderPart.priority, placedDate:orderHeader.placedDate])</script>
+                </if>
+            </iterate>
+
+            <order-map-list list="orderItemInfoList"><order-by field-name="priority"/><order-by field-name="placedDate"/>
+                <order-by field-name="orderId"/><order-by field-name="orderItemSeqId"/></order-map-list>
+
+            <iterate list="orderItemInfoList" entry="orderItemInfo">
+                <!-- NOTE: a reservation existed so forceReserve:true -->
+                <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
+                        in-map="[orderId:orderItemInfo.orderId, orderItemSeqId:orderItemInfo.orderItemSeqId, forceReserve:true]"/>
+            </iterate>
         </actions>
     </service>
-    -->
 
     <service verb="reserve" noun="IncreasedAsset" no-tx-cache="true">
         <description>For Asset with availableToPromiseTotal > 0 find AssetReservation with quantityNotAvailable and reserve against it</description>
