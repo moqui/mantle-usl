@@ -497,21 +497,88 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="rootWorkEffortId" default="workEffortId"/>
             <parameter name="workEffortId"/>
+            <parameter name="term"/>
+            <parameter name="roleTypeId"/>
+            <parameter name="searchIndexName" default-value="mantle"/>
+            <parameter name="searchPartyDocType" default-value="MantleParty"/>
+            <parameter name="pageIndex" type="Integer" default="0"/>
+            <parameter name="pageSize" type="Integer" default="20"/>
             <parameter name="addOptional" type="Boolean" default="true"/>
             <parameter name="onlyAssignable" type="Boolean" default="true"/>
         </in-parameters>
         <out-parameters><parameter name="resultList" type="List"><parameter name="result" type="Map"/></parameter></out-parameters>
         <actions>
-            <entity-find entity-name="mantle.work.effort.WorkEffortAndPartyDetail" list="partyList">
-                <date-filter/><econdition field-name="workEffortId" from="rootWorkEffortId"/>
-                <econdition field-name="roleTypeId" operator="in" value="Assignee,DefaultAssignee,OrgTeam" ignore="!onlyAssignable"/>
-                <order-by field-name="^firstName,^lastName,^organizationName"/>
-            </entity-find>
-            <script>
-                resultList = []
-                if (addOptional) resultList.add([partyId:"", name:"None"])
-                for (party in partyList) resultList.add([partyId:party.partyId, name:ec.resource.expand('PartyNameTemplate', '', party)])
-            </script>
+            <if condition="onlyAssignable &amp;&amp; !roleTypeId">
+                <entity-find entity-name="mantle.party.RoleGroupMember" list="projectRoleList" cache="true">
+                    <econdition field-name="roleGroupEnumId" operator="in" value="RgpTask,RgpProject"/>
+                    <order-by field-name="roleTypeId"/>
+                </entity-find>
+                <set field="roleTypeId" from="projectRoleList*.roleTypeId.join(',')"/>
+            </if>
+            <if condition="rootWorkEffortId"><then>
+                <entity-find entity-name="mantle.work.effort.WorkEffortAndPartyDetail" list="partyList" limit="20">
+                    <date-filter/>
+                    <econdition field-name="workEffortId" from="rootWorkEffortId"/>
+                    <econdition field-name="roleTypeId" operator="in" ignore-if-empty="true"/>
+                    <econditions combine="or">
+                        <econdition field-name="firstName" operator="like" value="${term}%" ignore-case="true" ignore="!term"/>
+                        <econdition field-name="lastName" operator="like" value="${term}%" ignore-case="true" ignore="!term"/>
+                        <econdition field-name="organizationName" operator="like" value="${term}%" ignore-case="true" ignore="!term"/>
+                        <econdition field-name="pseudoId" operator="like" value="${term}%" ignore-case="true" ignore="!term"/>
+                    </econditions>
+                    <order-by field-name="^firstName,^lastName,^organizationName"/>
+                </entity-find>
+                <script>
+                    resultList = []
+                    if (addOptional) resultList.add([partyId:"", name:"None"])
+                    for (party in partyList) resultList.add([partyId:party.partyId, name:ec.resource.expand('PartyNameTemplate', '', party)])
+                </script>
+            </then><else>
+                <set field="term" from="term ?: '*'"/>
+
+                <entity-find-one entity-name="mantle.party.PartyDetail" value-field="partyDetail">
+                    <field-map field-name="partyId" from="term"/></entity-find-one>
+                <if condition="partyDetail != null"><then>
+                    <script>
+                        def outList = [[partyId:partyDetail.partyId, name:ec.resource.expand("PartyNameTemplate", "", partyDetail)]]
+                        ec.web.sendJsonResponse(outList)
+                    </script>
+                </then><else>
+                    <!-- NOTE: this code is very similar to the actions in the PartyForms.xml#searchPartyList transition -->
+                    <!-- if we have activeOrgId or filterOrgIds see if user has active org or user org filters -->
+                    <set field="activeOrgId" from="ec.user.context?.activeOrgId"/>
+                    <set field="filterOrgIds" from="ec.user.context?.filterOrgIds"/>
+                    <set field="findFilters" from="ec.artifactExecution.getFindFiltersForUser('mantle.party.Party')"/>
+                    <if condition="findFilters"><set field="entityFilterSetId" from="findFilters[0].entityFilterSetId"/></if>
+                    <!-- <log level="warn" message="Doing party search with activeOrgId ${activeOrgId} filterOrgIds ${filterOrgIds} entityFilterSetId ${entityFilterSetId}"/> -->
+
+                    <script><![CDATA[
+                        StringBuilder termSb = new StringBuilder('(')
+                        if (term.contains('*')) termSb.append(term)
+                        else term.split(' ').each({ termSb.append(it).append('* ') })
+                        termSb.append(')')
+
+                        if (roleTypeId) termSb.append(' AND roles.roleTypeId:(').append(roleTypeId.replaceAll(/,/, ' OR ')).append(')')
+                        termSb.append(' AND (NOT disabled:Y)')
+
+                        if ('MANTLE_USER_ORG'.equals(entityFilterSetId)) {
+                            termSb.append(' AND ownerPartyId:(' + (filterOrgIds ? filterOrgIds.join(' OR ') + ' OR ' : '') + '_NA_)')
+                        } else if ('MANTLE_ACTIVE_ORG'.equals(entityFilterSetId) && activeOrgId) {
+                            termSb.append(' AND ownerPartyId:(' + activeOrgId + ' OR _NA_)')
+                        }
+                    ]]></script>
+                    <!-- <log level="warn" message="Doing party search with queryString [${termSb.toString()}], indexName:${indexName}, documentType:${documentType}"/> -->
+                    <service-call name="org.moqui.search.SearchServices.search#DataDocuments" out-map="context"
+                            in-map="[queryString:termSb.toString(), indexName:searchIndexName, documentType:searchPartyDocType]"/>
+                    <!-- <log level="warn" message="Got party search results: ${documentList}"/> -->
+                    <script>
+                        def outList = []
+                        for (document in documentList) outList.add([partyId:document._id, name:ec.resource.expand("PartyNameTemplate", "", document)])
+                        ec.web.sendJsonResponse(outList)
+                    </script>
+                    <!-- <log level="warn" message="Got party search outList: ${outList}"/> -->
+                </else></if>
+            </else></if>
         </actions>
     </service>
     <service verb="get" noun="ProjectTeams">

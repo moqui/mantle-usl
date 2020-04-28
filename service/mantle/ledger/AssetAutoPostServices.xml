@@ -39,10 +39,10 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <if condition="asset.acquireCost == null">
-                <log level="warn" message="Not posting Asset Receipt ${assetReceiptId}, Asset has no acquireCost"/>
+                <log level="warn" message="Not posting Asset Receipt ${assetReceiptId}, Asset has no Acquire Cost"/>
                 <set field="assetReceipt.acctgTransResultEnumId" value="AtrNoAcquireCost"/>
                 <entity-update value-field="assetReceipt"/>
-                <return message="Not posting Asset Receipt ${assetReceiptId}, Asset has no acquireCost"/>
+                <return message="Not posting Asset Receipt ${assetReceiptId}, Asset has no Acquire Cost"/>
             </if>
 
             <!-- make sure there is no existing transaction -->
@@ -90,6 +90,15 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- determine receiptGlAccountId (credit) -->
             <set field="receiptGlAccountId" from="assetReceipt.workEffortId ?
                     assetTypeGlAccount?.wipAssetGlAccountId : assetTypeGlAccount?.receiptGlAccountId"/>
+
+            <!-- special handling for transfer shipments, use transferGlAccountId instead of receiptGlAccountId -->
+            <if condition="assetReceipt.shipmentId &amp;&amp; assetTypeGlAccount?.transferGlAccountId">
+                <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment">
+                    <field-map field-name="shipmentId" from="assetReceipt.shipmentId"/></entity-find-one>
+                <if condition="shipment?.shipmentTypeEnumId == 'ShpTpTransfer'">
+                    <set field="receiptGlAccountId" from="assetTypeGlAccount.transferGlAccountId"/></if>
+            </if>
+            <!-- if not specifically configured look for a default account -->
             <if condition="!receiptGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="creditGlAccountOut"
                         in-map="[glAccountTypeEnumId:receiptGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
@@ -168,7 +177,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.product.receipt.AssetReceipt" value-field="assetReceipt" for-update="true"/>
             <if condition="assetReceipt == null"><return error="true" message="Could not find Asset Receipt with ID ${assetReceiptId}"/></if>
             <!-- only fail if null to allow setting to zero to delete original TX and not create new one -->
-            <if condition="assetReceipt.quantityAccepted == null"><return message="No quantity accepted on receipt, not posting inventory transaction to GL for receipt ${assetReceiptId}"/></if>
+            <if condition="assetReceipt.quantityAccepted == null"><return message="No quantity accepted on receipt (is null), not reposting inventory transaction to GL for receipt ${assetReceiptId}"/></if>
 
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
                 <econdition field-name="assetReceiptId"/>
@@ -184,8 +193,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
             </iterate>
 
-            <!-- now post the AssetReceipt again -->
-            <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetReceipt" in-map="[assetReceiptId:assetReceiptId]"/>
+            <!-- now post the AssetReceipt again (if has acquireCost and ownerPartyId) -->
+            <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
+                <field-map field-name="assetId" from="assetReceipt.assetId"/></entity-find-one>
+            <if condition="asset?.acquireCost &amp;&amp; asset?.ownerPartyId">
+                <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetReceipt" in-map="[assetReceiptId:assetReceiptId]"/></if>
         </actions>
     </service>
 
@@ -216,7 +228,7 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="asset.acquireCost == null || asset.acquireCost == 0.0">
                 <set field="assetIssuance.acctgTransResultEnumId" value="AtrNoAcquireCost"/>
                 <entity-update value-field="assetIssuance"/>
-                <return message="Not posting Asset Issuance ${assetIssuanceId}, Asset has no acquireCost"/>
+                <return message="Not posting Asset Issuance ${assetIssuanceId}, Asset has no Acquire Cost"/>
             </if>
 
             <!-- make sure there is no existing transaction -->
@@ -283,6 +295,15 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- determine issuanceGlAccountId (debit) -->
             <set field="issuanceGlAccountId" from="workEffort?.ownerPartyId == asset.ownerPartyId ?
                     assetTypeGlAccount?.wipAssetGlAccountId : assetTypeGlAccount?.issuanceGlAccountId"/>
+
+            <!-- special handling for transfer shipments, use transferGlAccountId instead of issuanceGlAccountId -->
+            <if condition="assetIssuance.shipmentId &amp;&amp; assetTypeGlAccount?.transferGlAccountId">
+                <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment">
+                    <field-map field-name="shipmentId" from="assetIssuance.shipmentId"/></entity-find-one>
+                <if condition="shipment?.shipmentTypeEnumId == 'ShpTpTransfer'">
+                    <set field="issuanceGlAccountId" from="assetTypeGlAccount.transferGlAccountId"/></if>
+            </if>
+            <!-- if not specifically configured look for a default account -->
             <if condition="!issuanceGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="issuanceGlAccountOut"
                         in-map="[glAccountTypeEnumId:issuanceGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
@@ -369,8 +390,9 @@ along with this software (see the LICENSE.md file). If not, see
         <out-parameters><parameter name="acctgTransId"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.product.issuance.AssetIssuance" value-field="assetIssuance" for-update="true"/>
-            <if condition="assetIssuance == null"><return error="true" message="Could not find Asset Issuance with ID ${assetIssuanceId}"/></if>
-            <if condition="!assetIssuance.quantity"><return message="No quantity issued, not posting inventory transaction to GL for issuance ${assetIssuanceId}"/></if>
+            <if condition="assetIssuance == null"><return error="true" message="In repost could not find Asset Issuance with ID ${assetIssuanceId}"/></if>
+            <!-- only fail if null to allow setting to zero to delete original TX and not create new one -->
+            <if condition="assetIssuance.quantity == null"><return message="No quantity issued (is null), not reposting inventory transaction to GL for issuance ${assetIssuanceId}"/></if>
 
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
                 <econdition field-name="assetIssuanceId"/>
@@ -379,15 +401,22 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
-            <if condition="!existingTransList"><log level="warn" message="In repost#AssetIssuance ${assetIssuanceId} no existing AcctgTrans records found"/></if>
+            <if condition="!existingTransList"><then>
+                <log level="warn" message="In repost#AssetIssuance ${assetIssuanceId} no existing AcctgTrans records found"/>
+            </then><else>
+                <log message="In repost#AssetIssuance ${assetIssuanceId} unposting and deleting AcctgTrans ${existingTransList*.acctgTransId}"/>
+            </else></if>
             <!-- unpost and delete existing -->
             <iterate list="existingTransList" entry="acctgTrans">
                 <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
                 <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
             </iterate>
 
-            <!-- now post the AssetIssuance again -->
-            <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetIssuance" in-map="[assetIssuanceId:assetIssuanceId]"/>
+            <!-- now post the AssetIssuance again (if has acquireCost and ownerPartyId) -->
+            <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
+                <field-map field-name="assetId" from="assetIssuance.assetId"/></entity-find-one>
+            <if condition="asset?.acquireCost &amp;&amp; asset?.ownerPartyId">
+                <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetIssuance" in-map="[assetIssuanceId:assetIssuanceId]"/></if>
         </actions>
     </service>
 
@@ -701,6 +730,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
                 <econdition field-name="ownerPartyId" operator="in" from="expandResult.orgPartyIdList"/>
                 <econdition field-name="depreciationTypeEnumId" operator="not-equals" from="null"/>
+                <order-by field-name="assetId"/>
             </entity-find>
 
             <log level="info" message="Calculating and posting depreciation for organizations: ${expandResult.orgPartyIdList}, assets: ${assetList.assetId}"/>
@@ -747,6 +777,12 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="transactionDate" from="physicalInventory.physicalInventoryDate ?: assetDetail.effectiveDate"/>
             <set field="organizationPartyId" from="asset.ownerPartyId"/>
+            <if condition="!organizationPartyId">
+                <log level="trace" message="Not posting Physical Inventory ${assetDetail.physicalInventoryId} variance for Asset Detail ${assetDetailId}, Asset ${assetId} has no Owner Party"/>
+                <set field="assetDetail.acctgTransResultEnumId" value="AtrNoAcctgPreference"/>
+                <entity-update value-field="assetDetail"/>
+                <return/>
+            </if>
 
             <set field="isFound" from="assetDetail.quantityOnHandDiff &gt; 0"/>
             <set field="quantity" from="assetDetail.quantityOnHandDiff &gt; 0 ? assetDetail.quantityOnHandDiff : -assetDetail.quantityOnHandDiff"/>
@@ -757,7 +793,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="partyAcctgPreference" from="papOut.partyAcctgPreference"/>
             <!-- if no preference we shouldn't post anything -->
             <if condition="!partyAcctgPreference">
-                <log level="trace" message="Not posting Physical Inventory [${assetDetail.physicalInventoryId}] variance for Asset Detail [${assetDetailId}], could not find PartyAcctgPreference for Owner Party [${organizationPartyId}]"/>
+                <log level="trace" message="Not posting Physical Inventory ${assetDetail.physicalInventoryId} variance for Asset Detail ${assetDetailId}, could not find PartyAcctgPreference for Owner Party ${organizationPartyId}"/>
                 <set field="assetDetail.acctgTransResultEnumId" value="AtrNoAcctgPreference"/>
                 <entity-update value-field="assetDetail"/>
                 <return/>
@@ -866,8 +902,11 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
             </iterate>
 
-            <!-- now post the PhysicalInventoryVariance again -->
-            <service-call name="mantle.ledger.AssetAutoPostServices.post#PhysicalInventoryVariance" in-map="[assetDetailId:assetDetailId]"/>
+            <!-- now post the PhysicalInventoryVariance again (if has acquireCost and ownerPartyId) -->
+            <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
+                <field-map field-name="assetId" from="assetDetail.assetId"/></entity-find-one>
+            <if condition="asset?.acquireCost &amp;&amp; asset?.ownerPartyId">
+                <service-call name="mantle.ledger.AssetAutoPostServices.post#PhysicalInventoryVariance" in-map="[assetDetailId:assetDetailId]"/></if>
         </actions>
     </service>
 

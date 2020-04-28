@@ -45,6 +45,11 @@ class AccountingActivities extends Specification {
         // init the framework, get the ec
         ec = Moqui.getExecutionContext()
         ec.user.loginUser("john.doe", "moqui")
+
+        // Uncomment to wait for profiler attach; this is the first test class run in mantle-usl (see MantleUslSuite.groovy)
+        // logger.warn("Waiting...")
+        // Thread.sleep(40000)
+
         // set an effective date so data check works, etc
         ec.user.setEffectiveTime(new Timestamp(effectiveTime))
 

@@ -42,6 +42,7 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="timePeriodId" required="true"/>
             <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
+            <parameter name="allowClosingBeforeEnd" default="false"/>
         </in-parameters>
         <out-parameters>
             <parameter name="invoiceIdByPartyRelationshipId" type="Map"/>
@@ -55,7 +56,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="timePeriod.isClosed == 'Y'">
                 <message error="true">Not processing pay for period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, already closed.</message></if>
-            <if condition="ec.user.nowTimestamp.before(timePeriod.thruDate)">
+            <if condition="ec.user.nowTimestamp.before(timePeriod.thruDate) &amp;&amp; !allowClosingBeforeEnd">
                 <message error="true">Not closing period ${ec.resource.expand('TimePeriodNameTemplate','',timePeriod)}, period has not ended (ends on ${timePeriod.thruDate}).</message></if>
             <check-errors/>
 
@@ -168,6 +169,8 @@ along with this software (see the LICENSE.md file). If not, see
                             toPartyId:timePeriod.partyId, statusId:'InvoiceReceived', invoiceDate:payDate, dueDate:dueDate,
                             currencyUomId:currencyUomId, timePeriodId:timePeriodId]"/>
                 <set field="payeeInvoiceId" from="invoiceOut.invoiceId"/>
+                <service-call name="mantle.party.PartyServices.get#PartySettingValue" in-map="[partySettingTypeId:'PayrollEmployeePartyIdType', partyId:timePeriod.partyId]" out-map="idSetting"/>
+                <set field="partyIdTypeEnumId" from="idSetting.settingValue ?: 'PtidSsn'"/>
                 <!-- create the invoice items, one for each payeeAdjustment -->
                 <iterate list="payeeAdjustmentList" entry="payeeAdjustment">
                     <!-- make description, lookup PartyDetail, SSN PartyIdentification -->
@@ -175,9 +178,9 @@ along with this software (see the LICENSE.md file). If not, see
                         <field-map field-name="partyId" from="payeeAdjustment.fromPartyId"/></entity-find-one>
                     <entity-find-one entity-name="mantle.party.PartyIdentification" value-field="partySsn">
                         <field-map field-name="partyId" from="payeeAdjustment.fromPartyId"/>
-                        <field-map field-name="partyIdTypeEnumId" value="PtidSsn"/>
+                        <field-map field-name="partyIdTypeEnumId"/>
                     </entity-find-one>
-                    <set field="description" value="${payeeAdjustment.description} for ${partyDetail.firstName?:''} ${partyDetail.lastName?:''}${partyDetail.organizationName?:''} SSN ${partySsn?.idValue ?: 'N/A'} Ref ${payeeAdjustment.payeeReference ?: 'N/A'}"/>
+                    <set field="description" from="ec.resource.expand('PayrollPayeeInvoiceItemDescription', null)"/>
 
                     <service-call name="create#mantle.account.invoice.InvoiceItem"
                             in-map="[invoiceId:payeeInvoiceId, itemTypeEnumId:payeeAdjustment.itemTypeEnumId,
@@ -603,7 +606,8 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="salaryFlag == 'Y'"><then>
                 <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
                 <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
-                    <date-filter valid-date="thruTimestamp"/>
+                    <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
+                    <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp" or-null="true"/>
                     <econdition field-name="partyRelationshipId"/>
                     <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
                     <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
@@ -624,13 +628,13 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="partialFrom || partialThru">
                     <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
                         <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
-                    <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time)"/>
+                    <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time+24*60*60*1000-1)"/>
                         <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
                     <!-- TODO: this is messy, consider working days, etc? -->
                     <!-- for now do a simple ratio of milliseconds -->
-                    <set field="partialTime" from="partialThru.time - partialFrom.time"/>
+                    <set field="partialTime" from="partialThruDate.time - partialFromDate.time"/>
                     <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
-                    <set field="payAmount" from="(payAmount * (partialTime/periodTime)).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                    <set field="payAmount" from="ec.l10n.roundCurrency(payAmount * (partialTime/periodTime), currencyUomId)"/>
                 </if>
             </then><else>
                 <!-- Gather uninvoiced time entries -->
@@ -649,8 +653,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="payAmount" from="payAmount + getTeaOut.amountTotal"/>
                     <set field="currencyUomId" from="getTeaOut.currencyUomId"/>
                 </iterate>
-                <!-- round total to 2 decimal places -->
-                <set field="payAmount" from="payAmount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <!-- round according to currency -->
+                <set field="payAmount" from="ec.l10n.roundCurrency(payAmount, currencyUomId)"/>
             </else></if>
         </actions>
     </service>
@@ -680,6 +684,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="employment" type="Map"/>
             <parameter name="timePeriodId" required="true"/>
             <parameter name="payDate" type="Date"><description>Defaults to TimePeriod.thruDate</description></parameter>
+            <parameter name="currencyUomId"/>
         </in-parameters>
         <out-parameters>
             <parameter name="payAmount" type="BigDecimal"/>
@@ -751,7 +756,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="adjustmentList" from="[]"/>
 
             <entity-find entity-name="mantle.humanres.employment.PayrollAdjustment" list="allPayrollAdjustmentList">
-                <date-filter valid-date="payTimestamp"/>
+                <econdition field-name="fromDate" operator="less-equals" from="payDate"/>
+                <econdition field-name="thruDate" operator="greater-equals" from="payDate" or-null="true"/>
                 <econdition field-name="organizationPartyId" from="employment.toPartyId" or-null="true"/>
                 <econdition field-name="partyRelationshipId" or-null="true"/>
                 <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId" or-null="true"/>
@@ -805,7 +811,7 @@ along with this software (see the LICENSE.md file). If not, see
             
             <set field="calcAdjParameters" from="[
                     partyRelationshipId:partyRelationshipId, employment:employment, employee:employee,
-                    timePeriod:timePeriod, timeEntryList:timeEntryList,
+                    timePeriod:timePeriod, timeEntryList:timeEntryList, currencyUomId:currencyUomId,
                     timeEntryRiskClassInfoList:timeEntryRiskClassInfoList,
                     timePeriodTypeId:timePeriod.timePeriodTypeId,
                     payTimestamp:payTimestamp, payAmount:payAmount, homePostalAddress:homePostalAddress]"/>
@@ -839,7 +845,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <script>adjustmentList.add(calcOut)</script>
                     <if condition="!calcOut.quantity"><set field="calcOut.quantity" from="1.0"/></if>
                     <set field="amountTotal" from="calcOut.quantity * calcOut.amount"/>
-                    <if condition="payrollPhaseEnumId == 'PrphBonus'">
+                    <if condition="payrollPhaseEnumId == 'PrphBonus' &amp;&amp; payrollAdjustment.isEmployerPaid == 'Y'">
                         <set field="payAmount" from="payAmount + amountTotal"/>
                         <set field="calcAdjParameters.payAmount" from="payAmount"/>
                     </if>
@@ -931,7 +937,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
 
                 <!-- ROUND_HALF_DOWN here so the deduction amount is never more than the percentage limit -->
-                <set field="deductionAmount" from="deductionAmount.setScale(2, BigDecimal.ROUND_HALF_DOWN)"/>
+                <set field="deductionAmount" from="ec.l10n.roundCurrency(deductionAmount, currencyUomId, false, BigDecimal.ROUND_HALF_DOWN)"/>
                 <set field="adjustment.amount" from="-deductionAmount"/>
                 <set field="disposableRemaining" from="disposableRemaining - deductionAmount"/>
             </iterate>
@@ -953,6 +959,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="employment" type="Map"/>
             <parameter name="employee" type="Map"/>
             <parameter name="emplPosition" type="Map"/>
+            <parameter name="currencyUomId"/>
 
             <parameter name="adjCalcServiceId"><description>Only populated if called from a PayrollAdjCalcService</description></parameter>
             <parameter name="description"><description>If configured for service will be set, may expand in context (up to service to decide)</description></parameter>
@@ -1057,9 +1064,6 @@ along with this software (see the LICENSE.md file). If not, see
             </then><else-if condition="rateBasisEnumId == 'PrbsSocial'">
                 <set field="adjustmentBasisAmount" from="socialTaxablePayAmount"/>
                 <set field="adjustmentYtdAmount" from="socialTaxableYtdIncome"/>
-            </else-if><else-if condition="rateBasisEnumId == 'PrbsMedical'">
-                <set field="adjustmentBasisAmount" from="medicalTaxablePayAmount"/>
-                <set field="adjustmentYtdAmount" from="medicalTaxableYtdIncome"/>
             </else-if><else-if condition="rateBasisEnumId == 'PrbsMedical'">
                 <set field="adjustmentBasisAmount" from="medicalTaxablePayAmount"/>
                 <set field="adjustmentYtdAmount" from="medicalTaxableYtdIncome"/>
@@ -1234,6 +1238,11 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- <log message="====== adjustmentYtdAmount=${adjustmentYtdAmount}, adjustmentBasisAmount=${adjustmentBasisAmount}, payrollAdjustmentDetailList:\n${payrollAdjustmentDetailList}"/> -->
 
+            <if condition="!currencyUomId">
+                <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
+                              in-map="[organizationPartyId:organizationPartyId]"/>
+                <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId"/>
+            </if>
             <!-- calculate adjustment amount -->
             <if condition="payrollAdjustmentDetailList">
                 <set field="adjustmentDetail" from="payrollAdjustmentDetailList[0]"/>
@@ -1244,7 +1253,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="adjustmentDetail.rateAfterPeriodMin == 'Y'">
                     <set field="rateBasis" from="rateBasis - adjustmentDetail.periodMin"/></if>
                 <set field="amount" from="(adjustmentDetail.flatAmount ?: 0) + ((adjustmentDetail.rate ?: 0) * rateBasis)" type="BigDecimal"/>
-                <set field="amount" from="amount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <set field="amount" from="ec.l10n.roundCurrency(amount, currencyUomId)"/>
                 <!-- <log message="=== pre-exemption amount=${amount}"/> -->
 
                 <if condition="amount != 0">
