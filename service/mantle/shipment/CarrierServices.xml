@@ -321,13 +321,17 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="orderItemSeqId"/>
         </out-parameters>
         <actions>
-            <if condition="!shippingGatewayConfigId">
-                <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
-                <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
-                <set field="carrierPartyId" from="carrierPartyId ?: orderPart.carrierPartyId"/>
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
+            <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
 
+            <set field="productStoreId" from="orderHeader.productStoreId"/>
+            <set field="carrierPartyId" from="carrierPartyId ?: orderPart.carrierPartyId"/>
+            <set field="shipmentMethodEnumId" from="shipmentMethodEnumId ?: orderPart.shipmentMethodEnumId"/>
+
+            <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore" cache="true"/>
+
+            <if condition="!shippingGatewayConfigId">
                 <if condition="!carrierPartyId"><return/></if>
-                <set field="productStoreId" from="orderHeader.productStoreId"/>
                 <if condition="!productStoreId">
                     <!-- this shouldn't generally happen as not called when there is no store, but if it does return quietly -->
                     <return/>
@@ -349,10 +353,12 @@ along with this software (see the LICENSE.md file). If not, see
                     message="Could not get order shipping rate, no order rate service on gateway ${shippingGatewayConfig.shippingGatewayConfigId}"/></if>
 
             <!-- if order part has shipping (ItemShipping) items clear them out first -->
-            <if condition="createOrderItem"><entity-delete-by-condition entity-name="mantle.order.OrderItem">
-                <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
-                <econdition field-name="itemTypeEnumId" value="ItemShipping"/>
-            </entity-delete-by-condition></if>
+            <if condition="createOrderItem">
+                <entity-delete-by-condition entity-name="mantle.order.OrderItem">
+                    <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                    <econdition field-name="itemTypeEnumId" value="ItemShipping"/>
+                </entity-delete-by-condition>
+            </if>
 
             <!-- get auto package info if service available -->
             <set field="getAutoPackageInfoName" from="shippingGatewayConfig.getAutoPackageInfoName"/>
@@ -367,6 +373,37 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- call gateway (could be local) service to calculate shipping charges -->
             <service-call name="${getOrderRateServiceName}" in-map="context" out-map="context"/>
+
+            <if condition="productStore?.markupOrderShipLabels == 'Y'">
+                <service-call name="mantle.shipment.CarrierServices.get#ShipLabelMarkup" out-map="markupOut" out-map-add-to-existing="false"
+                        in-map="[productStoreId:productStore.productStoreId, carrierPartyId:carrierPartyId,
+                                        shipmentMethodEnumId:shipmentMethodEnumId]"/>
+
+                <set field="markupAmount" from="markupOut?.markupAmount ?: 0.0"/>
+                <set field="markupMultiplier" from="markupOut?.markupMultiplier ?: 0.0"/>
+
+                <if condition="(markupMultiplier != 0.0 || markupAmount != 0.0)">
+                    <if condition="shippingTotal">
+                        <set field="shippingTotal" from="shippingTotal + markupAmount +
+                            (markupMultiplier as BigDecimal).multiply(shippingTotal).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                    </if>
+                    <!-- if an OrderItem was created update it too -->
+                    <if condition="createOrderItem">
+                        <entity-find entity-name="mantle.order.OrderItem" list="shippingItemList">
+                            <econdition field-name="orderId"/><econdition field-name="orderPartSeqId"/>
+                            <econdition field-name="itemTypeEnumId" value="ItemShipping"/>
+                        </entity-find>
+                        <iterate list="shippingItemList" entry="shippingItem">
+                            <if condition="shippingItem.unitAmount">
+                                <set field="shippingItem.standardCost" from="shippingItem.unitAmount"/>
+                                <set field="shippingItem.unitAmount" from="shippingItem.unitAmount + markupAmount +
+                                    (markupMultiplier as BigDecimal).multiply(shippingItem.unitAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                                <entity-update value-field="shippingItem"/>
+                            </if>
+                        </iterate>
+                    </if>
+                </if>
+            </if>
         </actions>
     </service>
     <service verb="get" noun="OrderShippingRatesBulk">
@@ -398,6 +435,7 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!productStoreId"><return/></if>
 
             <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
+            <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore" cache="true"/>
 
             <!-- if no options requested get all on store -->
             <if condition="!carrierShipmentMethodList">
@@ -421,7 +459,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="shippingGatewayConfig == null"><continue/></if>
                 <!-- <log level="warn" message="shippingGatewayConfigId ${shippingGatewayConfigId} carrierPartyIdSet ${carrierPartyIdSet}"/> -->
 
-                <!-- if both single and bulk services configured send _NA_ to single only (bulk typically through carrier integration, _NA_ is independent of carrier -->
+                <!-- if both single and bulk services configured send _NA_ to single only (bulk typically through carrier integration, _NA_ is independent of carrier) -->
                 <set field="otherCarrierMethodList" from="carrierShipmentMethodList.findAll({ it.carrierPartyId != '_NA_' &amp;&amp; it.carrierPartyId in carrierPartyIdSet })"/>
                 <set field="naCarrierMethodList" from="carrierShipmentMethodList.findAll({ it.carrierPartyId == '_NA_' &amp;&amp; it.carrierPartyId in carrierPartyIdSet })"/>
                 <if condition="shippingGatewayConfig.getShippingRatesBulkName &amp;&amp; shippingGatewayConfig.getOrderRateServiceName"><then>
@@ -472,7 +510,25 @@ along with this software (see the LICENSE.md file). If not, see
                                     fromPartyId:fromPartyId, toPartyId:toPartyId, originFacilityId:originFacilityId,
                                     originPostalContactMechId:facOriginOut.postalContactMechId,
                                     destPostalContactMechId:destPostalContactMechId, packageInfoList:packageInfoList]"/>
-                    <script>if (bulkOut.shippingRateInfoList) shippingRateInfoList.addAll(bulkOut.shippingRateInfoList)</script>
+                    <iterate list="bulkOut.shippingRateInfoList" entry="shippingRateInfo">
+                        <if condition="productStore?.markupOrderShipLabels == 'Y'">
+                            <service-call name="mantle.shipment.CarrierServices.get#ShipLabelMarkup" out-map="markupOut" out-map-add-to-existing="false"
+                                    in-map="[productStoreId:productStore.productStoreId, carrierPartyId:shippingRateInfo.carrierPartyId,
+                                        shipmentMethodEnumId:shippingRateInfo.shipmentMethodEnumId]"/>
+
+                            <set field="markupAmount" from="markupOut?.markupAmount ?: 0.0"/>
+                            <set field="markupMultiplier" from="markupOut?.markupMultiplier ?: 0.0"/>
+
+                            <if condition="(markupMultiplier != 0.0 || markupAmount != 0.0) &amp;&amp; shippingRateInfo.shippingTotal">
+                                <set field="shippingRateInfo.shippingTotal" from="shippingRateInfo.shippingTotal + markupAmount +
+                                    (markupMultiplier as BigDecimal).multiply(shippingRateInfo.shippingTotal).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                            </if>
+                        </if>
+
+                        <script>shippingRateInfoList.add(shippingRateInfo)</script>
+                    </iterate>
+
+
                     <if condition="!postalContactMechId &amp;&amp; bulkOut.destPostalContactMechId &amp;&amp; bulkOut.destPostalContactMechId != orderPart.postalContactMechId">
                         <set field="orderPart.postalContactMechId" from="bulkOut.destPostalContactMechId"/>
                         <!-- use entity auto service to update postalContactMechId (and ONLY postalContactMechId) -->
@@ -498,6 +554,7 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <!-- not implemented and likely not needed, bulk rates better:
     <service verb="get" noun="ShipmentRates">
         <description>Get a rate quote for each package in a shipment</description>
         <in-parameters>
@@ -505,9 +562,9 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="shipmentRouteSegmentSeqId"><description>Defaults to the first route segment</description></parameter>
         </in-parameters>
         <actions>
-            <!-- TODO (FUTURE) -->
         </actions>
     </service>
+    -->
 
     <!-- ========================================= -->
     <!-- Shipping Label Services (called directly) -->
@@ -536,49 +593,103 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if Shipment has productStoreId and store has a label markup setting apply it now -->
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
             <if condition="shipment.productStoreId">
-                <entity-find entity-name="mantle.product.store.ProductStoreSetting" list="labelMarkupSettingList" cache="true">
-                    <date-filter/>
-                    <econdition field-name="productStoreId" from="shipment.productStoreId"/>
-                    <econdition field-name="settingTypeEnumId" value="PsstShipLabelMarkup"/>
-                    <order-by field-name="-fromDate"/>
+                <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore" cache="true">
+                    <field-map field-name="productStoreId" from="shipment.productStoreId"/></entity-find-one>
+            </if>
+            <if condition="productStore?.markupShipmentShipLabels == 'Y'">
+                <entity-find entity-name="mantle.shipment.ShipmentRouteSegment" list="srsList">
+                    <econdition field-name="shipmentId"/>
+                    <econdition field-name="shipmentRouteSegmentSeqId" ignore-if-empty="true"/>
                 </entity-find>
-                <set field="labelMarkupValue" from="labelMarkupSettingList ? labelMarkupSettingList[0]?.settingValue : null"/>
-                <if condition="labelMarkupValue &amp;&amp; !labelMarkupValue.isBigDecimal()">
-                    <log level="error" message="Shipping Label Markup not a valid number ${labelMarkupValue} for store ${shipment.productStoreId}"/></if>
-                <set field="labelMarkupBd" from="labelMarkupValue &amp;&amp; labelMarkupValue.isBigDecimal() ?
-                        new BigDecimal(labelMarkupValue).divide(100.0, 4, BigDecimal.ROUND_HALF_UP) : 0.0"/>
-                <if condition="labelMarkupBd">
-                    <entity-find entity-name="mantle.shipment.ShipmentPackageRouteSeg" list="packageRouteSegList">
-                        <econdition field-name="shipmentId"/>
-                        <econdition field-name="shipmentPackageSeqId" ignore-if-empty="true"/>
-                        <econdition field-name="shipmentRouteSegmentSeqId" ignore-if-empty="true"/>
-                    </entity-find>
-                    <iterate list="packageRouteSegList" entry="packageRouteSeg">
-                        <!-- normalize and calc MAIN label amounts -->
-                        <if condition="packageRouteSeg.estimatedAmount == null &amp;&amp; packageRouteSeg.baseAmount != null">
-                            <set field="packageRouteSeg.estimatedAmount" from="packageRouteSeg.baseAmount"/></if>
-                        <if condition="packageRouteSeg.estimatedAmount != null">
-                            <if condition="packageRouteSeg.baseAmount == null">
-                                <set field="packageRouteSeg.baseAmount" from="packageRouteSeg.estimatedAmount"/></if>
-                            <set field="packageRouteSeg.estimatedAmount"
-                                    from="packageRouteSeg.baseAmount + (labelMarkupBd as BigDecimal).multiply(packageRouteSeg.baseAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
-                        </if>
-                        <!-- normalize and calc RETURN label amounts -->
-                        <if condition="packageRouteSeg.returnEstimatedAmount == null &amp;&amp; packageRouteSeg.returnBaseAmount != null">
-                            <set field="packageRouteSeg.returnEstimatedAmount" from="packageRouteSeg.returnBaseAmount"/></if>
-                        <if condition="packageRouteSeg.returnEstimatedAmount != null">
-                            <if condition="packageRouteSeg.returnBaseAmount == null">
-                                <set field="packageRouteSeg.returnBaseAmount" from="packageRouteSeg.returnEstimatedAmount"/></if>
-                            <set field="packageRouteSeg.returnEstimatedAmount"
-                                    from="packageRouteSeg.returnBaseAmount + (labelMarkupBd as BigDecimal).multiply(packageRouteSeg.returnBaseAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
-                        </if>
-                        <!-- save it -->
-                        <entity-update value-field="packageRouteSeg"/>
-                    </iterate>
-                </if>
+                <entity-find entity-name="mantle.shipment.ShipmentPackageRouteSeg" list="allPackageRouteSegList">
+                    <econdition field-name="shipmentId"/>
+                    <econdition field-name="shipmentPackageSeqId" ignore-if-empty="true"/>
+                </entity-find>
+
+                <iterate list="srsList" entry="routeSegment">
+                    <service-call name="mantle.shipment.CarrierServices.get#ShipLabelMarkup" out-map="markupOut" out-map-add-to-existing="false"
+                            in-map="[productStoreId:productStore.productStoreId, carrierPartyId:routeSegment.carrierPartyId, shipmentMethodEnumId:routeSegment.shipmentMethodEnumId]"/>
+                    <set field="markupAmount" from="markupOut?.markupAmount ?: 0.0"/>
+                    <set field="markupMultiplier" from="markupOut?.markupMultiplier ?: 0.0"/>
+
+                    <if condition="markupMultiplier != 0.0 || markupAmount != 0.0">
+                        <filter-map-list list="allPackageRouteSegList" to-list="packageRouteSegList">
+                            <field-map field-name="shipmentRouteSegmentSeqId" from="routeSegment.shipmentRouteSegmentSeqId"/></filter-map-list>
+                        <iterate list="packageRouteSegList" entry="packageRouteSeg">
+                            <!-- normalize and calc MAIN label amounts -->
+                            <if condition="packageRouteSeg.estimatedAmount != null || packageRouteSeg.baseAmount != null">
+                                <if condition="packageRouteSeg.estimatedAmount == null">
+                                    <set field="packageRouteSeg.estimatedAmount" from="packageRouteSeg.baseAmount"/></if>
+                                <if condition="packageRouteSeg.baseAmount == null">
+                                    <set field="packageRouteSeg.baseAmount" from="packageRouteSeg.estimatedAmount"/></if>
+                                <set field="packageRouteSeg.estimatedAmount" from="packageRouteSeg.baseAmount + markupAmount +
+                                        (markupMultiplier as BigDecimal).multiply(packageRouteSeg.baseAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                            </if>
+                            <!-- normalize and calc RETURN label amounts -->
+                            <if condition="packageRouteSeg.returnEstimatedAmount != null || packageRouteSeg.returnBaseAmount != null">
+                                <if condition="packageRouteSeg.returnEstimatedAmount == null">
+                                    <set field="packageRouteSeg.returnEstimatedAmount" from="packageRouteSeg.returnBaseAmount"/></if>
+                                <if condition="packageRouteSeg.returnBaseAmount == null">
+                                    <set field="packageRouteSeg.returnBaseAmount" from="packageRouteSeg.returnEstimatedAmount"/></if>
+                                <set field="packageRouteSeg.returnEstimatedAmount" from="packageRouteSeg.returnBaseAmount + markupAmount +
+                                        (markupMultiplier as BigDecimal).multiply(packageRouteSeg.returnBaseAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                            </if>
+                            <!-- save it -->
+                            <entity-update value-field="packageRouteSeg"/>
+                        </iterate>
+                    </if>
+                </iterate>
             </if>
         </actions>
     </service>
+    <service verb="get" noun="ShipLabelMarkup">
+        <in-parameters>
+            <parameter name="productStoreId" required="true"/>
+            <parameter name="carrierPartyId" required="true"/>
+            <parameter name="shipmentMethodEnumId" required="true"/>
+            <parameter name="baseAmount" type="BigDecimal"><description>If specified will use to calculate markedUpAmount</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="markupAmount" type="BigDecimal"/>
+            <parameter name="markupPercent" type="BigDecimal"/>
+            <parameter name="markupMultiplier" type="BigDecimal"/>
+            <parameter name="markedUpAmount" type="BigDecimal"/>
+        </out-parameters>
+        <actions>
+            <entity-find entity-name="mantle.product.store.ProductStoreSetting" list="labelMarkupSettingList" cache="true">
+                <econdition field-name="productStoreId"/>
+                <econdition field-name="settingTypeEnumId" value="PsstShipLabelMarkup"/>
+                <date-filter/>
+                <order-by field-name="-fromDate"/>
+            </entity-find>
+            <set field="labelMarkupValue" from="labelMarkupSettingList ? labelMarkupSettingList[0]?.settingValue : null"/>
+            <if condition="labelMarkupValue &amp;&amp; !labelMarkupValue.isBigDecimal()">
+                <log level="error" message="Shipping Label Markup not a valid number ${labelMarkupValue} for store ${shipment.productStoreId}"/></if>
+            <set field="labelMarkupPercent" from="labelMarkupValue &amp;&amp; labelMarkupValue.isBigDecimal() ?
+                        new BigDecimal(labelMarkupValue) : null"/>
+
+            <entity-find-one entity-name="mantle.product.store.ProductStoreShipOption" value-field="productStoreShipOption" cache="true">
+                <field-map field-name="productStoreId"/>
+                <field-map field-name="carrierPartyId"/>
+                <field-map field-name="shipmentMethodEnumId"/>
+            </entity-find-one>
+            <if condition="productStoreShipOption?.markupPercent != null || productStoreShipOption?.markupAmount != null"><then>
+                <set field="markupPercent" from="productStoreShipOption.markupPercent ?: 0.0"/>
+                <set field="markupAmount" from="productStoreShipOption.markupAmount ?: 0.0"/>
+            </then><else>
+                <set field="markupPercent" from="labelMarkupPercent ?: 0.0"/>
+                <set field="markupAmount" from="0.0"/>
+            </else></if>
+
+            <set field="markupMultiplier" from="markupPercent ? markupPercent.divide(100.0, 4, BigDecimal.ROUND_HALF_UP) : 0.0"/>
+
+            <if condition="baseAmount != null">
+                <set field="markedUpAmount" from="baseAmount + markupAmount +
+                    (markupMultiplier as BigDecimal).multiply(baseAmount).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+            </if>
+        </actions>
+    </service>
+
     <service verb="refund" noun="ShipmentLabels">
         <in-parameters>
             <parameter name="shipmentId" required="true"/>
