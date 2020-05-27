@@ -1562,16 +1562,17 @@ General Order Placement and eCommerce Usage
         </actions>
     </service>
 
-    <!-- ================================= -->
-    <!-- ========== Clone Order ========== -->
-    <!-- ================================= -->
+    <!-- ============================================================== -->
+    <!-- ========== Clone Order and Recurring Order Services ========== -->
+    <!-- ============================================================== -->
 
     <service verb="clone" noun="Order">
         <description>Clone an order. Always copies the OrderHeader, OrderPart, and OrderItem records.</description>
         <in-parameters>
             <parameter name="baseOrderId" required="true" default="orderId"/>
             <parameter name="orderId"/>
-            <auto-parameters entity-name="mantle.order.OrderHeader" include="nonpk"/>
+            <auto-parameters entity-name="mantle.order.OrderHeader" include="nonpk">
+                <exclude field-name="parentOrderId"/><exclude field-name="lastOrderedDate"/></auto-parameters>
             <auto-parameters entity-name="mantle.order.OrderPart" include="nonpk"/>
             <parameter name="requiredByDate" type="Timestamp"/>
             <parameter name="statusId" default-value="OrderOpen"/>
@@ -1592,21 +1593,33 @@ General Order Placement and eCommerce Usage
         </in-parameters>
         <out-parameters><parameter name="orderId"/></out-parameters>
         <actions>
-            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="order">
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader">
                 <field-map field-name="orderId" from="baseOrderId"/></entity-find-one>
 
-            <entity-set value-field="order" include="nonpk"/>
+            <!-- clear and sequence new orderId -->
+            <set field="orderHeader.orderId" from="null"/>
+            <entity-sequenced-id-primary value-field="orderHeader"/>
+
+            <!-- set nonpk fields from context, if passed -->
+            <entity-set value-field="orderHeader" include="nonpk"/>
+
+            <!-- set or clear fields related to order cloning and recurrence -->
+            <set field="orderHeader.parentOrderId" from="baseOrderId"/>
+            <set field="orderHeader.recurCronExpression" from="null"/>
+            <set field="orderHeader.lastOrderedDate" from="null"/>
+            <set field="orderHeader.recurAutoInvoice" from="null"/>
+
             <if condition="clearDates">
                 <!-- set the fields even if null, don't do this for other fields -->
-                <set field="order.entryDate" from="entryDate"/>
-                <set field="order.placedDate" from="placedDate"/>
-                <set field="order.lastOrderedDate" from="lastOrderedDate"/>
+                <set field="orderHeader.entryDate" from="entryDate"/>
+                <set field="orderHeader.placedDate" from="placedDate"/>
+                <set field="orderHeader.approvedDate" from="approvedDate"/>
+                <!-- don't set this on clones, used for recurring orders to track last date/time of clone/recurrence: <set field="orderHeader.lastOrderedDate" from="lastOrderedDate"/> -->
             </if>
 
-            <set field="order.orderId" from="null"/>
-            <entity-sequenced-id-primary value-field="order"/>
-            <entity-create value-field="order"/>
-            <set field="orderId" from="order.orderId"/>
+            <!-- create new OrderHeader -->
+            <entity-create value-field="orderHeader"/>
+            <set field="orderId" from="orderHeader.orderId"/>
 
             <entity-find entity-name="mantle.order.OrderPart" list="valueList">
                 <econdition field-name="orderId" from="baseOrderId"/></entity-find>
@@ -1695,7 +1708,43 @@ General Order Placement and eCommerce Usage
                 </iterate>
             </if>
 
-            <message type="success">Created order ${orderId} as a clone of order ${baseOrderId}</message>
+            <message type="success">Created Order ${orderId} as a clone of Order ${baseOrderId}</message>
+        </actions>
+    </service>
+
+    <service verb="update" noun="OrderRecur">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="recurCronExpression" required="true"/>
+            <parameter name="recurAutoInvoice" default-value="N"/>
+        </in-parameters>
+        <actions>
+            <!-- make sure order has no associated shipments or invoices -->
+            <entity-find-count entity-name="mantle.order.OrderItemBilling" count-field="itemBillingCount">
+                <econdition field-name="orderId"/></entity-find-count>
+            <if condition="itemBillingCount">
+                <return error="true" message="Order ${orderId} has been invoiced (billed), cannot make recurring"/></if>
+
+            <entity-find-count entity-name="mantle.shipment.ShipmentItemSource" count-field="shipmentSourceCount">
+                <econdition field-name="orderId"/></entity-find-count>
+            <if condition="shipmentSourceCount">
+                <return error="true" message="Order ${orderId} has been shipped, cannot make recurring"/></if>
+
+            <!-- make sure cron expr is valid -->
+            <script>
+                try { org.moqui.impl.service.ScheduledJobRunner.getExecutionTime((String) recurCronExpression) } catch (Exception e) {
+                    ec.message.addError("Invalid Cron expression '${recurCronExpression}': ${e.message}")
+                    return
+                }
+            </script>
+
+            <!-- update OrderHeader -->
+            <service-call name="update#mantle.order.OrderHeader" in-map="context"/>
+
+            <!-- cancel reservations if there are any -->
+            <service-call name="mantle.product.AssetServices.remove#OrderReservations" in-map="[orderId:orderId]"/>
+
+            <!-- TODO: don't allow AssetReservation, ShipmentItemSource, or OrderItemBilling for OrderHeader with recurCronExpression -->
         </actions>
     </service>
 
