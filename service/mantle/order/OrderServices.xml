@@ -1717,6 +1717,7 @@ General Order Placement and eCommerce Usage
             <parameter name="orderId" required="true"/>
             <parameter name="recurCronExpression" required="true"/>
             <parameter name="recurAutoInvoice" default-value="N"/>
+            <parameter name="lastOrderedDate" type="Timestamp"/>
         </in-parameters>
         <actions>
             <!-- make sure order has no associated shipments or invoices -->
@@ -1745,6 +1746,74 @@ General Order Placement and eCommerce Usage
             <service-call name="mantle.product.AssetServices.remove#OrderReservations" in-map="[orderId:orderId]"/>
 
             <!-- TODO: don't allow AssetReservation, ShipmentItemSource, or OrderItemBilling for OrderHeader with recurCronExpression -->
+        </actions>
+    </service>
+
+    <service verb="create" noun="RecurringOrders" authenticate="anonymous-all">
+        <description>Called by scheduled ServiceJob to clone recurring orders, place, and try auto-approve</description>
+        <actions>
+            <entity-find entity-name="mantle.order.OrderHeader" list="orderHeaderList" cache="false">
+                <econdition field-name="statusId" value="OrderApproved"/>
+                <econdition field-name="recurCronExpression" operator="is-not-null"/>
+                <select-field field-name="orderId,recurCronExpression,lastOrderedDate"/>
+                <order-by field-name="orderId"/>
+            </entity-find>
+            <iterate list="orderHeaderList" entry="orderHeader">
+                <!-- check recurCronExpression vs lastOrderedDate to see if we need to run -->
+                <set field="shouldRun" from="org.moqui.impl.service.ScheduledJobRunner.isLastRunBeforeLastSchedule(
+                        orderHeader.recurCronExpression, orderHeader.lastOrderedDate, 'Order ' + orderHeader.orderId, null)"/>
+
+                <if condition="shouldRun">
+                    <service-call name="mantle.order.OrderServices.create#RecurringOrder"
+                            in-map="[baseOrderId:orderHeader.orderId]" async="distribute"/>
+                </if>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="create" noun="RecurringOrder">
+        <in-parameters>
+            <parameter name="baseOrderId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="orderId"/>
+        </out-parameters>
+        <actions>
+            <!-- lock the order  -->
+            <entity-find-one entity-name="mantle.order.OrderHeader" value-field="baseOrderHeader" for-update="true">
+                <field-map field-name="orderId" from="baseOrderId"/></entity-find-one>
+
+            <if condition="!baseOrderHeader?.recurCronExpression">
+                <return type="danger" message="Order ${baseOrderId} is not a recurring order (has no recur cron expression)"/></if>
+            <if condition="baseOrderHeader?.statusId != 'OrderApproved'">
+                <return type="danger" message="Order ${baseOrderId} is not in the Approved status"/></if>
+
+            <!-- check again to make sure hasn't run since last execution time -->
+            <set field="shouldRun" from="org.moqui.impl.service.ScheduledJobRunner.isLastRunBeforeLastSchedule(
+                    baseOrderHeader.recurCronExpression, baseOrderHeader.lastOrderedDate, 'Order ' + baseOrderHeader.orderId, null)"/>
+            <if condition="!shouldRun"><return type="warning" message="Order ${baseOrderHeader.orderId} is not yet scheduled to reorder since last order time ${baseOrderHeader.lastOrderedDate}"/></if>
+
+            <!-- clone the order -->
+            <service-call name="mantle.order.OrderServices.clone#Order" out-map="cloneOut" in-map="[baseOrderId:baseOrderId]"/>
+            <set field="orderId" from="cloneOut.orderId"/>
+
+            <!-- Place the Order -->
+            <service-call name="mantle.order.OrderServices.place#Order" in-map="[orderId:orderId, requireInventory:false]"/>
+
+            <!-- if recurAutoInvoice == 'Y' AND Order was auto-approved then create Invoice -->
+            <if condition="baseOrderHeader.recurAutoInvoice == 'Y'">
+                <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                    <econdition field-name="orderId"/><order-by field-name="orderPartSeqId"/></entity-find>
+                <iterate list="orderPartList" entry="orderPart">
+                    <if condition="orderPart?.statusId == 'OrderApproved'">
+                        <service-call name="mantle.account.InvoiceServices.create#EntireOrderPartInvoice"
+                                in-map="[orderId:orderId, orderPartSeqId:orderPart.orderPartSeqId]"/>
+                    </if>
+                </iterate>
+            </if>
+
+            <!-- set lastOrderedDate on recurring order -->
+            <set field="baseOrderHeader.lastOrderedDate" from="ec.user.nowTimestamp"/>
+            <entity-update value-field="baseOrderHeader"/>
         </actions>
     </service>
 
