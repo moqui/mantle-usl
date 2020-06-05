@@ -465,6 +465,184 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
         </actions>
     </service>
+    <service verb="get" noun="OrderItemDisplayInfo">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderItemSeqId" required="true"/>
+            <parameter name="orderItem" type="EntityValue"/>
+            <parameter name="orderPart" type="EntityValue"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="orderItem" type="EntityValue"/>
+            <parameter name="orderPart" type="EntityValue"/>
+            <parameter name="product" type="EntityValue"/>
+            <parameter name="isProductItemType" type="Boolean"/>
+            <parameter name="isShippable" type="Boolean"/>
+            <parameter name="partEditable" type="Boolean"/>
+
+            <parameter name="itemQuantityAuditList" type="List"><parameter name="itemQuantityAudit" type="Map">
+                <parameter name="auditLog" type="Map"/>
+                <parameter name="userAccount" type="Map"/>
+                <parameter name="changeReasonEnum" type="Map"/>
+            </parameter></parameter>
+            <parameter name="itemUnitAmountAuditList" type="List"><parameter name="itemUnitAmountAudit" type="Map">
+                <parameter name="auditLog" type="Map"/>
+                <parameter name="userAccount" type="Map"/>
+                <parameter name="changeReasonEnum" type="Map"/>
+            </parameter></parameter>
+
+            <parameter name="orderItemTotalOut" type="Map"><description>Result from mantle.order.OrderServices.get#OrderItemTotal with getChildrenTotals=true</description></parameter>
+            <parameter name="orderItemQuantity" type="BigDecimal"/>
+            <parameter name="orderItemTotal" type="BigDecimal"/>
+            <parameter name="itemQuantityShipped" type="BigDecimal"/>
+            <parameter name="itemQuantityNotShipped" type="BigDecimal"/>
+            <parameter name="itemQuantityBilled" type="BigDecimal"/>
+            <parameter name="itemAmountBilled" type="BigDecimal"/>
+            <parameter name="itemQuantityNotBilled" type="BigDecimal"/>
+            <parameter name="itemAmountNotBilled" type="BigDecimal"/>
+
+            <parameter name="resInfoList" type="List"><parameter name="resInfo" type="Map">
+                <parameter name="existingRes" type="Map"/><parameter name="assetLot" type="Map"/></parameter></parameter>
+            <parameter name="singleLot" type="Boolean"/>
+            <parameter name="newerInventory" type="Boolean"/>
+            <parameter name="lotIdSet" type="Set"><parameter name="lotId"/></parameter>
+            <parameter name="oldestLotExpire" type="Timestamp"/>
+            <parameter name="newerThanExpireDate" type="Timestamp"/>
+
+            <parameter name="returnItemList" type="List"><parameter name="returnItem" type="Map"/></parameter>
+            <parameter name="returnIdSet" type="Set"><parameter name="returnId"/></parameter>
+            <parameter name="returnableOut" type="Map"><description>Result from mantle.order.ReturnServices.calculate#OrderItemReturnable</description></parameter>
+
+            <parameter name="itemCanDelete" type="Boolean"/>
+        </out-parameters>
+        <actions>
+            <set field="editableStatusIds" from="['OrderBeingChanged', 'OrderOpen', 'OrderRequested', 'OrderProposed',
+                    'OrderPlaced', 'OrderHold', 'OrderProcessing', 'OrderWishList', 'OrderGiftRegistry', 'OrderAutoReorder']"/>
+
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
+            <if condition="orderItem == null"><entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/></if>
+            <if condition="orderPart == null"><set field="orderPart" from="orderItem.part"/></if>
+
+            <set field="product" from="orderItem.product"/>
+            <set field="isProductItemType" from="orderItem.itemTypeEnumId in productItemTypes"/>
+            <set field="isShippable" from="isProductItemType &amp;&amp; product != null ? product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse'] : false"/>
+            <set field="partEditable" from="editableStatusIds.contains(orderPart.statusId)"/>
+
+            <!-- item quantity and unitAmount EntityAuditLog records -->
+            <entity-find entity-name="moqui.entity.EntityAuditLog" list="itemAuditLogList">
+                <econdition field-name="changedEntityName" value="mantle.order.OrderItem"/>
+                <econdition field-name="changedFieldName" operator="in" value="quantity,unitAmount"/>
+                <econdition field-name="pkPrimaryValue" from="orderId"/>
+                <econdition field-name="pkSecondaryValue" from="orderItemSeqId"/>
+                <select-field field-name="changedFieldName,pkSecondaryValue,newValueText,oldValueText,changeReason,changedByUserId,changedDate"/>
+                <order-by field-name="-changedDate"/>
+            </entity-find>
+            <set field="itemQuantityAuditList" from="[]"/>
+            <set field="itemUnitAmountAuditList" from="[]"/>
+            <iterate list="itemAuditLogList" entry="auditLog">
+                <entity-find-one entity-name="mantle.party.PersonWithUserAccount" value-field="userAccount">
+                    <field-map field-name="userId" from="auditLog.changedByUserId"/></entity-find-one>
+                <entity-find-one entity-name="moqui.basic.Enumeration" value-field="changeReasonEnum">
+                    <field-map field-name="enumId" from="auditLog.changeReason"/></entity-find-one>
+                <if condition="auditLog.changedFieldName == 'quantity'"><then>
+                    <script>itemQuantityAuditList.add([auditLog:auditLog, userAccount:userAccount, changeReasonEnum:changeReasonEnum])</script>
+                </then><else>
+                    <script>itemUnitAmountAuditList.add([auditLog:auditLog, userAccount:userAccount, changeReasonEnum:changeReasonEnum])</script>
+                </else></if>
+            </iterate>
+
+            <service-call name="mantle.order.OrderServices.get#OrderItemTotal"
+                    in-map="[orderItem:orderItem, getChildrenTotals:true]" out-map="orderItemTotalOut"/>
+
+            <set field="orderItemQuantity" from="orderItemTotalOut.combinedQuantity"/>
+            <set field="orderItemTotal" from="orderItemTotalOut.itemTotal"/>
+
+            <entity-find entity-name="mantle.shipment.ShipmentAndItemSource" list="shipmentItemSourceList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderItemSeqId"/>
+                <econdition field-name="shipmentStatusId" operator="not-in" value="ShipRejected,ShipCancelled"/>
+                <econdition field-name="statusId" operator="not-equals" value="SisCancelled"/>
+            </entity-find>
+            <set field="itemQuantityShipped" from="shipmentItemSourceList ? shipmentItemSourceList*.quantity.sum() : 0.0"/>
+            <set field="itemQuantityNotShipped" from="orderItemQuantity - itemQuantityShipped"/>
+
+            <entity-find entity-name="mantle.order.OrderItemBilling" list="orderItemBillingList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderItemSeqId"/>
+            </entity-find>
+
+            <set field="itemQuantityBilled" from="0.0"/>
+            <set field="itemAmountBilled" from="0.0"/>
+            <iterate list="orderItemBillingList" entry="orderItemBilling">
+                <set field="billedQuantity" from="orderItemBilling.quantity != null ? orderItemBilling.quantity : 1.0"/>
+                <set field="itemQuantityBilled" from="itemQuantityBilled + billedQuantity"/>
+
+                <set field="curInvoiceItem" from="orderItemBilling.invoiceItem"/>
+                <set field="itemAmountBilled" from="itemAmountBilled + ((billedQuantity * (curInvoiceItem?.amount ?: 0.0)).setScale(2, BigDecimal.ROUND_HALF_UP))"/>
+            </iterate>
+
+            <set field="itemQuantityNotBilled" from="orderItemQuantity - itemQuantityBilled"/>
+            <set field="itemAmountNotBilled" from="orderItemTotal - itemAmountBilled"/>
+
+            <if condition="isShippable &amp;&amp; product != null">
+                <set field="singleLot" from="'BlY'.equals(ec.service.sync().name('mantle.party.PartyServices.get#PartySettingValue')
+                        .parameter('partySettingTypeId', 'CustomerSingleLot').parameter('partyId', orderPart.customerPartyId).call()?.get('settingValue'))"/>
+                <set field="newerInventory" from="'BlY'.equals(ec.service.sync().name('mantle.party.PartyServices.get#PartySettingValue')
+                        .parameter('partySettingTypeId', 'CustomerNewerInventory').parameter('partyId', orderPart.customerPartyId).call()?.get('settingValue'))"/>
+
+                <entity-find entity-name="mantle.product.issuance.AssetReservation" list="existingResList">
+                    <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
+                <set field="resInfoList" from="[]"/>
+                <set field="lotIdSet" from="new LinkedHashSet()"/>
+                <set field="oldestLotExpire" from="null"/>
+                <iterate list="existingResList" entry="existingRes">
+                    <entity-find-one entity-name="mantle.product.asset.AssetLotAndMfgParty" value-field="assetLot">
+                        <field-map field-name="assetId" from="existingRes.assetId"/>
+                        <select-field field-name="lotId,pseudoId,lotNumber,manufacturedDate,expirationDate"/>
+                    </entity-find-one>
+                    <script><![CDATA[
+                        if (assetLot?.lotId) lotIdSet.add(assetLot.lotId)
+                        if (assetLot?.expirationDate != null && (oldestLotExpire == null || assetLot.expirationDate < oldestLotExpire))
+                            oldestLotExpire = assetLot.expirationDate
+                        resInfoList.add([existingRes:existingRes, assetLot:assetLot])
+                    ]]></script>
+                </iterate>
+
+                <set field="newerThanExpireDate" from="null"/>
+                <if condition="newerInventory &amp;&amp; orderPart.customerPartyId">
+                    <!-- get most recent asset issued and lot expire date for it -->
+                    <entity-find entity-name="mantle.product.issuance.AssetIssuanceLotSummary" list="issuanceLotList" limit="1">
+                        <econdition field-name="toPartyId" from="orderPart.customerPartyId"/>
+                        <econdition field-name="productId"/>
+                        <select-field field-name="expirationDate,expectedEndOfLife"/>
+                        <order-by field-name="-issuedDate"/>
+                    </entity-find>
+                    <if condition="issuanceLotList">
+                        <set field="newerThanExpireDate" from="issuanceLotList[0].expirationDate ?: issuanceLotList[0].expectedEndOfLife"/></if>
+                </if>
+            </if>
+
+            <!-- returnable quantities and ReturnItems -->
+            <entity-find entity-name="mantle.order.return.ReturnItem" list="returnItemList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderItemSeqId"/>
+                <econdition field-name="statusId" operator="not-equals" value="ReturnCancelled"/>
+                <order-by field-name="orderItemSeqId"/>
+            </entity-find>
+            <service-call name="mantle.order.ReturnServices.calculate#OrderItemReturnable" out-map="returnableOut"
+                    in-map="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId, orderItemBillingList:orderItemBillingList, returnItemList:returnItemList]"/>
+            <set field="returnIdSet" from="new TreeSet()"/>
+            <iterate list="returnItemList" entry="returnItem">
+                <if condition="returnItem.orderItemSeqId != orderItemSeqId"><continue/></if>
+                <script>returnIdSet.add(returnItem.returnId)</script>
+            </iterate>
+
+            <set field="itemCanDelete" from="(!isShippable || itemQuantityNotShipped == quantity) &amp;&amp; itemQuantityNotBilled == quantity &amp;&amp; returnableOut.returnedQuantity == 0.0"/>
+        </actions>
+    </service>
 
     <service verb="get" noun="OrderPartBillingAddress">
         <description>
