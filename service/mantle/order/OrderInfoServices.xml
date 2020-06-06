@@ -17,6 +17,7 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="get" noun="OrderDisplayInfo">
         <in-parameters>
             <parameter name="orderId" required="true"/>
+            <parameter name="itemLimit" type="Integer"/>
             <parameter name="templateSettingSuffix" default-value="TemplateOrderPrint"/>
         </in-parameters>
         <out-parameters>
@@ -32,6 +33,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <parameter name="orderItemList" type="List"><parameter name="orderItem" type="Map">
                 <auto-parameters entity-name="mantle.order.OrderItem"/></parameter></parameter>
+            <parameter name="orderItemNoParentCount" type="Integer"/>
             <parameter name="allItemsAuditLogList" type="List"><parameter name="orderItem" type="Map"/></parameter>
             <parameter name="orderItemWithChildrenSet" type="Set"><parameter name="orderItemSeqId"/></parameter>
             <parameter name="productItemTypes" type="List"><parameter name="itemTypeEnumId"/></parameter>
@@ -79,6 +81,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <parameter name="partEditable" type="Boolean"/>
                 <parameter name="partOrderItemList" type="List"><parameter name="partOrderItem" type="Map">
                     <auto-parameters entity-name="mantle.order.OrderItem"/></parameter></parameter>
+                <parameter name="partNoParentOrderItemCount" type="Integer"/>
                 <parameter name="partNoParentOrderItemList" type="List"><parameter name="partOrderItem" type="Map">
                     <auto-parameters entity-name="mantle.order.OrderItem"/></parameter></parameter>
                 <parameter name="hasShippableItems" type="Boolean"/>
@@ -151,6 +154,13 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader"/>
             <if condition="orderHeader == null"><return error="true" message="Order not found with ID ${orderId}"/></if>
+
+            <entity-find entity-name="mantle.order.OrderPart" list="orderPartList">
+                <econdition field-name="orderId"/>
+                <order-by field-name="orderPartSeqId"/>
+            </entity-find>
+            <set field="firstPart" from="orderPartList ? orderPartList[0] : null"/>
+
             <!--
             <set field="headerMaster" from="orderHeader.getMasterValueMap('default')"/>
             <log message="======== Order Master:\n${groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(headerMaster))}"/>
@@ -176,8 +186,37 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
             <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
 
-            <entity-find-related value-field="orderHeader" relationship-name="mantle.order.OrderItem"
-                    list="orderItemList" order-by-list="['orderItemSeqId']"/>
+            <if condition="itemLimit"><then>
+                <!-- for itemLimit get up to that many items with no children, then get their children -->
+                <set field="orderItemList" from="new org.moqui.impl.entity.EntityListImpl(ec.entity)"/>
+                <iterate list="orderPartList" entry="orderPart">
+                    <entity-find entity-name="mantle.order.OrderItem" list="partTopOrderItemList" limit="itemLimit">
+                        <econdition field-name="orderId"/>
+                        <econdition field-name="orderPartSeqId" from="orderPart.orderPartSeqId"/>
+                        <econdition field-name="parentItemSeqId" operator="is-null"/>
+                        <!-- order-by necessary here to get first itemLimit items -->
+                        <order-by field-name="orderItemSeqId"/>
+                    </entity-find>
+                    <entity-find entity-name="mantle.order.OrderItem" list="partChildOrderItemList">
+                        <econdition field-name="orderId"/>
+                        <econdition field-name="parentItemSeqId" operator="in" from="partTopOrderItemList*.orderItemSeqId"/>
+                        <!-- don't order-by here, will need to do after combining the lists -->
+                    </entity-find>
+                    <script>orderItemList.addAll(partTopOrderItemList); orderItemList.addAll(partChildOrderItemList)</script>
+                </iterate>
+                <script>orderItemList.orderByFields(['orderItemSeqId'])</script>
+
+                <entity-find-count entity-name="mantle.order.OrderItem" count-field="orderItemNoParentCount">
+                    <econdition field-name="orderId"/>
+                    <econdition field-name="parentItemSeqId" operator="is-null"/>
+                </entity-find-count>
+            </then><else>
+                <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
+                    <econdition field-name="orderId"/>
+                    <order-by field-name="orderItemSeqId"/>
+                </entity-find>
+                <set field="orderItemNoParentCount" from="orderItemList.filterByAnd('parentItemSeqId', null).size()"/>
+            </else></if>
             <if condition="!orderItemList"><script>placeWarnings.add(ec.resource.expand('OrderPlaceNoItems', null))</script></if>
             <!-- put items with parentItemSeqId in the list after their parent -->
             <script><![CDATA[
@@ -283,9 +322,6 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.order.OrderNote" list="orderNoteList">
                 <econdition field-name="orderId"/><order-by field-name="-noteDate"/></entity-find>
 
-            <entity-find-related value-field="orderHeader" relationship-name="mantle.order.OrderPart" list="orderPartList"/>
-            <set field="firstPart" from="orderPartList ? orderPartList[0] : null"/>
-
             <!-- get order info by part for more detailed display -->
             <script><![CDATA[
             import org.moqui.entity.EntityList
@@ -299,6 +335,12 @@ along with this software (see the LICENSE.md file). If not, see
 
                 EntityList partOrderItemList = orderItemList.findAll({ it.orderPartSeqId == orderPart.orderPartSeqId })
                 EntityList partNoParentOrderItemList = partOrderItemList.findAll({ it.parentItemSeqId == null })
+                int partNoParentOrderItemCount = partNoParentOrderItemList.size()
+                // if there is an itemLimit and the no parent (top) item list size is not less than the limit, hit the DB for a full count
+                if (itemLimit && partNoParentOrderItemList.size() >= itemLimit) {
+                    partNoParentOrderItemCount = ec.entity.find("mantle.order.OrderItem").condition("orderId", orderId)
+                            .condition("orderPartSeqId", orderPart.orderPartSeqId).condition("parentItemSeqId", null).count()
+                }
 
                 EntityValue customerDetail = ec.entity.find("mantle.party.PartyDetail").condition("partyId", orderPart.customerPartyId).one()
                 EntityValue vendorDetail = ec.entity.find("mantle.party.PartyDetail").condition("partyId", orderPart.vendorPartyId).one()
@@ -411,6 +453,7 @@ along with this software (see the LICENSE.md file). If not, see
                 orderPartInfoList.add([orderPart:orderPart, partEditable:editableStatusIds.contains(orderPart.statusId),
                         partStatusItem:partStatusItem,
                         partOrderItemList:partOrderItemList, partNoParentOrderItemList:partNoParentOrderItemList,
+                        partNoParentOrderItemCount:partNoParentOrderItemCount,
                         hasShippableItems:hasShippableItems, singleLot:singleLot, newerInventory:newerInventory,
                         carrierPartyDetail:carrierPartyDetail,
                         shipmentMethodEnum:orderPart."ShipmentMethod#moqui.basic.Enumeration",
