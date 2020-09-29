@@ -351,10 +351,15 @@ General Order Placement and eCommerce Usage
                     <entity-find-one entity-name="mantle.order.OrderHeader" value-field="orderHeader" for-update="true"/>
                     <set field="orderPart" from="orderItem.part"/>
 
+                    <!-- use PriceServices.get#OrderProductPrice instead of calling to get price directly, for pricePurposeEnumId override for recurring orders and other future behavior:
                     <service-call name="mantle.product.PriceServices.get#ProductPrice" out-map="priceMap"
                             in-map="[productId:productId, quantity:quantity, priceUomId:orderHeader.currencyUomId,
                                   productStoreId:orderHeader.productStoreId, customerPartyId:orderPart.customerPartyId,
                                   vendorPartyId:orderPart.vendorPartyId]"/>
+                    -->
+                    <service-call name="mantle.product.PriceServices.get#OrderProductPrice" out-map="priceMap"
+                            in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
+
 
                     <set field="unitAmount" from="priceMap.price"/>
                     <set field="unitListPrice" from="priceMap.listPrice"/>
@@ -457,6 +462,62 @@ General Order Placement and eCommerce Usage
             <!-- explicitly call handle#OrderMajorChange to trigger promo, shipping, tax calc -->
             <service-call name="mantle.order.OrderServices.handle#OrderMajorChange"
                     in-map="[orderId:orderItem.orderId, orderPartSeqId:orderItem.orderPartSeqId]"/>
+        </actions>
+    </service>
+
+    <service verb="recalc" noun="OrderItemAmount">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderItemSeqId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem" for-update="true"/>
+            <if condition="orderItem.productId == null"><return/></if>
+
+            <!-- Is this a product item? -->
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+            <if condition="!(orderItem.itemTypeEnumId in productItemTypes)">
+                <return/></if>
+
+            <service-call name="mantle.product.PriceServices.get#OrderProductPrice" out-map="priceOut"
+                    in-map="[productId:orderItem.productId, quantity:orderItem.quantity, orderId:orderId,
+                        orderPartSeqId:orderItem.orderPartSeqId]"/>
+
+            <if condition="priceOut.price"><then>
+                <if condition="priceOut.price != orderItem.unitAmount">
+                    <service-call name="update#mantle.order.OrderItem" in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId,
+                        unitAmount:priceOut.price, unitListPrice:priceOut.listPrice, isModifiedPrice:'N']"/>
+                </if>
+            </then><else>
+                <message type="warning">No price found for Product ${orderItem.productId} on Order Item ${orderId}:${orderItemSeqId}, not resetting</message>
+            </else></if>
+        </actions>
+    </service>
+    <service verb="recalc" noun="OrderPartItemAmounts">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart" for-update="true"/>
+
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
+            <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="orderPartSeqId"/>
+                <econdition field-name="itemTypeEnumId" operator="in" from="productItemTypes"/>
+                <econdition field-name="productId" operator="is-not-null"/>
+                <order-by field-name="orderItemSeqId"/>
+            </entity-find>
+            <iterate list="orderItemList" entry="orderItem">
+                <service-call name="mantle.order.OrderServices.recalc#OrderItemAmount"
+                        in-map="[orderId:orderItem.orderId, orderItemSeqId:orderItem.orderItemSeqId]"/>
+            </iterate>
         </actions>
     </service>
 
@@ -618,9 +679,13 @@ General Order Placement and eCommerce Usage
 
             <!-- calculate the price based on quantity, etc, -->
             <if condition="unitAmount == null"><then>
+                <!-- use PriceServices.get#OrderProductPrice instead of calling to get price directly, for pricePurposeEnumId override for recurring orders and other future behavior:
                 <service-call name="mantle.product.PriceServices.get#ProductPrice" out-map="priceMap"
                               in-map="[productId:productId, quantity:quantity, priceUomId:currencyUomId,
                          productStoreId:productStoreId, customerPartyId:customerPartyId, vendorPartyId:vendorPartyId]"/>
+                -->
+                <service-call name="mantle.product.PriceServices.get#OrderProductPrice" out-map="priceMap"
+                        in-map="[productId:productId, quantity:quantity, orderId:orderId, orderPartSeqId:orderPartSeqId]"/>
 
                 <set field="unitAmount" from="priceMap.price"/>
                 <set field="unitListPrice" from="priceMap.listPrice"/>
