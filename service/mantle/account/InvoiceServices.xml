@@ -921,6 +921,35 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.invoice.Invoice" value-field="invoice"/>
             <if condition="!(invoice.statusId in ['InvoiceInProcess', 'InvoiceIncoming', 'InvoiceReceived'])">
                 <return error="true" message="Invoice ${invoiceId} is not in a status that allows change"/></if>
+
+            <!-- make sure not associated with ShipmentItem -->
+            <entity-find-count entity-name="mantle.shipment.ShipmentItemSource" count-field="shipmentSourceCount">
+                <econdition field-name="invoiceId"/>
+                <econdition field-name="invoiceItemSeqId"/>
+            </entity-find-count>
+            <if condition="shipmentSourceCount">
+                <return error="true" message="Invoice Item ${invoiceId}:${invoiceItemSeqId} is from a Shipment, cannot delete"/></if>
+
+            <!-- make sure has no child items -->
+            <entity-find-count entity-name="mantle.account.invoice.InvoiceItem" count-field="childItemCount">
+                <econdition field-name="invoiceId"/>
+                <econdition field-name="parentItemSeqId" from="invoiceItemSeqId"/>
+            </entity-find-count>
+            <if condition="childItemCount">
+                <return error="true" message="Invoice Item ${invoiceId}:${invoiceItemSeqId} has child items, cannot delete"/></if>
+
+            <!-- remove related OrderItemBilling records -->
+            <entity-find entity-name="mantle.order.OrderItemBilling" list="itemBillingList">
+                <econdition field-name="invoiceId"/>
+                <econdition field-name="invoiceItemSeqId"/>
+            </entity-find>
+            <if condition="itemBillingList">
+                <message type="warning">Deleting Invoice Item ${invoiceId}:${invoiceItemSeqId} associations with Order ${itemBillingList*.orderId.join(', ')}</message>
+                <iterate list="itemBillingList" entry="itemBilling">
+                    <service-call name="delete#mantle.order.OrderItemBilling" in-map="[orderItemBillingId:itemBilling.orderItemBillingId]"/>
+                </iterate>
+            </if>
+
             <service-call name="delete#mantle.account.invoice.InvoiceItem" in-map="context" out-map="context"/>
         </actions>
     </service>
@@ -2551,6 +2580,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="invoiceId" required="true"/>
             <parameter name="emailTypeEnumId" required="true"/>
             <parameter name="toAddresses"><text-email/></parameter>
+            <parameter name="toAddressList" type="List"><parameter name="toAddress"><text-email/></parameter></parameter>
             <parameter name="alsoPrimaryEmails" type="Boolean" default="false"/>
             <parameter name="setFinalizedInvoiceSent" type="Boolean" default="true"/>
         </in-parameters>
@@ -2566,9 +2596,12 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="storeEmailList">
                 <set field="toPartyId" from="invoice.toPartyId"/>
 
-                <if condition="toAddresses"><set field="toAddressesList" from="[toAddresses]"/></if>
-                <!-- get to party email address -->
+                <set field="toAddressesList" from="toAddressList ?: []"/>
+                <if condition="toAddresses"><script>toAddressesList.addAll(toAddresses.split(',').collect({ it.trim() }))</script></if>
+                <!-- <log message="toAddressesList: ${toAddressesList}"/> -->
+
                 <if condition="!toAddressesList">
+                    <!-- get to party email address -->
                     <service-call name="mantle.party.ContactServices.get#PartyContactInfoList" out-map="emailInfo"
                             in-map="[partyId:toPartyId, emailContactMechPurposeId:'EmailBilling', alsoIncludePrimaryPurpose:alsoPrimaryEmails]"/>
                     <set field="toAddressesList" from="emailInfo.emailAddressList*.emailAddress"/>
@@ -2577,7 +2610,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <econdition field-name="partyId" from="toPartyId"/></entity-find>
                     <if condition="userAccountList"><set field="toUserId" from="userAccountList[0].userId"/></if>
                 </if>
-                <if condition="!toAddressesList"><return/></if>
+                <if condition="!toAddressesList"><return type="warning" message="No email addresses specified or found"/></if>
 
                 <!-- send email for each configured -->
                 <iterate list="storeEmailList" entry="storeEmail">
@@ -2664,6 +2697,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="daysLastEmail" type="Long" default="2"/>
             <parameter name="alsoPrimaryEmails" type="Boolean" default="false"/>
             <parameter name="toAddresses"><text-email/></parameter>
+            <parameter name="toAddressList" type="List"><parameter name="toAddress"><text-email/></parameter></parameter>
             <parameter name="emailTypeEnumId" default-value="PsetInvoicesPastDue"/>
         </in-parameters>
         <actions>
@@ -2674,7 +2708,9 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="toParty">
                 <field-map field-name="partyId" from="toPartyId"/></entity-find-one>
 
-            <if condition="toAddresses"><set field="toAddressesList" from="[toAddresses]"/></if>
+            <set field="toAddressesList" from="toAddressList ?: []"/>
+            <if condition="toAddresses"><script>toAddressesList.addAll(toAddresses.split(',').collect({ it.trim() }))</script></if>
+
             <if condition="!toAddressesList">
                 <!-- see if customer has a EmailBilling address, or if also primary then look for EmailPrimary too -->
                 <service-call name="mantle.party.ContactServices.get#PartyContactInfoList" out-map="emailInfo"

@@ -95,6 +95,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="productStoreId"/><parameter name="vendorPartyId"/><parameter name="customerPartyId"/>
             <!-- TODO: to support look for records with this first and then with null: <parameter name="agreementId"/> -->
             <!-- TODO: to support look for records with this first and then with null: <parameter name="agreementItemSeqId"/> -->
+            <parameter name="defaultToListPrice" type="Boolean" default="true"/>
         </in-parameters>
         <out-parameters>
             <parameter name="price" type="BigDecimal"/>
@@ -139,7 +140,9 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- if no price default to listPrice or ZERO -->
-            <if condition="!price"><set field="price" from="listPrice ?: BigDecimal.ZERO"/></if>
+            <if condition="defaultToListPrice &amp;&amp; !price">
+                <set field="price" from="listPrice ?: BigDecimal.ZERO"/></if>
+
 
             <!-- <log level="warn" message="========== BEFORE rules productId=${productId}, price=${price}, listPrice=${listPrice}"/> -->
 
@@ -164,19 +167,27 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="get" noun="OrderProductPrice">
+        <description>In addition to productId and quantity recommended use is to specify orderId and orderPartSeqId which are used
+            to determine priceUomId, pricePurposeEnumId, productStoreId, vendorPartyId, and customerPartyId</description>
         <in-parameters>
             <parameter name="productId" required="true"/>
             <parameter name="quantity" type="BigDecimal" default="1"/>
+
+            <parameter name="orderId"/>
+            <parameter name="orderPartSeqId"/>
+
             <parameter name="priceUomId"><description>If not specified defaults to OrderHeader.currencyUomId, then
                 ProductStore.defaultCurrencyUomId, then the CurrencyDefault user preference (usually for the ALL_USERS group) then USD.</description></parameter>
-            <parameter name="pricePurposeEnumId" default-value="PppPurchase"/>
+            <parameter name="pricePurposeEnumId"><description>If not specified defaults to PppPurchase unless OrderHeader is
+                recurring (recurCronExpression not empty) then defaults to PppRecurring</description></parameter>
 
             <parameter name="productStoreId"/><parameter name="vendorPartyId"/><parameter name="customerPartyId"/>
-            <parameter name="orderId"/><parameter name="orderPartSeqId"/>
         </in-parameters>
         <out-parameters>
             <parameter name="price" type="BigDecimal"/>
+            <parameter name="productPriceId"/>
             <parameter name="listPrice" type="BigDecimal"/>
+            <parameter name="listProductPriceId"/>
             <parameter name="priceUomId"/>
         </out-parameters>
         <actions>
@@ -187,6 +198,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore">
                     <field-map field-name="productStoreId"/></entity-find-one>
                 <set field="priceUomId" from="priceUomId ?: orderHeader?.currencyUomId ?: productStore?.defaultCurrencyUomId ?: ec.user.getPreference('CurrencyDefault') ?: 'USD'"/>
+                <set field="pricePurposeEnumId" from="pricePurposeEnumId ?: (orderHeader?.recurCronExpression ? 'PppRecurring' : 'PppPurchase')"/>
 
                 <if condition="orderPartSeqId">
                     <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
@@ -196,7 +208,17 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="vendorPartyId" from="orderPart?.vendorPartyId ?: productStore?.organizationPartyId"/>
             </if>
 
+            <if condition="!pricePurposeEnumId"><set field="pricePurposeEnumId" value="PppPurchase"/></if>
+            <!-- don't defaultToListPrice for Recurring prices so we can see if there really is a Recurring price in order to default to Purchase purpose below -->
+            <set field="defaultToListPrice" from="pricePurposeEnumId != 'PppRecurring'"/>
             <service-call name="mantle.product.PriceServices.get#ProductPrice" in-map="context" out-map="context"/>
+
+            <!-- if no Recurring price try again with Purchase purpose -->
+            <if condition="!price &amp;&amp; pricePurposeEnumId == 'PppRecurring'">
+                <set field="pricePurposeEnumId" value="PppPurchase"/>
+                <set field="defaultToListPrice" from="true"/>
+                <service-call name="mantle.product.PriceServices.get#ProductPrice" in-map="context" out-map="context"/>
+            </if>
         </actions>
     </service>
 </services>

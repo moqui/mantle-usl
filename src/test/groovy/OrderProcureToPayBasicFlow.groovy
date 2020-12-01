@@ -1144,7 +1144,8 @@ class OrderProcureToPayBasicFlow extends Specification {
         when:
         ec.service.sync().name("mantle.product.AssetServices.record#PhysicalInventoryChange")
                 .parameters([productId:'DEMO_1_1', facilityId:facilityId, quantityChange:-10,
-                             varianceReasonEnumId:'InVrLost', comments:'Test lost 10 DEMO_1_1']).call()
+                            statusId:'AstAvailable', locationSeqId:'01010101',
+                            varianceReasonEnumId:'InVrLost', comments:'Test lost 10 DEMO_1_1']).call()
 
         List<String> dataCheckErrors = []
         long fieldsChecked = ec.entity.makeDataLoader().xmlText("""<entity-facade-xml>

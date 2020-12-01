@@ -260,8 +260,10 @@ along with this software (see the LICENSE.md file). If not, see
                             ignore="facility?.assetAllowOtherOwner == 'Y' || !ownerPartyIdSet"/>
                     <econdition field-name="assetPoolId" operator="in" from="assetPoolIdSet" ignore="!assetPoolIdSet" or-null="true"/>
                     <econdition field-name="assetPoolId" operator="is-null" ignore="assetPoolIdSet"/>
-                    <econdition field-name="availableToPromiseTotal" operator="not-equals" from="0.0"/>
                     <econdition field-name="statusId" value="AstAvailable"/>
+                    <having-econditions>
+                        <econdition field-name="availableToPromiseTotal" operator="not-equals" from="0.0"/>
+                    </having-econditions>
                     <select-field field-name="productId,availableToPromiseTotal"/>
                     <order-by field-name="productId"/>
                 </entity-find>
@@ -1010,6 +1012,24 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
         </actions>
     </service>
+    <service verb="remove" noun="OrderReservations">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+        </in-parameters>
+        <actions>
+            <!-- do a FOR UPDATE query on OrderItem as a semaphore -->
+            <entity-find entity-name="mantle.order.OrderItem" list="orderItemList" for-update="true">
+                <econdition field-name="orderId"/></entity-find>
+
+            <entity-find entity-name="mantle.product.issuance.AssetReservation" list="existingResList" for-update="true">
+                <econdition field-name="orderId"/></entity-find>
+            <iterate list="existingResList" entry="existingRes">
+                <service-call name="mantle.product.AssetServices.reduce#AssetReservation"
+                        in-map="[assetReservationId:existingRes.assetReservationId]"/>
+            </iterate>
+        </actions>
+    </service>
+
     <service verb="reduce" noun="AssetReservation" no-tx-cache="true">
         <description>Reduce quantity on AssetReservation, if reduced to zero delete.</description>
         <in-parameters>
@@ -1314,7 +1334,12 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="orderItem == null"><set field="orderItem" from="assetReservation.orderItem"/></if>
 
-            <if condition="asset.facilityId">
+            <if condition="!reservationInvalid &amp;&amp; asset.statusId != 'AstAvailable'">
+                <log message="AssetReservation ${assetReservationId} for OrderItem ${orderItem.orderId}:${orderItem.orderItemSeqId} is no longer valid for Asset ${asset.assetId} in status ${asset.statusId}"/>
+                <set field="reservationInvalid" from="true"/>
+            </if>
+
+            <if condition="!reservationInvalid &amp;&amp; asset.facilityId">
                 <!-- see ff matches OrderPart.facilityId, if there is one -->
                 <if condition="orderItem != null">
                     <if condition="orderPart == null"><set field="orderPart" from="orderItem.part"/></if>
@@ -2494,13 +2519,15 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="assetDetailId"/></out-parameters>
         <actions>
+            <if condition="quantityAccepted &lt; 0.0"><return error="true" message="Quantity Accepted may not be negative"/></if>
+            <if condition="quantityRejected != null &amp;&amp; quantityRejected &lt; 0.0"><return error="true" message="Quantity Rejected may not be negative"/></if>
+
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset"/>
             <set field="oldStatusId" from="asset.statusId"/>
             <set field="oldAtp" from="asset.availableToPromiseTotal"/>
             <set field="oldQoh" from="asset.quantityOnHandTotal"/>
             <set field="oldAcquireCost" from="asset.acquireCost"/>
             <set field="oldReceivedDate" from="asset.receivedDate"/>
-
 
             <!-- update the AssetReceipt -->
             <if condition="!assetReceiptId"><then>
@@ -2932,6 +2959,12 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="physicalInventoryDate" type="Timestamp" default="ec.user.nowTimestamp"/>
             <parameter name="comments"/>
             <parameter name="varianceReasonEnumId"/>
+            <parameter name="strictLocation" type="Boolean" default="false">
+                <description>If true filter by null locationSeqId (No Location), otherwise for null locationSeqId do not filter (Any Location)</description></parameter>
+            <parameter name="strictLot" type="Boolean" default="false">
+                <description>If true filter by null lotId (No Lot), otherwise for null lotId do not filter (Any Lot)</description></parameter>
+            <parameter name="strictAll" type="Boolean" default="false">
+                <description>If true filter by null locationSeqId, lotId, ownerPartyId, assetPoolId, and statusId (No/None); otherwise for null do not filter (Any)</description></parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="physicalInventoryId"/>
@@ -2945,14 +2978,15 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="currentQoh" from="0"/>
             <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
-                <econdition field-name="productId"/><econdition field-name="facilityId"/>
-                <econdition field-name="locationSeqId" ignore-if-empty="true"/>
-                <econdition field-name="lotId" ignore-if-empty="true"/>
+                <econdition field-name="productId"/>
+                <econdition field-name="facilityId"/>
+                <econdition field-name="locationSeqId" from="locationSeqId ?: null" ignore="!locationSeqId &amp;&amp; !strictLocation &amp;&amp; !strictAll"/>
+                <econdition field-name="lotId" from="lotId ?: null" ignore="!lotId &amp;&amp; !strictLot &amp;&amp; !strictAll"/>
+                <econdition field-name="ownerPartyId" from="ownerPartyId ?: null" ignore="!ownerPartyId &amp;&amp; !strictAll"/>
+                <econdition field-name="assetPoolId" from="assetPoolId ?: null" ignore="!assetPoolId &amp;&amp; !strictAll"/>
+                <econdition field-name="statusId" from="statusId ?: null" ignore="!statusId &amp;&amp; !strictAll"/>
                 <!-- with physicalInventoryDate in the past this won't work: <econdition field-name="quantityOnHandTotal" operator="not-equals" from="0.0"/> -->
                 <econdition field-name="receivedDate" operator="less-equals" from="physicalInventoryDate" or-null="true"/>
-                <econdition field-name="ownerPartyId" ignore-if-empty="true"/>
-                <econdition field-name="assetPoolId" ignore-if-empty="true"/>
-                <econdition field-name="statusId" ignore-if-empty="true"/>
             </entity-find>
             <iterate list="assetList" entry="asset">
                 <!-- old approach using quantityOnHandTotal, won't work for back-dated physical inventory:
@@ -2970,8 +3004,12 @@ along with this software (see the LICENSE.md file). If not, see
             </iterate>
 
             <set field="quantityChange" from="quantity - currentQoh"/>
-            <if condition="quantityChange != 0.0">
-                <service-call name="mantle.product.AssetServices.record#PhysicalInventoryChange" in-map="context"/></if>
+            <if condition="quantityChange != 0.0"><then>
+                <message>Quantity specified (${ec.l10n.format(quantity, null)}) differs from current on hand (${ec.l10n.format(currentQoh, null)}) by ${ec.l10n.format(quantityChange, null)}, adjusting (Prod:${productId}, Fac:${facilityId}, Loc:${locationSeqId?:(strictAll||strictLocation?'None':'Any')}, Lot:${lotId?:(strictAll||strictLot?'None':'Any')}, Owner:${ownerPartyId?:(strictAll?'None':'Any')}, Pool:${assetPoolId?:(strictAll?'None':'Any')}, Stts:${statusId?:(strictAll?'None':'Any')})</message>
+                <service-call name="mantle.product.AssetServices.record#PhysicalInventoryChange" in-map="context"/>
+            </then><else>
+                <message type="success">Quantity specified (${ec.l10n.format(quantity, null)}) matched current records, no adjustment needed</message>
+            </else></if>
         </actions>
     </service>
     <service verb="record" noun="PhysicalInventoryChange" no-tx-cache="true">
@@ -2992,6 +3030,12 @@ along with this software (see the LICENSE.md file). If not, see
                 <description>Optional, meant to be used when called by other physical inventory services.</description>
                 <parameter name="asset" type="EntityValue"/>
             </parameter>
+            <parameter name="strictLocation" type="Boolean" default="false">
+                <description>If true filter by null locationSeqId (No Location), otherwise for null locationSeqId do not filter (Any Location)</description></parameter>
+            <parameter name="strictLot" type="Boolean" default="false">
+                <description>If true filter by null lotId (No Lot), otherwise for null lotId do not filter (Any Lot)</description></parameter>
+            <parameter name="strictAll" type="Boolean" default="false">
+                <description>If true filter by null locationSeqId, lotId, ownerPartyId, assetPoolId, and statusId (No/None); otherwise for null do not filter (Any)</description></parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="physicalInventoryId"/>
@@ -3015,14 +3059,15 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="assetIdList" from="[]"/>
             <if condition="!assetList">
                 <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
-                    <econdition field-name="productId"/><econdition field-name="facilityId"/>
-                    <econdition field-name="locationSeqId" ignore-if-empty="true"/>
-                    <econdition field-name="lotId" ignore-if-empty="true"/>
+                    <econdition field-name="productId"/>
+                    <econdition field-name="facilityId"/>
+                    <econdition field-name="locationSeqId" from="locationSeqId ?: null" ignore="!locationSeqId &amp;&amp; !strictLocation &amp;&amp; !strictAll"/>
+                    <econdition field-name="lotId" from="lotId ?: null" ignore="!lotId &amp;&amp; !strictLot &amp;&amp; !strictAll"/>
+                    <econdition field-name="ownerPartyId" from="ownerPartyId ?: null" ignore="!ownerPartyId &amp;&amp; !strictAll"/>
+                    <econdition field-name="assetPoolId" from="assetPoolId ?: null" ignore="!assetPoolId &amp;&amp; !strictAll"/>
+                    <econdition field-name="statusId" from="statusId ?: null" ignore="!statusId &amp;&amp; !strictAll"/>
                     <!-- with physicalInventoryDate in the past this won't work: <econdition field-name="quantityOnHandTotal" operator="not-equals" from="0.0"/> -->
                     <econdition field-name="receivedDate" operator="less-equals" from="physicalInventoryDate" or-null="true"/>
-                    <econdition field-name="ownerPartyId" ignore-if-empty="true"/>
-                    <econdition field-name="assetPoolId" ignore-if-empty="true"/>
-                    <econdition field-name="statusId" ignore-if-empty="true"/>
                     <order-by field-name="receivedDate"/><!-- oldest first -->
                     <order-by field-name="-assetId"/><!-- by ID to make sure we have a consistent order for locking -->
                 </entity-find>
@@ -3103,7 +3148,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </iterate>
             </else-if></if>
             <if condition="quantityRemaining != 0">
-                <message>Could not reduce quantity by ${quantityRemaining}, insufficient quantity on hand.</message></if>
+                <message type="warning">Could not reduce quantity by ${quantityRemaining}, insufficient quantity on hand.</message></if>
         </actions>
     </service>
     <service verb="create" noun="ProductAssetAdHoc">
@@ -3119,7 +3164,7 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
             <set field="assetTypeEnumId" from="product.assetTypeEnumId ?: 'AstTpInventory'"/>
-            <set field="statusId" from="assetTypeEnumId == 'AstTpInventory' ? 'AstAvailable' : 'AstInStorage'"/>
+            <set field="statusId" from="statusId ?: (assetTypeEnumId == 'AstTpInventory' ? 'AstAvailable' : 'AstInStorage')"/>
             <if condition="!acquireCost">
                 <!-- we may want more options for this, for now grab the most recent record to try to find a reasonable cost -->
                 <entity-find entity-name="mantle.product.asset.Asset" list="costAssetList" limit="1">

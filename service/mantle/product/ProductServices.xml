@@ -13,6 +13,70 @@ along with this software (see the LICENSE.md file). If not, see
 <http://creativecommons.org/publicdomain/zero/1.0/>.
 -->
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.1.xsd">
+
+    <service verb="find" noun="ProductByIdValue">
+        <in-parameters>
+            <parameter name="idValue" required="true"/>
+            <parameter name="ownerPartyId"/>
+            <parameter name="shipmentId"><description>For Product lookup in the context of a Shipment, common case for scanned IDs</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="productId"/>
+        </out-parameters>
+        <actions>
+            <if condition="shipmentId">
+                <entity-find entity-name="mantle.shipment.ShipmentItem" list="shipmentItemList">
+                    <econdition field-name="shipmentId"/>
+                </entity-find>
+                <set field="productIdList" from="shipmentItemList*.productId"/>
+            </if>
+
+            <if condition="ownerPartyId"><then>
+                <set field="ownerPartyIds" from="['_NA_', ownerPartyId]"/>
+            </then><else>
+                <!-- if an AssetOwner Party is specified for the Shipment use it as the Product.ownerPartyId -->
+                <entity-find entity-name="mantle.shipment.ShipmentParty" list="assetOwnerPartyList">
+                    <econdition field-name="shipmentId"/>
+                    <econdition field-name="roleTypeId" value="AssetOwner"/>
+                    <order-by field-name="partyId"/>
+                </entity-find>
+                <if condition="assetOwnerPartyList">
+                    <set field="ownerPartyIds" from="['_NA_'] + assetOwnerPartyList*.partyId"/></if>
+            </else></if>
+
+            <!-- see if idValue is a pseudoId -->
+            <entity-find entity-name="mantle.product.Product" list="productByPseudoList">
+                <econdition field-name="pseudoId" from="idValue"/>
+                <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIds" ignore-if-empty="true"/>
+                <econdition field-name="productId" operator="in" from="productIdList" ignore-if-empty="true"/>
+                <select-field field-name="productId"/>
+            </entity-find>
+            <if condition="productByPseudoList"><set field="productId" from="productByPseudoList[0].productId"/></if>
+            <!-- see if idValue is a ProductIdentification.idValue -->
+            <if condition="!productId">
+                <entity-find entity-name="mantle.product.ProductIdentificationAndProduct" list="prodIdentList">
+                    <econdition field-name="idValue"/>
+                    <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIds" ignore-if-empty="true"/>
+                    <econdition field-name="productId" operator="in" from="productIdList" ignore-if-empty="true"/>
+                </entity-find>
+                <if condition="prodIdentList.size() == 1"><then>
+                    <set field="productId" from="prodIdentList[0].productId"/>
+                </then><else-if condition="prodIdentList.size() &gt; 1">
+                    <message type="warning">Found multiple products with ID ${idValue}: ${prodIdentList*.productId.join(', ')}</message>
+                </else-if></if>
+            </if>
+            <!-- lastly see if idValue is a productId, respecting ownerPartyId if specified -->
+            <if condition="!productId">
+                <entity-find entity-name="mantle.product.Product" list="productByProdIdList">
+                    <econdition field-name="productId" from="idValue"/>
+                    <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIds" ignore-if-empty="true"/>
+                    <select-field field-name="productId"/>
+                </entity-find>
+                <if condition="productByProdIdList"><set field="productId" from="productByProdIdList[0].productId"/></if>
+            </if>
+        </actions>
+    </service>
+
     <service verb="clone" noun="Product">
         <in-parameters>
             <parameter name="baseProductId" required="true" default="productId"/>
@@ -105,6 +169,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="productId"><description>If specified apply to product after create</description></parameter>
             <parameter name="applTypeEnumId" default-value="PfatStandard"/>
             <parameter name="fromDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="sequenceNum" type="Long"/>
+            <parameter name="amount" type="BigDecimal"/>
         </in-parameters>
         <out-parameters><parameter name="productFeatureId"/></out-parameters>
         <actions>
@@ -125,7 +191,8 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="productId">
                 <service-call name="mantle.product.ProductServices.apply#ProductFeatures"
-                        in-map="[productId:productId, productFeatureIdList:[productFeatureId], applTypeEnumId:applTypeEnumId, fromDate:fromDate]"/>
+                        in-map="[productId:productId, productFeatureIdList:[productFeatureId], applTypeEnumId:applTypeEnumId,
+                            fromDate:fromDate, sequenceNum:sequenceNum, amount:amount]"/>
             </if>
         </actions>
     </service>
@@ -136,6 +203,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="applTypeEnumId" default-value="PfatStandard"/>
             <parameter name="productFeatureIdList" type="List"><parameter name="productFeatureId"/></parameter>
             <parameter name="fromDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="sequenceNum" type="Long"/>
+            <parameter name="amount" type="BigDecimal"/>
         </in-parameters>
         <actions>
             <iterate list="productFeatureIdList" entry="productFeatureId">
