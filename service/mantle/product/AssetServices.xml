@@ -654,8 +654,8 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="quantityRemaining &lt; 0">
                 <set field="quantityToDeduct" from="-quantityRemaining"/>
                 <iterate list="existingResList" entry="existingRes">
-                    <service-call name="mantle.product.AssetServices.reduce#AssetReservation" out-map="reduceArOut"
-                            in-map="[assetReservationId:existingRes.assetReservationId, quantityToDeduct:quantityToDeduct]"/>
+                    <service-call name="mantle.product.AssetServices.reduce#AssetReservation" out-map="reduceArOut" out-map-add-to-existing="false"
+                            in-map="[assetReservationId:existingRes.assetReservationId, quantityToDeduct:quantityToDeduct, reserveIncreasedAsset:true]"/>
                     <set field="quantityToDeduct" from="quantityToDeduct - reduceArOut.quantityDeducted"/>
                     <if condition="quantityToDeduct == 0"><break/></if>
                 </iterate>
@@ -1008,7 +1008,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
             <iterate list="existingResList" entry="existingRes">
                 <service-call name="mantle.product.AssetServices.reduce#AssetReservation"
-                        in-map="[assetReservationId:existingRes.assetReservationId]"/>
+                        in-map="[assetReservationId:existingRes.assetReservationId, reserveIncreasedAsset:true]"/>
             </iterate>
         </actions>
     </service>
@@ -1025,7 +1025,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="orderId"/></entity-find>
             <iterate list="existingResList" entry="existingRes">
                 <service-call name="mantle.product.AssetServices.reduce#AssetReservation"
-                        in-map="[assetReservationId:existingRes.assetReservationId]"/>
+                        in-map="[assetReservationId:existingRes.assetReservationId, reserveIncreasedAsset:true]"/>
             </iterate>
         </actions>
     </service>
@@ -1036,6 +1036,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="assetReservationId" required="true"/>
             <parameter name="quantityToDeduct" type="BigDecimal">
                 <description>Defaults to entire quantityNotIssued, limited to quantityNotIssued</description></parameter>
+            <parameter name="reserveIncreasedAsset" type="Boolean" default="false"/>
         </in-parameters>
         <out-parameters><parameter name="quantityDeducted" type="BigDecimal"/></out-parameters>
         <actions>
@@ -1074,6 +1075,11 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <set field="quantityDeducted" from="curQuantityToDeduct"/>
             </else></if>
+
+            <if condition="reserveIncreasedAsset">
+                <!-- with ATP increased reserve newly available inventory -->
+                <service-call name="mantle.product.AssetServices.reserve#IncreasedAsset" in-map="[assetId:existingRes.assetId]"/>
+            </if>
         </actions>
     </service>
 
@@ -1393,9 +1399,9 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="reservationInvalid">
                 <set field="quantityNotValid" from="assetReservation.quantity"/>
 
-                <!-- reservation not valid, delete and try re-reserve -->
+                <!-- reservation not valid, delete and try to re-reserve for OrderItem -->
                 <service-call name="mantle.product.AssetServices.reduce#AssetReservation"
-                        in-map="[assetReservationId:assetReservationId]"/>
+                        in-map="[assetReservationId:assetReservationId, reserveIncreasedAsset:true]"/>
                 <if condition="!assetReservation.orderId || !assetReservation.orderItemSeqId"><then>
                     <log level="warn" message="AssetReservation ${assetReservationId} has no order item and is no longer valid but cannot re-reserve"/>
                 </then><else>
@@ -1518,8 +1524,9 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="resQuantityRemaining == 0.0"><break/></if>
                     <set field="curMoveQuantity" from="resQuantityRemaining &gt; resToMove.quantityNotIssued ? resToMove.quantityNotIssued : resQuantityRemaining"/>
 
+                    <!-- NOTE in this case we want to reduce#AssetReservation but not reserveIncreasedAsset so that still available for the displace -->
                     <service-call name="mantle.product.AssetServices.reduce#AssetReservation" out-map="reduceArOut" out-map-add-to-existing="false"
-                            in-map="[assetReservationId:resToMove.assetReservationId, quantityToDeduct:curMoveQuantity]"/>
+                            in-map="[assetReservationId:resToMove.assetReservationId, quantityToDeduct:curMoveQuantity, reserveIncreasedAsset:false]"/>
 
                     <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
                             in-map="[orderId:resToMove.orderId, orderItemSeqId:resToMove.orderItemSeqId, skipAssetIds:[assetId]]"/>
@@ -1539,8 +1546,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <iterate list="oiOtherResList" entry="oiOtherRes">
                     <if condition="resQuantityToClear == 0.0"><break/></if>
                     <set field="curReduceQuantity" from="resQuantityToClear &gt; oiOtherRes.quantityNotIssued ? oiOtherRes.quantityNotIssued : resQuantityToClear"/>
+                    <!-- NOTE in this case we want to reduce#AssetReservation but not reserveIncreasedAsset so that still available for the displace -->
                     <service-call name="mantle.product.AssetServices.reduce#AssetReservation" out-map="reduceArOut"
-                            in-map="[assetReservationId:oiOtherRes.assetReservationId, quantityToDeduct:curReduceQuantity]"/>
+                            in-map="[assetReservationId:oiOtherRes.assetReservationId, quantityToDeduct:curReduceQuantity, reserveIncreasedAsset:false]"/>
                     <set field="resQuantityToClear" from="resQuantityToClear - reduceArOut.quantityDeducted"/>
                 </iterate>
             </if>
@@ -1601,8 +1609,9 @@ along with this software (see the LICENSE.md file). If not, see
 
                         <set field="quantityToReduce" from="reduceQuantityRemaining &gt; res.quantityNotIssued ? res.quantityNotIssued : reduceQuantityRemaining"/>
 
+                        <!-- NOTE could reserveIncreasedAsset here but would do no good, point is to bring ATP from negative to zero -->
                         <service-call name="mantle.product.AssetServices.reduce#AssetReservation" out-map="reduceArOut" out-map-add-to-existing="false"
-                                in-map="[assetReservationId:res.assetReservationId, quantityToDeduct:quantityToReduce]"/>
+                                in-map="[assetReservationId:res.assetReservationId, quantityToDeduct:quantityToReduce, reserveIncreasedAsset:false]"/>
                         <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
                                 in-map="[orderId:res.orderId, orderItemSeqId:res.orderItemSeqId, skipAssetIds:[assetId]]"/>
 
