@@ -1291,6 +1291,65 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+    <service verb="move" noun="ReservationsFromNonPickLocations">
+        <in-parameters>
+            <parameter name="assetId" required="true"><description>Should be in a FltPick type FacilityLocation but not enforced,
+                must have positive availableToPromiseTotal or does nothing</description></parameter>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true"/>
+            <entity-find-related-one value-field="asset" relationship-name="location" to-value-field="facilityLocation" cache="true"/>
+
+            <entity-find entity-name="mantle.product.asset.AssetLocationDetail" list="nonPickAssetList">
+                <!-- assets in non-pick locations, or no location -->
+                <econdition field-name="locationTypeEnumId" operator="not-equals" value="FltPick" or-null="true"/>
+                <!-- exclude current assetId just in case is not in a Pick type locations -->
+                <econdition field-name="assetId" operator="not-equals" from="assetId"/>
+                <!-- only look for Assets with reservations, ie ATP < QOH (more efficient than joining in AssetReservation) -->
+                <econdition field-name="availableToPromiseTotal" operator="less" to-field-name="quantityOnHandTotal"/>
+                <!-- asset group distinguishing fields, excluding locationSeqId because we want to look in all of Facility -->
+                <!-- NOTE fields like assetPoolId and ownerPartyId may be null and if null should only match other Asset records with null values -->
+                <econdition field-name="productId" from="asset.productId"/>
+                <econdition field-name="facilityId" from="asset.facilityId"/>
+                <econdition field-name="ownerPartyId" from="asset.ownerPartyId"/>
+                <econdition field-name="assetPoolId" from="asset.assetPoolId"/>
+                <!-- lotId is NOT restricted on purpose, possible for inventory allocation to older lot to get allocated to newer
+                    lot if newer lot assets are moved to a pick location (being in a pick location trumps lot, receive date, etc) -->
+                <select-field field-name="assetId,availableToPromiseTotal,quantityOnHandTotal"/>
+                <select-field field-name="locationSeqId,locationTypeEnumId,description,areaId,aisleId,sectionId,levelId,positionId"/>
+                <!-- order by receivedDate to match default reservation sort of oldest inventory first;
+                    consider something more fancy like least convenient locations or smallest quantity reserved to better consolidate -->
+                <order-by field-name="receivedDate"/>
+            </entity-find>
+
+            <set field="remainingQuantity" from="asset.availableToPromiseTotal ?: 0.0"/>
+            <iterate list="nonPickAssetList" entry="nonPickAsset">
+                <if condition="remainingQuantity == 0.0"><break/></if>
+                <set field="remainingQuantityBefore" from="remainingQuantity"/>
+                <!-- for each AssetReservation move lesser of remainingQuantity and quantityNotIssued -->
+                <entity-find entity-name="mantle.product.issuance.AssetReservation" list="resList">
+                    <econdition field-name="assetId" from="nonPickAsset.assetId"/>
+                    <order-by field-name="reservedDate"/>
+                </entity-find>
+                <iterate list="resList" entry="assetRes">
+                    <set field="quantityReserved" from="assetRes.quantityNotIssued"/>
+                    <set field="quantityToMove" from="quantityReserved &gt; remainingQuantity ? remainingQuantity : quantityReserved"/>
+                    <if condition="quantityToMove &gt; 0.0">
+                        <service-call name="mantle.product.AssetServices.move#AssetReservation" out-map="moveArOut" out-map-add-to-existing="false"
+                                in-map="[assetId:assetId, assetReservationId:assetRes.assetReservationId, quantity:quantityToMove]"/>
+                        <set field="remainingQuantity" from="remainingQuantity - quantityToMove"/>
+                    </if>
+                    <if condition="remainingQuantity == 0.0"><break/></if>
+                </iterate>
+                <set field="resQuantityMoved" from="remainingQuantityBefore - remainingQuantity"/>
+                <if condition="resQuantityMoved &gt; 0.0">
+                    <message>Moved other reservations for total quantity ${resQuantityMoved} from location ${ec.resource.expand("FacilityLocationNameTemplate", null, facilityLocation)} to Pick location ${ec.resource.expand("FacilityLocationNameTemplate", null, nonPickAsset)}</message>
+                </if>
+            </iterate>
+
+        </actions>
+    </service>
+
     <service verb="check" noun="AssetReservations">
         <description>Make sure all reservations are valid, and if there is ATP available after that
             check for not available reservations that can be moved to this Asset</description>
@@ -2910,7 +2969,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="atpToMoveTotal" from="quantity - asset.availableToPromiseTotal"/>
                 </if>
                 <!-- moving from facLoc to checkFacLoc -->
-                <log message="checkFacLoc?.locationTypeEnumId ${checkFacLoc?.locationTypeEnumId} facLoc?.locationTypeEnumId ${facLoc?.locationTypeEnumId}"/>
+                <!-- <log message="checkFacLoc?.locationTypeEnumId ${checkFacLoc?.locationTypeEnumId} facLoc?.locationTypeEnumId ${facLoc?.locationTypeEnumId}"/> -->
                 <if condition="checkFacLoc?.locationTypeEnumId == 'FltPick' &amp;&amp; facLoc?.locationTypeEnumId != 'FltPick'">
                     <set field="atpToMoveTotal" from="quantity"/>
                 </if>
@@ -2927,7 +2986,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <!-- make sure quantityToMove is less than res.quantityNotIssued, don't move issued quantities! -->
                         <if condition="quantityToMove &gt; res.quantityNotIssued"><set field="quantityToMove" from="res.quantityNotIssued"/></if>
                         <if condition="quantityToMove &gt; 0">
-                            <service-call name="mantle.product.AssetServices.move#AssetReservation" out-map="moveArOut"
+                            <service-call name="mantle.product.AssetServices.move#AssetReservation" out-map="moveArOut" out-map-add-to-existing="false"
                                     in-map="[assetId:newAssetId, assetReservationId:res.assetReservationId, quantity:quantityToMove]"/>
                             <set field="availableRemaining" from="availableRemaining - moveArOut.quantityMoved"/>
                         </if>
@@ -2966,6 +3025,10 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- do something similar if facilityId changes -->
             <if condition="asset.assetPoolId != newAsset.assetPoolId || asset.facilityId != newAsset.facilityId">
                 <service-call name="mantle.product.AssetServices.check#AssetReservations" in-map="[assetId:newAsset.assetId]"/>
+            </if>
+            <!-- if me to Pick location and has available quantity, look for reservations against non-Pick locations and move them here -->
+            <if condition="checkFacLoc?.locationTypeEnumId == 'FltPick' &amp;&amp; newAsset.availableToPromiseTotal &gt; 0.0">
+                <service-call name="mantle.product.AssetServices.move#ReservationsFromNonPickLocations" in-map="[assetId:newAsset.assetId]"/>
             </if>
 
             <set field="newFacLoc" from="newAsset.location"/>
@@ -3220,17 +3283,19 @@ along with this software (see the LICENSE.md file). If not, see
         <description>Update date on PhysicalInventory, AssetDetail, and repost AcctgTrans with new date</description>
         <in-parameters>
             <parameter name="physicalInventoryId" required="true"/>
-            <parameter name="effectiveDate" required="true"/>
+            <parameter name="physicalInventoryDate" required="true"/>
+            <parameter name="comments"/>
         </in-parameters>
         <actions>
-            <service-call name="update#mantle.product.asset.PhysicalInventory"
-                    in-map="[physicalInventoryId:physicalInventoryId, physicalInventoryDate:effectiveDate]"/>
+            <set field="updateMap" from="[physicalInventoryId:physicalInventoryId, physicalInventoryDate:physicalInventoryDate]"/>
+            <if condition="comments"><set field="updateMap.comments" from="comments"/></if>
+            <service-call name="update#mantle.product.asset.PhysicalInventory" in-map="updateMap"/>
             <entity-find entity-name="mantle.product.asset.AssetDetail" list="assetDetailList">
                 <econdition field-name="physicalInventoryId"/></entity-find>
             <iterate list="assetDetailList" entry="assetDetail">
-                <if condition="assetDetail.effectiveDate != effectiveDate">
+                <if condition="assetDetail.effectiveDate != physicalInventoryDate">
                     <service-call name="update#mantle.product.asset.AssetDetail"
-                            in-map="[assetDetailId:assetDetail.assetDetailId, effectiveDate:effectiveDate]"/>
+                            in-map="[assetDetailId:assetDetail.assetDetailId, effectiveDate:physicalInventoryDate]"/>
                     <service-call name="mantle.ledger.AssetAutoPostServices.repost#PhysicalInventoryVariance"
                             in-map="[assetDetailId:assetDetail.assetDetailId]"/>
                 </if>
