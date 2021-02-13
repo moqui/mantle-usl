@@ -1214,11 +1214,15 @@ General Order Placement and eCommerce Usage
         </in-parameters>
         <out-parameters><parameter name="isFulfilled" type="Boolean"/></out-parameters>
         <actions>
-            <entity-find entity-name="mantle.product.subscription.Subscription" list="existingSubscriptionList">
+            <entity-find entity-name="mantle.product.subscription.Subscription" list="orderSubscriptionList">
                 <econdition field-name="orderId"/></entity-find>
-            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingAssetIssuanceList">
+            <entity-find entity-name="mantle.order.OrderItemWorkEffort" list="orderWorkEffortList">
+                <econdition field-name="orderId"/>
+                <econdition field-name="requiredWork" value="Y"/>
+            </entity-find>
+            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="orderAssetIssuanceList">
                 <econdition field-name="orderId"/></entity-find>
-            <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="existingAssetReceiptList">
+            <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="orderAssetReceiptList">
                 <econdition field-name="orderId"/></entity-find>
 
             <entity-find entity-name="mantle.order.OrderItem" list="orderItemList">
@@ -1234,44 +1238,123 @@ General Order Placement and eCommerce Usage
             <set field="isFulfilled" from="true"/>
             <iterate list="orderItemList" entry="orderItem">
                 <if condition="orderItem.productId &amp;&amp; productItemTypes.contains(orderItem.itemTypeEnumId)">
-                    <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
-                        <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
+                    <service-call name="mantle.order.OrderServices.isFulfilled#OrderItem" out-map="itemOut" out-map-add-to-existing="false"
+                            in-map="[orderId:orderId, orderItemSeqId:orderItem.orderItemSeqId, orderItem:orderItem,
+                                orderSubscriptionList:orderSubscriptionList, orderWorkEffortList:orderWorkEffortList,
+                                orderAssetIssuanceList:orderAssetIssuanceList, orderAssetReceiptList:orderAssetReceiptList]"/>
+                    <if condition="!itemOut.isFulfilled">
+                        <set field="isFulfilled" from="false"/>
+                        <break/>
+                    </if>
+                </if>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="isFulfilled" noun="OrderItem">
+        <in-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderItemSeqId" required="true"/>
+            <!-- optional fields for efficiency, each if null will be queried -->
+            <parameter name="orderItem" type="EntityValue"/>
+            <parameter name="orderSubscriptionList" type="List"/>
+            <parameter name="orderWorkEffortList" type="List"/>
+            <parameter name="orderAssetIssuanceList" type="List"/>
+            <parameter name="orderAssetReceiptList" type="List"/>
+        </in-parameters>
+        <out-parameters><parameter name="isFulfilled" type="Boolean"/></out-parameters>
+        <actions>
+            <if condition="orderItem == null"><entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/></if>
 
-                    <if condition="product.productTypeEnumId in ['PtDigital', 'PtDigitalAsset']">
-                        <entity-find entity-name="mantle.product.subscription.ProductSubscriptionResource"
-                                list="productSubscriptionResourceList" cache="true">
-                            <econdition field-name="productId" from="product.productId"/></entity-find>
-                        <iterate list="productSubscriptionResourceList" entry="productSubscriptionResource">
-                            <filter-map-list list="existingSubscriptionList" to-list="currentSubscriptionList">
-                                <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
-                                <field-map field-name="subscriptionResourceId" from="productSubscriptionResource.subscriptionResourceId"/>
-                            </filter-map-list>
-                            <if condition="!currentSubscriptionList">
+            <entity-find entity-name="moqui.basic.EnumGroupMember" list="productItemTypeEgms" cache="true">
+                <econdition field-name="enumGroupEnumId" value="EngItemsProduct"/></entity-find>
+            <set field="productItemTypes" from="productItemTypeEgms*.enumId"/>
+
+            <!-- set to true, if any evidence found that it is not fulfilled will set to false -->
+            <set field="isFulfilled" from="true"/>
+            <if condition="orderItem.productId &amp;&amp; productItemTypes.contains(orderItem.itemTypeEnumId)"><then>
+                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
+                    <field-map field-name="productId" from="orderItem.productId"/></entity-find-one>
+
+                <if condition="product.productTypeEnumId in ['PtDigital', 'PtDigitalAsset']">
+                    <if condition="orderSubscriptionList == null">
+                        <entity-find entity-name="mantle.product.subscription.Subscription" list="orderSubscriptionList">
+                            <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
+                    </if>
+                    <entity-find entity-name="mantle.product.subscription.ProductSubscriptionResource"
+                            list="productSubscriptionResourceList" cache="true">
+                        <econdition field-name="productId" from="product.productId"/></entity-find>
+                    <iterate list="productSubscriptionResourceList" entry="productSubscriptionResource">
+                        <filter-map-list list="orderItemSeqId" to-list="currentSubscriptionList">
+                            <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/>
+                            <field-map field-name="subscriptionResourceId" from="productSubscriptionResource.subscriptionResourceId"/>
+                        </filter-map-list>
+                        <if condition="!currentSubscriptionList">
+                            <set field="isFulfilled" from="false"/>
+                        </if>
+                    </iterate>
+                </if>
+                <if condition="isFulfilled &amp;&amp; product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset']">
+                    <if condition="orderAssetIssuanceList == null"><then>
+                        <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="currentAssetIssuanceList">
+                            <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
+                    </then><else>
+                        <filter-map-list list="orderAssetIssuanceList" to-list="currentAssetIssuanceList">
+                            <field-map field-name="orderItemSeqId"/></filter-map-list>
+                    </else></if>
+                    <if condition="orderAssetReceiptList == null"><then>
+                        <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="currentAssetIssuanceList">
+                            <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/></entity-find>
+                    </then><else>
+                        <filter-map-list list="orderAssetReceiptList" to-list="currentAssetReceiptList">
+                            <field-map field-name="orderItemSeqId"/></filter-map-list>
+                    </else></if>
+
+                    <!-- add up quantity in currentAssetIssuanceList, compare to orderItem.quantity -->
+                    <set field="currentQuantityTotal" from="0" type="BigDecimal"/>
+                    <iterate list="currentAssetIssuanceList" entry="currentAssetIssuance">
+                        <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetIssuance.quantity"/>
+                    </iterate>
+                    <iterate list="currentAssetReceiptList" entry="currentAssetReceipt">
+                        <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetReceipt.quantityAccepted"/>
+                    </iterate>
+                    <if condition="currentQuantityTotal &lt; orderItem.quantity">
+                        <set field="isFulfilled" from="false"/>
+                    </if>
+                </if>
+
+                <!-- check WorkEfforts (OrderItemWorkEffort with requiredWork == 'Y') for all Product types,
+                    if any work efforts not cancelled or completed consider item not fulfilled -->
+                <if condition="isFulfilled">
+                    <!-- NOTE: this could be constrained only to WorkEfforts associated with the OrderItem's Product, but don't to support arbitrary tasks required for OrderItems -->
+                    <if condition="orderWorkEffortList == null"><then>
+                        <entity-find entity-name="mantle.order.OrderItemWorkEffort" list="itemWorkEffortList">
+                            <econdition field-name="orderId"/>
+                            <econdition field-name="orderItemSeqId"/>
+                            <econdition field-name="requiredWork" value="Y"/>
+                        </entity-find>
+                    </then><else>
+                        <filter-map-list list="orderWorkEffortList" to-list="itemWorkEffortList">
+                            <field-map field-name="orderItemSeqId"/></filter-map-list>
+                    </else></if>
+
+                    <if condition="itemWorkEffortList">
+                        <set field="workEffortIdList" from="itemWorkEffortList*.workEffortId"/>
+                        <entity-find entity-name="mantle.work.effort.WorkEffort" list="workEffortList">
+                            <econdition field-name="workEffortId" operator="in" from="workEffortIdList"/>
+                            <select-field field-name="workEffortId,statusId"/>
+                        </entity-find>
+                        <iterate list="workEffortList" entry="workEffort">
+                            <if condition="!(workEffort.statusId in ['WeComplete', 'WeClosed', 'WeCancelled'])">
                                 <set field="isFulfilled" from="false"/>
                                 <break/>
                             </if>
                         </iterate>
                     </if>
-                    <if condition="product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset']">
-                        <filter-map-list list="existingAssetIssuanceList" to-list="currentAssetIssuanceList">
-                            <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/></filter-map-list>
-                        <filter-map-list list="existingAssetReceiptList" to-list="currentAssetReceiptList">
-                            <field-map field-name="orderItemSeqId" from="orderItem.orderItemSeqId"/></filter-map-list>
-                        <!-- add up quantity in currentAssetIssuanceList, compare to orderItem.quantity -->
-                        <set field="currentQuantityTotal" from="0" type="BigDecimal"/>
-                        <iterate list="currentAssetIssuanceList" entry="currentAssetIssuance">
-                            <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetIssuance.quantity"/>
-                        </iterate>
-                        <iterate list="currentAssetReceiptList" entry="currentAssetReceipt">
-                            <set field="currentQuantityTotal" from="currentQuantityTotal + currentAssetReceipt.quantityAccepted"/>
-                        </iterate>
-                        <if condition="currentQuantityTotal &lt; orderItem.quantity">
-                            <set field="isFulfilled" from="false"/>
-                            <break/>
-                        </if>
-                    </if>
                 </if>
-            </iterate>
+            </then><else>
+                <!-- TODO: for non-product items look for parent that is fulfilled? -->
+                <!-- NOTE 2021-02-12 this service is only used to check isFulfilled#OrderPart so far, so this alternate definition of fulfilled isn't needed -->
+            </else></if>
         </actions>
     </service>
     <service verb="checkComplete" noun="OrderPart">
