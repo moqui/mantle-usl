@@ -27,7 +27,8 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="carrierPartyId"><description>Overrides OrderPart.carrierPartyId if specified</description></parameter>
             <parameter name="shipmentMethodEnumId"><description>Overrides OrderPart.shipmentMethodEnumId if specified</description></parameter>
             <parameter name="postalContactMechId"><description>Overrides OrderPart.postalContactMechId if specified</description></parameter>
-            <parameter name="packageInfoList" type="List"><description>Response from a get#OrderPackageInfo interface call</description></parameter>
+            <parameter name="packageInfoList" type="List"><description>See get#AutoPackageInfo interface for details</description>
+                <parameter name="packageInfo" type="Map"/></parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="shippingTotal" required="true"/>
@@ -47,7 +48,11 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="originFacilityId"/>
             <parameter name="originPostalContactMechId" required="true"/>
             <parameter name="destPostalContactMechId" required="true"/>
-            <parameter name="packageInfoList" type="List"><description>Response from a get#OrderPackageInfo interface call</description></parameter>
+            <parameter name="packageInfoList" type="List"><description>See get#AutoPackageInfo interface for details</description>
+                <parameter name="packageInfo" type="Map"/></parameter>
+            <!-- parameters for store insurance settings and product cost lookup -->
+            <parameter name="productStoreId"/><parameter name="vendorPartyId"/>
+            <parameter name="currencyUomId" default="ec.user.getPreference('CurrencyDefault') ?: 'USD'"/>
         </in-parameters>
         <out-parameters>
             <parameter name="shippingRateInfoList" type="List">
@@ -509,7 +514,9 @@ along with this software (see the LICENSE.md file). If not, see
                             in-map="[shippingGatewayConfigId:shippingGatewayConfigId, carrierShipmentMethodList:bulkCarrierMethodList,
                                     fromPartyId:fromPartyId, toPartyId:toPartyId, originFacilityId:originFacilityId,
                                     originPostalContactMechId:facOriginOut.postalContactMechId,
-                                    destPostalContactMechId:destPostalContactMechId, packageInfoList:packageInfoList]"/>
+                                    destPostalContactMechId:destPostalContactMechId, packageInfoList:packageInfoList,
+                                    productStoreId:productStoreId, vendorPartyId:orderPart.vendorPartyId,
+                                    currencyUomId:orderHeader.currencyUomId]"/>
                     <iterate list="bulkOut.shippingRateInfoList" entry="shippingRateInfo">
                         <if condition="productStore?.markupOrderShipLabels == 'Y' || ec.user.getPreference('AllStoresMarkupLabelOrder') == 'true'">
                             <service-call name="mantle.shipment.CarrierServices.get#ShipLabelMarkup" out-map="markupOut" out-map-add-to-existing="false"
@@ -813,6 +820,92 @@ along with this software (see the LICENSE.md file). If not, see
                     'returnGatewayLabelId', 'returnGatewayRateId', 'returnEstimatedAmount']"/>
             <iterate list="clearFields" entry="fieldName"><script>packageRouteSeg.put(fieldName, null)</script></iterate>
             <entity-update value-field="packageRouteSeg"/>
+        </actions>
+    </service>
+
+    <!-- =========================== -->
+    <!-- Shipping Insurance Services -->
+    <!-- =========================== -->
+
+    <service verb="get" noun="ShipmentPackageRequiresInsurance">
+        <in-parameters>
+            <parameter name="shipmentId" required="true"/>
+            <parameter name="shipmentPackageSeqId" required="true"/>
+            <parameter name="insurancePackageThreshold" type="BigDecimal">
+                <description>If not specified will attempt to look up from ProductStore</description></parameter>
+            <parameter name="shipment" type="EntityValue"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="insuranceRequired" type="Boolean">
+                <description>True if any Product in package has shippingInsuranceReqd = 'Y' or packageTotalCost >= insurancePackageThreshold</description></parameter>
+            <parameter name="packageTotalCost" type="BigDecimal"/>
+            <parameter name="contentDescription"/>
+        </out-parameters>
+        <actions>
+            <if condition="shipment == null"><entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/></if>
+
+            <set field="quantityByProductId" from="[:]"/>
+            <entity-find entity-name="mantle.shipment.ShipmentPackageContent" list="packageContentList">
+                <econdition field-name="shipmentId"/>
+                <econdition field-name="shipmentPackageSeqId"/>
+            </entity-find>
+            <iterate list="packageContentList" entry="packageContent">
+                <script>quantityByProductId.put(packageContent.productId, packageContent.quantity)</script>
+            </iterate>
+
+            <service-call name="mantle.shipment.CarrierServices.get#GeneralPackageRequiresInsurance" out-map="context"
+                    in-map="[quantityByProductId:quantityByProductId, insurancePackageThreshold:insurancePackageThreshold,
+                        currencyUomId:shipment.costUomId, productStoreId:shipment.productStoreId, vendorPartyId:shipment.fromPartyId]"/>
+        </actions>
+    </service>
+    <service verb="get" noun="GeneralPackageRequiresInsurance">
+        <in-parameters>
+            <parameter name="quantityByProductId" type="Map"/>
+            <parameter name="insurancePackageThreshold" type="BigDecimal">
+                <description>If not specified will attempt to look up from ProductStore</description></parameter>
+            <parameter name="currencyUomId"><description>Used for cost lookup, defaults to default of PriceServices.get#ProductPriceByType</description></parameter>
+            <parameter name="productStoreId"/>
+            <parameter name="vendorPartyId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="insuranceRequired" type="Boolean">
+                <description>True if any Product in package has shippingInsuranceReqd = 'Y' or packageTotalCost >= insurancePackageThreshold</description></parameter>
+            <parameter name="packageTotalCost" type="BigDecimal"/>
+            <parameter name="contentDescription"/>
+        </out-parameters>
+        <actions>
+            <set field="insuranceRequired" from="false"/>
+            <set field="packageTotalCost" from="0.0"/>
+            <set field="contentDescription" value=""/>
+
+            <iterate list="quantityByProductId" key="productId" entry="quantity">
+                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
+                    <field-map field-name="productId"/></entity-find-one>
+                <if condition="product.shippingInsuranceReqd == 'Y'"><set field="insuranceRequired" from="true"/></if>
+
+                <!-- NOTE: PptAverage = Average Cost -->
+                <service-call name="mantle.product.PriceServices.get#ProductPriceByType" out-map="costOut"
+                        in-map="[productId:productId, priceTypeEnumId:'PptAverage', priceUomId:currencyUomId,
+                            productStoreId:productStoreId, vendorPartyId:vendorPartyId]"/>
+                <if condition="costOut.price"><then>
+                    <set field="packageTotalCost" from="packageTotalCost + ((costOut.price ?: 0.0) * (quantity ?: 0.0))"/>
+                </then><else-if condition="product.shippingInsuranceReqd == 'Y'">
+                    <log level="warn" message="Product ${productId} has shippingInsuranceReqd=Y but no ${currencyUomId} Cost (ProductPrice type PptAverage)"/>
+                </else-if></if>
+
+
+                <if condition="contentDescription"><set field="contentDescription" from="contentDescription + ', '"/></if>
+                <set field="contentDescription" from="contentDescription + ec.l10n.format(quantity, null) + 'x ' + product.productName"/>
+            </iterate>
+
+            <if condition="!insuranceRequired">
+                <if condition="insurancePackageThreshold == null &amp;&amp; productStoreId">
+                    <entity-find-one entity-name="mantle.product.store.ProductStore" value-field="productStore"/>
+                    <set field="insurancePackageThreshold" from="productStore?.insurancePackageThreshold"/>
+                </if>
+                <if condition="insurancePackageThreshold != null &amp;&amp; packageTotalCost &gt;= insurancePackageThreshold">
+                    <set field="insuranceRequired" from="true"/></if>
+            </if>
         </actions>
     </service>
 
