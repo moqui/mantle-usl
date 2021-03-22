@@ -177,12 +177,47 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.product.issuance.AssetReservationSummary" list="resSumList">
                     <econdition field-name="orderId"/>
                     <econdition field-name="orderItemSeqId"/>
+                    <econdition field-name="productId"/>
                     <select-field field-name="quantity,quantityNotAvailable"/>
                 </entity-find>
                 <if condition="resSumList.size() &gt; 0">
                     <set field="resQuantity" from="resSumList[0].quantity"/>
                     <set field="resQuantityNotAvailable" from="resSumList[0].quantityNotAvailable"/>
                     <set field="availableToPromiseTotal" from="(availableToPromiseTotal ?: 0.0) + (resQuantity ?: 0.0) - (resQuantityNotAvailable ?: 0.0)"/>
+                </if>
+
+                <!-- if Product is a Pick Assembly (productTypeEnumId=PtPickAssembly) adjust by reserve qty and qty not available from BOM components -->
+                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
+                <if condition="product.productTypeEnumId == 'PtPickAssembly'">
+                    <entity-find entity-name="mantle.product.issuance.AssetReservationSummary" list="allResSumList">
+                        <econdition field-name="orderId"/>
+                        <econdition field-name="orderItemSeqId"/>
+                        <select-field field-name="productId,quantity,quantityNotAvailable"/>
+                    </entity-find>
+
+                    <entity-find entity-name="mantle.product.ProductAssoc" list="assocList" cache="true">
+                        <date-filter/>
+                        <econdition field-name="productId" from="product.productId"/>
+                        <econdition field-name="productAssocTypeEnumId" value="PatMfgBom"/>
+                    </entity-find>
+                    <set field="reservedFromComponents" from="0.0"/>
+                    <set field="reservedNotAvailFromComponents" from="0.0"/>
+                    <iterate list="assocList" entry="assoc">
+                        <set field="curResSum" from="allResSumList.find({ it.productId == assoc.toProductId })"/>
+                        <!-- NOTE: digits to round? asset qty can be non-integer, but most products are and we want that -->
+                        <set field="compScale" from="assoc.quantity != null ? assoc.quantity.scale() : 0"/>
+                        <set field="resQuantity" from="(curResSum.quantity ?: 0.0).divide((assoc.quantity ?: 1.0), compScale, BigDecimal.ROUND_FLOOR)"/>
+                        <set field="resQuantityNotAvailable" from="(curResSum.quantityNotAvailable ?: 0.0).divide((assoc.quantity ?: 1.0), compScale, BigDecimal.ROUND_FLOOR)"/>
+
+                        <log level="warn" message="order item ${orderId}:${orderItemSeqId} comp prod ${assoc.toProductId} res qty ${curResSum.quantity} not avail ${curResSum.quantityNotAvailable} comp qty ${assoc.quantity} (scale ${compScale}) resQuantity ${resQuantity} resQuantityNotAvailable ${resQuantityNotAvailable}"/>
+
+                        <if condition="reservedFromComponents == 0.0 || reservedFromComponents &gt; resQuantity">
+                            <set field="reservedFromComponents" from="resQuantity"/></if>
+                        <!-- this is different, don't want lowest number want highest number for cumulative not available qty -->
+                        <if condition="reservedNotAvailFromComponents &lt; resQuantityNotAvailable">
+                            <set field="reservedNotAvailFromComponents" from="resQuantityNotAvailable"/></if>
+                    </iterate>
+                    <set field="availableToPromiseTotal" from="(availableToPromiseTotal ?: 0.0) + reservedFromComponents - reservedNotAvailFromComponents"/>
                 </if>
             </if>
         </actions>
@@ -657,9 +692,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem" for-update="true"/>
             <if condition="orderItem == null"><return error="true" message="Order Item ${orderId}:${orderItemSeqId} not found"/></if>
 
-
             <if condition="componentProductId"><log level="warn" message="Component Product ${componentProductId} reserve ${componentQuantity} for OrderItem ${orderId}:${orderItemSeqId} product ${orderItem.productId}"/></if>
-
 
             <!-- first check the OrderItem, make sure we have a productId otherwise don't reserve -->
             <set field="productId" from="componentProductId ?: orderItem.productId"/>
@@ -1036,6 +1069,9 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="productAssocTypeEnumId" value="PatMfgBom"/>
                 </entity-find>
                 <iterate list="assocList" entry="assoc">
+                    <if condition="assoc.productId == assoc.toProductId">
+                        <return error="true" message="Pick Assembly Product ${assoc.productId} has itself for a component product, remove the Manufacturing BOM Association"/></if>
+
                     <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
                             in-map="[orderId:orderId, orderItemSeqId:orderItemSeqId, productStore:productStore, forceReserve:forceReserve,
                                 componentProductId:assoc.toProductId, componentQuantity:((assoc.quantity ?: 1.0) * quantityRemaining)]"/>
@@ -1129,6 +1165,9 @@ along with this software (see the LICENSE.md file). If not, see
         <out-parameters><parameter name="quantityDeducted" type="BigDecimal"/></out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.product.issuance.AssetReservation" value-field="existingRes"/>
+
+            <!-- <log level="warn" message="reduce by ${quantityToDeduct} AssetRes ${existingRes}\n${ec.artifactExecution.getStack().collect({it.toBasicString()}).join('\n')}"/> -->
+
             <if condition="!quantityToDeduct"><set field="quantityToDeduct" from="existingRes.quantityNotIssued"/></if>
             <if condition="quantityToDeduct &gt;= existingRes.quantity &amp;&amp; existingRes.quantity == existingRes.quantityNotIssued"><then>
                 <service-call name="create#mantle.product.asset.AssetDetail" in-map="[assetId:existingRes.assetId,
@@ -1688,6 +1727,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.product.issuance.AssetReservation" list="oiOtherResList">
                     <econdition field-name="assetId" operator="not-equals"/>
                     <econdition field-name="orderId"/><econdition field-name="orderItemSeqId"/>
+                    <!-- productId filter critical for PtPickAssembly products -->
+                    <econdition field-name="productId" from="asset.productId"/>
                     <econdition field-name="quantityNotIssued" operator="greater" from="0.0"/>
                 </entity-find>
                 <iterate list="oiOtherResList" entry="oiOtherRes">
@@ -1805,13 +1846,15 @@ along with this software (see the LICENSE.md file). If not, see
     <!-- ======================================= -->
 
     <service verb="issue" noun="AssetReservation" no-tx-cache="true">
-        <description>Issue an Asset based on a reservation (AssetReservation). This is currently only called by
-            ShipmentServices.pack#ShipmentItemSource. All callers should query and lock all Asset records planned to
+        <description>Issue an Asset based on a reservation (AssetReservation). This is currently called by
+            ShipmentServices.pack#ShipmentItemSource and pack#ShipmentAssemblyComponent.
+            All callers should query and lock all Asset records planned to
             issue from before from issuing any (as ShipmentServices.pack#ShipmentItemSource does).</description>
         <in-parameters>
             <parameter name="assetReservation" type="EntityValue" required="true"/>
-            <parameter name="shipmentId" required="true"/>
+            <parameter name="shipmentId"/>
             <parameter name="shipmentItemSourceId"/>
+            <parameter name="workEffortId"/>
             <parameter name="quantity" type="BigDecimal" required="true"/>
             <parameter name="issuedDate" type="Timestamp" default="ec.user.nowTimestamp"/>
         </in-parameters>
@@ -1831,12 +1874,15 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <if condition="shipmentItemSourceId">
-                <entity-find-one entity-name="mantle.shipment.ShipmentItemSource" value-field="shipmentItemSource"/></if>
+                <entity-find-one entity-name="mantle.shipment.ShipmentItemSource" value-field="shipmentItemSource"/>
+                <if condition="!shipmentId"><set field="shipmentId" from="shipmentItemSource.shipmentId"/></if>
+            </if>
 
             <!-- see if there is another issuance we can add to -->
             <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingIssuanceList">
-                <econdition field-name="shipmentId"/>
+                <econdition field-name="shipmentId" ignore-if-empty="true"/>
                 <econdition field-name="shipmentItemSourceId" ignore-if-empty="true"/>
+                <econdition field-name="workEffortId" ignore-if-empty="true"/>
                 <econdition field-name="assetReservationId" from="assetReservation.assetReservationId"/>
                 <!-- these 3 shouldn't be necessary when constrained by assetReservationId but just in case -->
                 <econdition field-name="assetId" from="assetReservation.assetId"/>
@@ -1857,7 +1903,8 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[assetId:assetReservation.assetId, assetReservationId:assetReservation.assetReservationId,
                             orderId:assetReservation.orderId, orderItemSeqId:assetReservation.orderItemSeqId,
                             invoiceId:shipmentItemSource?.invoiceId, invoiceItemSeqId:shipmentItemSource?.invoiceItemSeqId,
-                            shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId, productId:assetReservation.productId,
+                            shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId,
+                            workEffortId:workEffortId, productId:assetReservation.productId,
                             issuedDate:issuedDate, issuedByUserId:ec.user.userId, quantity:quantity]"/>
             </else></if>
 
@@ -1865,8 +1912,9 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- NOTE: no availableToPromiseDiff because that was modified during the reservation -->
             <service-call name="create#mantle.product.asset.AssetDetail" in-map="[assetId:assetReservation.assetId,
                     effectiveDate:issuedDate, quantityOnHandDiff:-quantity,
-                    assetReservationId:assetReservation.assetReservationId, shipmentId:shipmentId,
-                    productId:assetReservation.productId, assetIssuanceId:assetIssuanceId]"/>
+                    assetReservationId:assetReservation.assetReservationId, shipmentId:shipmentId, workEffortId:workEffortId,
+                    productId:assetReservation.productId, assetIssuanceId:assetIssuanceId,
+                    orderId:assetReservation.orderId, orderItemSeqId:assetReservation.orderItemSeqId]"/>
 
             <set field="assetReservation.quantityNotIssued" from="assetReservation.quantityNotIssued - quantity"/>
             <if condition="assetReservation.quantityNotIssued == 0.0"><then>
@@ -2080,16 +2128,13 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <if condition="asset == null"><return error="true" message="Asset not found with ID ${assetId}"/></if>
 
-            <if condition="quantity &amp;&amp; quantityUomId">
-                <service-call name="mantle.shipment.ShipmentServices.convert#ProductBoxQuantity" in-map="[
-                            productId:asset.productId, originalQuantity:quantity, originalQuantityUomId:quantityUomId]" out-map="cvtQty"/>
-                <if condition="cvtQty">
-                    <set field="quantity" from="cvtQty.convertedQuantity"/>
-                </if>
-            <else-if condition="!quantity">
-                 <set field="quantity" from="asset.availableToPromiseTotal"/>
-            </else-if>
-            </if>
+            <if condition="quantity &amp;&amp; quantityUomId"><then>
+                <service-call name="mantle.shipment.ShipmentServices.convert#ProductBoxQuantity" out-map="cvtQty"
+                        in-map="[productId:asset.productId, originalQuantity:quantity, originalQuantityUomId:quantityUomId]"/>
+                <set field="quantity" from="cvtQty.convertedQuantity"/>
+            </then><else-if condition="!quantity">
+                <set field="quantity" from="asset.availableToPromiseTotal"/>
+            </else-if></if>
 
             <!-- reserve by availableToPromiseTotal (no reservation here, but respect others) -->
             <if condition="quantity &gt; asset.availableToPromiseTotal">
@@ -2141,12 +2186,33 @@ along with this software (see the LICENSE.md file). If not, see
 
             <check-errors/>
 
-            <service-call name="create#mantle.product.issuance.AssetIssuance" out-map="issueOut"
-                    in-map="[workEffortId:workEffortId, productId:asset.productId, assetId:asset.assetId,
-                        issuedDate:issuedDate, issuedByUserId:ec.user.userId, quantity:quantity]"/>
-            <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="[workEffortId:workEffortId,
-                    productId:asset.productId, assetId:asset.assetId, effectiveDate:issuedDate, quantityDiff:-quantity,
-                    assetIssuanceId:issueOut.assetIssuanceId]"/>
+            <set field="baseMap" from="[workEffortId:workEffortId, assetId:asset.assetId, productId:asset.productId]"/>
+
+            <!-- look for existing AssetIssuance to add to -->
+            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="existingIssuanceList">
+                <econdition field-name="assetId"/>
+                <econdition field-name="workEffortId"/>
+                <econdition field-name="shipmentId" ignore-if-empty="true"/>
+                <econdition field-name="shipmentItemSourceId" ignore-if-empty="true"/>
+                <econdition field-name="orderId" ignore-if-empty="true"/>
+                <econdition field-name="orderItemSeqId" ignore-if-empty="true"/>
+                <econdition field-name="invoiceId" ignore-if-empty="true"/>
+                <econdition field-name="invoiceItemSeqId" ignore-if-empty="true"/>
+            </entity-find>
+            <if condition="existingIssuanceList"><then>
+                <!-- add to existing issuance -->
+                <set field="existingIssuance" from="existingIssuanceList[0]"/>
+                <service-call name="update#mantle.product.issuance.AssetIssuance" in-map="baseMap +
+                        [assetIssuanceId:existingIssuance.assetIssuanceId, quantity:(existingIssuance.quantity + quantity)]"/>
+                <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="baseMap +
+                        [effectiveDate:issuedDate, quantityDiff:-quantity, assetIssuanceId:existingIssuance.assetIssuanceId]"/>
+            </then><else>
+                <!-- create an issuance -->
+                <service-call name="create#mantle.product.issuance.AssetIssuance" out-map="issueOut"
+                        in-map="baseMap + [issuedDate:issuedDate, issuedByUserId:ec.user.userId, quantity:quantity]"/>
+                <service-call name="mantle.product.AssetServices.change#AssetQuantity" in-map="baseMap +
+                        [effectiveDate:issuedDate, quantityDiff:-quantity, assetIssuanceId:issueOut.assetIssuanceId]"/>
+            </else></if>
         </actions>
     </service>
 
@@ -2187,6 +2253,10 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="quantity" type="BigDecimal" required="true"/>
             <parameter name="issuedDate" type="Timestamp" default="ec.user.nowTimestamp"/>
             <parameter name="forceIssueOther" type="Boolean" default="false"/>
+
+            <parameter name="workEffortId"/>
+            <parameter name="workEffortOnly" type="Boolean" default="false">
+                <description>Issue only to WorkEffort, not to Order, Shipment, or Invoice</description></parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="quantityRemaining" type="BigDecimal"/>
@@ -2236,6 +2306,14 @@ along with this software (see the LICENSE.md file). If not, see
                     in-map="[productStoreId:productStoreId, vendorPartyId:vendorPartyId, customerPartyId:customerPartyId]"/>
             <set field="assetPoolIdSet" from="poolsOut.assetPoolIdSet"/>
 
+            <if condition="workEffortOnly"><then>
+                <set field="baseMap" from="[workEffortId:workEffortId]"/>
+            </then><else>
+                <set field="baseMap" from="[shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId,
+                        orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId,
+                        invoiceId:shipmentItemSource.invoiceId, invoiceItemSeqId:shipmentItemSource.invoiceItemSeqId]"/>
+            </else></if>
+
             <!-- start with available inventory -->
             <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
                 <econdition field-name="productId"/>
@@ -2252,10 +2330,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="curQuantity" from="asset.availableToPromiseTotal &gt; quantityRemaining ? quantityRemaining : asset.availableToPromiseTotal"/>
                 <if condition="curQuantity">
                     <service-call name="mantle.product.AssetServices.issue#Asset"
-                            in-map="[shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId,
-                                quantity:curQuantity, issuedDate:issuedDate, assetId:asset.assetId,
-                                orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId,
-                                invoiceId:shipmentItemSource.invoiceId, invoiceItemSeqId:shipmentItemSource.invoiceItemSeqId]"/>
+                            in-map="baseMap + [quantity:curQuantity, issuedDate:issuedDate, assetId:asset.assetId]"/>
                     <set field="quantityRemaining" from="quantityRemaining - curQuantity"/>
                     <if condition="quantityRemaining == 0.0"><break/></if>
                 </if>
@@ -2282,10 +2357,7 @@ along with this software (see the LICENSE.md file). If not, see
                                 in-map="[assetId:asset.assetId, quantity:curQuantity]"/>
 
                         <service-call name="mantle.product.AssetServices.issue#Asset"
-                                in-map="[shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId,
-                                    quantity:curQuantity, issuedDate:issuedDate, assetId:asset.assetId,
-                                    orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId,
-                                    invoiceId:shipmentItemSource.invoiceId, invoiceItemSeqId:shipmentItemSource.invoiceItemSeqId]"/>
+                                in-map="baseMap + [quantity:curQuantity, issuedDate:issuedDate, assetId:asset.assetId]"/>
                         <set field="quantityRemaining" from="quantityRemaining - curQuantity"/>
                         <if condition="quantityRemaining == 0.0"><break/></if>
                     </if>
@@ -2306,10 +2378,7 @@ along with this software (see the LICENSE.md file). If not, see
                     </entity-find>
                     <if condition="recentAssetList"><then>
                         <service-call name="mantle.product.AssetServices.issue#Asset"
-                                in-map="[shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId,
-                                    quantity:quantityRemaining, issuedDate:issuedDate, assetId:recentAssetList[0].assetId,
-                                    orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId,
-                                    invoiceId:shipmentItemSource.invoiceId, invoiceItemSeqId:shipmentItemSource.invoiceItemSeqId]"/>
+                                in-map="baseMap + [quantity:quantityRemaining, issuedDate:issuedDate, assetId:recentAssetList[0].assetId]"/>
                         <set field="quantityRemaining" from="0.0"/>
                     </then><else>
                         <!-- no asset... create a shell one to record the reservation and detail against -->
@@ -2317,10 +2386,7 @@ along with this software (see the LICENSE.md file). If not, see
                                 in-map="[productId:productId, facilityId:facilityId, ownerPartyId:vendorPartyId,
                                     createdDate:nowTimestamp]"/>
                         <service-call name="mantle.product.AssetServices.issue#Asset"
-                                in-map="[shipmentId:shipmentId, shipmentItemSourceId:shipmentItemSourceId,
-                                    quantity:quantityRemaining, issuedDate:issuedDate, assetId:createAssetOut.assetId,
-                                    orderId:shipmentItemSource.orderId, orderItemSeqId:shipmentItemSource.orderItemSeqId,
-                                    invoiceId:shipmentItemSource.invoiceId, invoiceItemSeqId:shipmentItemSource.invoiceItemSeqId]"/>
+                                in-map="baseMap + [quantity:quantityRemaining, issuedDate:issuedDate, assetId:createAssetOut.assetId]"/>
                         <set field="quantityRemaining" from="0.0"/>
                     </else></if>
                 </if>
@@ -2658,6 +2724,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="assetId" required="true"/>
             <parameter name="assetReceiptId"><description>If not specified will look it up with assetId and shipmentId.</description></parameter>
             <parameter name="shipmentId"/>
+            <parameter name="workEffortId"/>
             <auto-parameters entity-name="mantle.product.receipt.AssetReceipt" include="nonpk"/>
             <auto-parameters entity-name="mantle.product.asset.AssetDetail" include="nonpk">
                 <exclude field-name="availableToPromiseDiff"/>
@@ -2688,7 +2755,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="oldReceivedDate" from="asset.receivedDate"/>
 
             <!-- update the AssetReceipt -->
-            <if condition="!assetReceiptId"><then>
+            <if condition="!assetReceiptId &amp;&amp; shipmentId"><then>
                 <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="assetReceiptList">
                     <econdition field-name="assetId"/><econdition field-name="shipmentId"/>
                     <order-by field-name="assetReceiptId"/>
@@ -2701,14 +2768,14 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!assetReceiptId"><return error="true" message="Cannot update Asset and Receipt, could not find AssetReceipt record for assetId [${assetId}], shipmentId [${shipmentId}]"/></if>
 
             <!-- calculate the quantityAccepted difference, will be set in quantityOnHandDiff and availableToPromiseDiff -->
-            <set field="quantityDiff" from="(quantityAccepted != null ? quantityAccepted : originalAssetReceipt.quantityAccepted) - originalAssetReceipt.quantityAccepted"/>
-            <set field="quantityRejectedDiff" from="(quantityRejected != null ? quantityRejected : originalAssetReceipt.quantityRejected) - originalAssetReceipt.quantityRejected"/>
+            <set field="quantityDiff" from="(quantityAccepted != null ? quantityAccepted : (originalAssetReceipt.quantityAccepted ?: 0.0)) - (originalAssetReceipt.quantityAccepted ?: 0.0)"/>
+            <set field="quantityRejectedDiff" from="(quantityRejected != null ? quantityRejected : (originalAssetReceipt.quantityRejected ?: 0.0)) - (originalAssetReceipt.quantityRejected ?: 0.0)"/>
 
             <!-- <log level="warn" message="======= quantityAccepted ${quantityAccepted}, quantityRejected ${quantityRejected}, quantityDiff ${quantityDiff}, originalAssetReceipt: ${originalAssetReceipt}"/> -->
 
             <!-- Ensure the ShipmentItem has sufficient remaining quantity -->
             <set field="newQuantityRemaining" from="(quantityDiff ?: 0) + (quantityRejectedDiff ?: 0)"/>
-            <if condition="newQuantityRemaining">
+            <if condition="newQuantityRemaining &amp;&amp; shipmentId">
                 <service-call name="mantle.shipment.ShipmentServices.ensure#ShipmentItemQuantityRemaining"
                         in-map="[shipmentId:shipmentId, productId:asset.productId, newQuantityRemaining:newQuantityRemaining]"/>
             </if>
@@ -2762,8 +2829,8 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="oldAtp &lt;= 0 &amp;&amp; statusId == 'AstAvailable' &amp;&amp; oldStatusId != 'AstAvailable'">
                 <service-call name="create#mantle.product.asset.AssetDetail" out-map="context"
                         in-map="[assetId:assetId, effectiveDate:receivedDate, quantityOnHandDiff:0,
-                        availableToPromiseDiff:oldQoh, shipmentId:shipmentId, productId:asset.productId,
-                        assetReceiptId:assetReceiptId]"/>
+                            availableToPromiseDiff:oldQoh, shipmentId:shipmentId, productId:asset.productId,
+                            assetReceiptId:assetReceiptId]"/>
 
                 <!-- reserve the newly available Asset, if needed -->
                 <service-call name="mantle.product.AssetServices.reserve#IncreasedAsset" in-map="[assetId:assetId]"/>
