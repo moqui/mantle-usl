@@ -768,13 +768,61 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </if>
 
-            <!-- TODO-PtPickAssembly: see if scanInput matches a Product that is a component of a Pick Assembly on a ShipmentItem (productTypeEnumId=PtPickAssembly)
-                - if matches call pack#ShipmentPickAssemblyComponent instead of pack#ShipmentProduct
-            -->
+            <if condition="productId">
+                <!-- TODO-PtPickAssembly if a Shipment has an item product that is also a component of another item PA product
+                    then see if direct shipment item product has been fully packed and instead pack#ShipmentAssemblyComponent -->
+                <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentProduct" in-map="context"/>
+                <return/>
+            </if>
 
-            <if condition="!productId"><return type="warning" message="Could not find product on shipment ${shipmentId} with scanned ID ${scanInput}"/></if>
+            <!-- see if scanInput matches a Product that is a component of a Pick Assembly on a ShipmentItem (productTypeEnumId=PtPickAssembly)
+                - if matches call pack#ShipmentAssemblyComponent instead of pack#ShipmentProduct -->
+            <if condition="!productId">
+                <!-- to avoid additional query first use cached data to make sure there is a PtPickAssembly product on the shipment -->
+                <set field="pickAssemblyIdList" from="[]"/>
+                <iterate list="productIdList" entry="productId">
+                    <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
+                        <field-map field-name="productId"/></entity-find-one>
+                    <if condition="product.productTypeEnumId == 'PtPickAssembly'">
+                        <script>pickAssemblyIdList.add(productId)</script></if>
+                </iterate>
 
-            <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentProduct" in-map="context"/>
+                <if condition="pickAssemblyIdList">
+                    <entity-find entity-name="mantle.product.ProductAssoc" list="bomAssocList">
+                        <date-filter/>
+                        <econdition field-name="productId" operator="in" from="pickAssemblyIdList"/>
+                        <econdition field-name="productAssocTypeEnumId" value="PatMfgBom"/>
+                    </entity-find>
+
+                    <set field="componentProductIds" from="new HashSet(bomAssocList*.toProductId)"/>
+
+                    <if condition="scanInput in componentProductIds"><set field="productId" from="scanInput"/></if>
+                    <if condition="!productId">
+                        <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
+                            <field-map field-name="assetId" from="scanInput"/></entity-find-one>
+                        <if condition="asset != null &amp;&amp; asset.productId in componentProductIds">
+                            <set field="productId" from="asset.productId"/></if>
+                    </if>
+                    <if condition="!productId">
+                        <entity-find entity-name="mantle.product.ProductIdentification" list="prodIdentList">
+                            <econdition field-name="idValue" from="scanInput"/>
+                            <econdition field-name="productId" operator="in" from="componentProductIds"/>
+                        </entity-find>
+                        <if condition="prodIdentList">
+                            <if condition="prodIdentList.size() &gt; 1">
+                                <return type="warning" message="Found more than one product on shipment ${shipmentId} with other ID ${scanInput}, scan internal product or asset ID or manually select the product to pack"/></if>
+                            <set field="productId" from="prodIdentList[0].productId"/>
+                        </if>
+                    </if>
+
+                    <if condition="productId">
+                        <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentAssemblyComponent" in-map="context"/>
+                        <return/>
+                    </if>
+                </if>
+            </if>
+
+            <return type="warning" message="Could not find product on shipment ${shipmentId} with scanned ID ${scanInput}"/>
         </actions>
     </service>
     <service verb="pack" noun="ShipmentProduct">
@@ -1005,6 +1053,16 @@ along with this software (see the LICENSE.md file). If not, see
             -->
 
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment" for-update="true"/>
+
+            <!-- don't allow packing in various statuses -->
+            <if condition="shipment.statusId in ['ShipPacked', 'ShipShipped', 'ShipDelivered', 'ShipRejected', 'ShipCancelled']">
+                <return error="true" message="Cannot pack Shipment ${shipmentId} in status ${shipment.status?.description ?: shipment.statusId}"/>
+            </if>
+            <!-- set Shipment to Picked if in Input or Scheduled status -->
+            <if condition="shipment.statusId in ['ShipInput', 'ShipScheduled']">
+                <service-call name="update#mantle.shipment.Shipment" in-map="[shipmentId:shipmentId, statusId:'ShipPicked']"/>
+            </if>
+
             <entity-find entity-name="mantle.shipment.ShipmentItemAssocView" list="componentItemList">
                 <!-- NOTE: this may need more constraint or further preprocessing to ensure there are not multiple records for the same assembly AND component (in this case one record per assembly) -->
                 <date-filter/>
