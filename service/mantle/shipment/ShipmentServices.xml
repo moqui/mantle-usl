@@ -780,10 +780,17 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <if condition="productId">
-                <!-- TODO-PtPickAssembly if a Shipment has an item product that is also a component of another item PA product
+                <!-- pack it -->
+                <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentProduct" in-map="context" out-map="packOut"/>
+                <!-- if a Shipment has an item product that is also a component of another item PA product
                     then see if direct shipment item product has been fully packed and instead pack#ShipmentAssemblyComponent -->
-                <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentProduct" in-map="context"/>
-                <return/>
+                <if condition="packOut.quantityRemaining"><then>
+                    <set field="productId" from="null"/>
+                    <set field="originalQuantity" from="quantity"/>
+                    <set field="quantity" from="packOut.quantityRemaining"/>
+                </then><else>
+                    <return/>
+                </else></if>
             </if>
 
             <!-- see if scanInput matches a Product that is a component of a Pick Assembly on a ShipmentItem (productTypeEnumId=PtPickAssembly)
@@ -844,7 +851,9 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </if>
 
-            <return type="warning" message="Could not find product on shipment ${shipmentId} with scanned ID ${scanInput}"/>
+            <!-- if we got here and originalQuantity != null then we found a direct product on the shipment but there was quantity remaining so this warning does not apply -->
+            <if condition="originalQuantity == null">
+                <return type="warning" message="Could not find product on shipment ${shipmentId} with scanned ID ${scanInput}"/></if>
         </actions>
     </service>
     <service verb="pack" noun="ShipmentProduct">
@@ -856,6 +865,9 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="packDate" type="Timestamp" default="ec.user.nowTimestamp"/>
             <parameter name="assetId"><description>Specify to pack a certain asset, may or may not be reserved.</description></parameter>
         </in-parameters>
+        <out-parameters>
+            <parameter name="quantityRemaining" type="BigDecimal"/>
+        </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
             <if condition="!(product.productTypeEnumId in ['PtAsset', 'PtDigitalAsset', 'PtAssetUse', 'PtPickAssembly'])">
@@ -1171,7 +1183,15 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
                 <iterate list="sisList" entry="shipmentItemSource">
                     <if condition="quantityRemaining == 0.0"><break/></if>
-                    <set field="curSisQtyRemaining" from="quantityRemaining &gt; shipmentItemSource.quantity ? shipmentItemSource.quantity : quantityRemaining"/>
+
+                    <filter-map-list list="componentItemList" to-list="curComponentAssocList">
+                        <field-map field-name="productId" from="assemblyProductId"/></filter-map-list>
+                    <if condition="curComponentAssocList"><then>
+                        <set field="sisMaxQty" from="shipmentItemSource.quantity * (curComponentAssocList[0].componentQuantity ?: 1.0)"/>
+                        <set field="curSisQtyRemaining" from="quantityRemaining &gt; sisMaxQty ? sisMaxQty : quantityRemaining"/>
+                    </then><else>
+                        <set field="curSisQtyRemaining" from="quantityRemaining &gt; shipmentItemSource.quantity ? shipmentItemSource.quantity : quantityRemaining"/>
+                    </else></if>
 
                     <!-- NOTE: don't displace#AssetReservations here even if assetId specified, was doing this and was incorrect because in this block we are only using reservations -->
 
@@ -1188,7 +1208,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <iterate list="assetReservationList" entry="assetReservation">
                         <set field="quantityToIssue" from="assetReservation.quantityNotIssued &gt; curSisQtyRemaining ?
                                 curSisQtyRemaining : assetReservation.quantityNotIssued"/>
-                        <!-- <log level="warn" message="component ${productId} quantityToIssue ${quantityToIssue} curSisQtyRemaining ${curSisQtyRemaining} assetReservation.quantityNotIssued ${assetReservation.quantityNotIssued}"/> -->
+                        <log level="warn" message="component ${productId} quantityToIssue ${quantityToIssue} curSisQtyRemaining ${curSisQtyRemaining} assetReservation.quantityNotIssued ${assetReservation.quantityNotIssued}"/>
                         <if condition="quantityToIssue &lt;= 0.0"><continue/></if>
 
                         <set field="curSisQtyRemaining" from="curSisQtyRemaining &gt; quantityToIssue ? (curSisQtyRemaining - quantityToIssue) : 0.0"/>
