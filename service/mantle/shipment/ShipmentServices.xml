@@ -141,6 +141,25 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <if condition="quantity &lt; 0.0"><return error="true" message="Quantity cannot be less than zero for shipment ${shipmentId} product ${productId} (${quantity})"/></if>
 
+            <!-- don't allow quantity to go below issued or received qty -->
+            <entity-find entity-name="mantle.product.issuance.AssetIssuanceSummary" list="issuanceSummaryList">
+                <econdition field-name="shipmentId"/>
+                <econdition field-name="productId"/>
+                <select-field field-name="quantity"/>
+            </entity-find>
+            <if condition="issuanceSummaryList &amp;&amp; (issuanceSummaryList[0].quantity ?: 0.0) &gt; quantity">
+                <return error="true" message="Quantity cannot be reduced below packed/issued quantity ${issuanceSummaryList[0].quantity}"/></if>
+            <entity-find entity-name="mantle.product.receipt.AssetReceiptSummary" list="receiptSummaryList">
+                <econdition field-name="shipmentId"/>
+                <econdition field-name="productId"/>
+                <select-field field-name="quantityAccepted,quantityRejected"/>
+            </entity-find>
+            <if condition="receiptSummaryList">
+                <set field="receiptTotal" from="(receiptSummaryList[0].quantityAccepted ?: 0.0) + (receiptSummaryList[0].quantityRejected ?: 0.0)"/>
+                <if condition="receiptTotal &gt; quantity">
+                    <return error="true" message="Quantity cannot be reduced below received quantity ${receiptTotal}"/></if>
+            </if>
+
             <!-- get the shipment type and if outgoing don't allow quantity increase over what is on related order items -->
             <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
             <service-call name="org.moqui.impl.BasicServices.find#EnumerationByParent" out-map="shipmentTypeOut"
@@ -250,6 +269,15 @@ along with this software (see the LICENSE.md file). If not, see
                     </iterate>
                 </if>
             </else></if>
+
+            <!-- if product is a PtPickAssembly update produce qty for itself and consume quantities for its components on Assembly Task -->
+            <if condition="shipment.assemblyWorkEffortId">
+                <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true"/>
+                <if condition="product.productTypeEnumId == 'PtPickAssembly'">
+                    <service-call name="mantle.work.ManufacturingServices.set#ProducedProductQuantity"
+                            in-map="[workEffortId:shipment.assemblyWorkEffortId, productId:productId, estimatedQuantity:quantity]"/>
+                </if>
+            </if>
         </actions>
     </service>
     <service verb="ensure" noun="ShipmentItemQuantityRemaining">
@@ -1156,8 +1184,6 @@ along with this software (see the LICENSE.md file). If not, see
                         in-map="[shipmentId:shipmentId]" out-map="createWeOut"/>
                 <set field="assemblyWorkEffortId" from="createWeOut.assemblyWorkEffortId"/>
             </if>
-            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="assemblyWorkEffort">
-                <field-map field-name="workEffortId" from="assemblyWorkEffortId"/></entity-find-one>
 
             <!-- check quantity needed for Shipment by all ShipmentItems by BOM vs quantity already issued to assemblyWorkEffortId -->
             <set field="shipmentTotalQuantity" from="componentItemList.collect({ (it.quantity ?: 0.0) * (it.componentQuantity ?: 1.0) }).sum()"/>
@@ -1266,47 +1292,8 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- if PA WorkEffort has enough inventory to produce any quantity of any Product to Produce that has not already been produced, produce some or update prior produce -->
-            <service-call name="mantle.work.ManufacturingServices.get#ConsumedAssetRemaining"
-                    in-map="[workEffortId:assemblyWorkEffortId]" out-map="remainingOut"/>
-
-            <iterate list="allAssemblyProductIds" entry="assemblyProductId">
-                <set field="assemblyProduceQty" from="remainingOut.assemblyCanProduceQty.get(assemblyProductId)"/>
-                <if condition="assemblyProduceQty">
-                    <!-- look for existing Asset to update instead of receiving new -->
-                    <entity-find entity-name="mantle.product.receipt.AssetReceipt" list="existingReceiptList">
-                        <econdition field-name="productId" from="assemblyProductId"/>
-                        <econdition field-name="workEffortId" from="assemblyWorkEffortId"/>
-                        <order-by field-name="assetReceiptId"/>
-                    </entity-find>
-                    <if condition="existingReceiptList"><then>
-                        <set field="existingReceipt" from="existingReceiptList[0]"/>
-                        <service-call name="mantle.product.AssetServices.update#AssetAndReceipt" out-map="updateOut" out-map-add-to-existing="false"
-                                in-map="[assetId:existingReceipt.assetId, assetReceiptId:existingReceipt.assetReceiptId,
-                                    workEffortId:assemblyWorkEffortId, receivedDate:packDate,
-                                    quantityAccepted:((existingReceipt.quantityAccepted ?: 0.0) + assemblyProduceQty)]"/>
-
-                        <set field="packAssetId" from="existingReceipt.assetId"/>
-                    </then><else>
-                        <!-- produce the product (receive asset) -->
-                        <service-call name="mantle.product.AssetServices.receive#Asset" out-map="receiveOut" out-map-add-to-existing="false"
-                                in-map="[productId:assemblyProductId, quantity:assemblyProduceQty, statusId:'AstPromised',
-                                    receivedDate:packDate, facilityId:assemblyWorkEffort.facilityId,
-                                    ownerPartyId:assemblyWorkEffort.ownerPartyId, workEffortId:assemblyWorkEffortId]"/>
-
-                        <set field="packAssetId" from="receiveOut.assetId"/>
-                    </else></if>
-
-
-                    <!-- issue to Shipment -->
-                    <service-call name="mantle.shipment.ShipmentServices.pack#ShipmentProduct"
-                            in-map="[productId:assemblyProductId, shipmentId:shipmentId, shipmentPackageSeqId:shipmentPackageSeqId,
-                                quantity:assemblyProduceQty, packDate:packDate, assetId:packAssetId]"/>
-
-                    <!-- we only want to do ONE at a time or we would have to call get#ConsumedAssetRemaining again, but this is done for every pack so it's not needed, so break from loop -->
-                    <break/>
-                    <!-- FUTURE: consider packing others if possible? would have to iteratively call get#ConsumedAssetRemaining; shouldn't be needed if each is produced as it can be -->
-                </if>
-            </iterate>
+            <service-call name="mantle.work.ManufacturingServices.produce#AvailableAssemblies"
+                    in-map="[workEffortId:assemblyWorkEffortId, shipmentId:shipmentId, receivedDate:packDate]"/>
 
             <!-- if PA WorkEffort has all inventory complete it, set actualCompletionDate -->
             <service-call name="mantle.work.ManufacturingServices.get#ProducedProductComplete"
@@ -1323,6 +1310,7 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="assetIssuanceId" required="true"/>
             <parameter name="unpackDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+            <parameter name="unpackAssemblyComponents" type="Boolean" default="true"/>
         </in-parameters>
         <out-parameters><parameter name="assetReservationId"/></out-parameters>
         <actions>
@@ -1347,6 +1335,24 @@ along with this software (see the LICENSE.md file). If not, see
 
             <service-call name="mantle.product.AssetServices.cancel#AssetIssuance" out-map="context"
                     in-map="[assetIssuanceId:assetIssuanceId, cancelDate:unpackDate]"/>
+
+            <!-- if product unpacked is a PtPickAssembly and was produced by the Shipment's Assembly Task then
+                also un-produce so component quantities are not used, and if unpackAssemblyComponents unpack/unissue the components as well -->
+            <entity-find-one entity-name="mantle.product.Product" value-field="product" cache="true">
+                <field-map field-name="productId" from="assetIssuance.productId"/></entity-find-one>
+            <if condition="product.productTypeEnumId == 'PtPickAssembly'">
+                <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
+                    <field-map field-name="assetId" from="assetIssuance.assetId"/></entity-find-one>
+                <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment">
+                    <field-map field-name="shipmentId"/></entity-find-one>
+                <!-- make sure asset came from Shipment's assemblyWorkEffortId before making changes to the WorkEffort -->
+                <if condition="shipment.assemblyWorkEffortId == asset.acquireWorkEffortId">
+                    <service-call name="mantle.work.ManufacturingServices.breakDown#Assembly"
+                            in-map="[assetId:asset.assetId, asset:asset, workEffortId:shipment.assemblyWorkEffortId,
+                                quantityToBreakDown:originalQuantity, unissueAssemblyComponents:unpackAssemblyComponents,
+                                breakDownDate:unpackDate]"/>
+                </if>
+            </if>
         </actions>
     </service>
 

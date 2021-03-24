@@ -2431,7 +2431,10 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="cancel" noun="AssetIssuance">
         <in-parameters>
             <parameter name="assetIssuanceId" required="true"/>
+            <parameter name="quantityToCancel" type="BigDecimal"><description>Defaults to AssetIssuance.quantity</description></parameter>
             <parameter name="reserveAsset" type="Boolean" default="true"/>
+            <parameter name="orderId"><description>For reservation after cancel issuance if AssetReservation no longer exists, defaults to AssetIssuance.orderId</description></parameter>
+            <parameter name="orderItemSeqId"><description>For reservation after cancel issuance if AssetReservation no longer exists, defaults to AssetIssuance.orderItemSeqId</description></parameter>
         </in-parameters>
         <out-parameters><parameter name="assetReservationId"/></out-parameters>
         <actions>
@@ -2440,12 +2443,15 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true">
                 <field-map field-name="assetId" from="assetIssuance.assetId"/></entity-find-one>
 
-            <set field="originalQuantity" from="assetIssuance.quantity"/>
-            <if condition="!originalQuantity"><return message="No quantity to cancel for issuance ${assetIssuanceId} of asset ${assetIssuance.assetId}"/></if>
+            <if condition="quantityToCancel == null"><set field="quantityToCancel" from="assetIssuance.quantity"/></if>
+            <if condition="!quantityToCancel"><return message="No quantity to cancel for issuance ${assetIssuanceId} of asset ${assetIssuance.assetId}"/></if>
+            <if condition="quantityToCancel &gt; assetIssuance.quantity">
+                <return error="true" message="Quantity to cancel ${quantityToCancel} is greater than quantity ${assetIssuance.quantity} for asset issuance ${assetIssuanceId}"/></if>
+
             <if condition="assetIssuance.invoiceId">
                 <return error="true" message="Cannot cancel issuance ${assetIssuanceId}, already on invoice ${assetIssuance.invoiceId}"/></if>
 
-            <set field="quantityCancelled" from="(assetIssuance.quantityCancelled ?: 0.0) + originalQuantity"/>
+            <set field="quantityCancelled" from="(assetIssuance.quantityCancelled ?: 0.0) + quantityToCancel"/>
             <service-call name="update#mantle.product.issuance.AssetIssuance" in-map="[assetIssuanceId:assetIssuanceId,
                     quantity:0.0, quantityCancelled:quantityCancelled]"/>
 
@@ -2458,20 +2464,20 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <!-- create AssetDetail to increment QOH and if there is no reservation also ATP -->
             <service-call name="create#mantle.product.asset.AssetDetail" in-map="[assetId:assetIssuance.assetId,
-                        effectiveDate:cancelDate, quantityOnHandDiff:originalQuantity,
-                        availableToPromiseDiff:(oldReservation != null ? 0.0 : originalQuantity),
+                        effectiveDate:cancelDate, quantityOnHandDiff:quantityToCancel,
+                        availableToPromiseDiff:(oldReservation != null ? 0.0 : quantityToCancel),
                         productId:assetIssuance.productId, assetIssuanceId:assetIssuanceId,
                         shipmentId:assetIssuance.shipmentId, workEffortId:assetIssuance.workEffortId,
                         assetMaintenanceId:assetIssuance.assetMaintenanceId]"/>
             <if condition="oldReservation != null"><then>
                 <!-- if issuance was from a reservation increase not issued quantity -->
-                <set field="oldReservation.quantityNotIssued" from="(oldReservation.quantityNotIssued ?: 0.0) + originalQuantity"/>
+                <set field="oldReservation.quantityNotIssued" from="(oldReservation.quantityNotIssued ?: 0.0) + quantityToCancel"/>
                 <entity-update value-field="oldReservation"/>
             </then><else>
-                <if condition="reserveAsset &amp;&amp; assetIssuance.orderId">
+                <if condition="reserveAsset &amp;&amp; (orderId || assetIssuance.orderId)">
                     <!-- no reservation, try reserve for order item using this asset with freshly available inventory -->
                     <service-call name="mantle.product.AssetServices.reserve#AssetForOrderItem"
-                            in-map="[orderId:assetIssuance.orderId, orderItemSeqId:assetIssuance.orderItemSeqId,
+                            in-map="[orderId:(orderId ?: assetIssuance.orderId), orderItemSeqId:(orderItemSeqId ?: assetIssuance.orderItemSeqId),
                                 assetId:assetIssuance.assetId]"/>
                 </if>
             </else></if>
