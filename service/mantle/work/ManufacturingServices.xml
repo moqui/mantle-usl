@@ -300,6 +300,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- get BOM data for all Produce products -->
             <entity-find entity-name="mantle.work.effort.WorkEffortProductAssoc" list="produceBomAssocList">
                 <date-filter/>
+                <date-filter from-field-name="componentFromDate" thru-field-name="componentThruDate"/>
                 <econdition field-name="workEffortId"/>
                 <econdition field-name="typeEnumId" value="WeptProduce"/>
             </entity-find>
@@ -460,40 +461,54 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="productAssocTypeEnumId" value="PatMfgBom"/>
             </entity-find>
             <iterate list="bomAssocList" entry="bomAssoc">
-                <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="issuanceList">
-                    <econdition field-name="workEffortId"/>
-                    <econdition field-name="productId" from="bomAssoc.toProductId"/>
-                    <order-by field-name="assetIssuanceId"/>
-                </entity-find>
+                <service-call name="mantle.work.ManufacturingServices.unissue#Component"
+                        in-map="[workEffortId:workEffortId, componentProductId:bomAssoc.toProductId,
+                            componentQuantity:(assemblyQuantity * (bomAssoc.quantity ?: 1.0)), unissueDate:unissueDate]"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="unissue" noun="Component">
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="componentProductId" required="true"/>
+            <parameter name="componentQuantity" type="BigDecimal" required="true">
+                <description>Unissues up to this quantity for each component</description></parameter>
+            <parameter name="unissueDate" type="Timestamp" default="ec.user.nowTimestamp"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="issuanceList">
+                <econdition field-name="workEffortId"/>
+                <econdition field-name="productId" from="componentProductId"/>
+                <order-by field-name="assetIssuanceId"/>
+            </entity-find>
 
-                <set field="quantityRemaining" from="assemblyQuantity * (bomAssoc.quantity ?: 1.0)"/>
-                <iterate list="issuanceList" entry="issuance">
-                    <if condition="quantityRemaining == 0.0"><break/></if>
+            <set field="quantityRemaining" from="componentQuantity"/>
+            <iterate list="issuanceList" entry="issuance">
+                <if condition="quantityRemaining == 0.0"><break/></if>
 
-                    <!-- for re-reservation get orderId, orderItemSeqId from ShipmentItemSource for assembly Product on Shipment for assembly, if applicable -->
-                    <!-- NOTE: this is the only way to re-reserve PtPickAssembly because issuances to WorkEffort are NOT associated
-                        with the order (and should not be, is not the final AssetIssuance that should be associated with the OrderItem) -->
-                    <if condition="assemblySisList"><then>
-                        <set field="curSisQtyRemaining" from="(issuance.quantity ?: 0.0) &gt; quantityRemaining ? quantityRemaining : issuance.quantity"/>
-                        <iterate list="assemblySisList" entry="assemblySis">
-                            <if condition="curSisQtyRemaining == 0.0"><break/></if>
+                <!-- for re-reservation get orderId, orderItemSeqId from ShipmentItemSource for assembly Product on Shipment for assembly, if applicable -->
+                <!-- NOTE: this is the only way to re-reserve PtPickAssembly because issuances to WorkEffort are NOT associated
+                    with the order (and should not be, is not the final AssetIssuance that should be associated with the OrderItem) -->
+                <if condition="assemblySisList"><then>
+                    <set field="curSisQtyRemaining" from="(issuance.quantity ?: 0.0) &gt; quantityRemaining ? quantityRemaining : issuance.quantity"/>
+                    <iterate list="assemblySisList" entry="assemblySis">
+                        <if condition="curSisQtyRemaining == 0.0"><break/></if>
 
-                            <set field="quantityToReduce" from="(assemblySis.quantity ?: 0.0) &gt; quantityRemaining ? quantityRemaining : assemblySis.quantity"/>
-                            <set field="curSisQtyRemaining" from="curSisQtyRemaining &gt; quantityToReduce ? (curSisQtyRemaining - quantityToReduce) : 0.0"/>
-                            <set field="quantityRemaining" from="quantityRemaining &gt; quantityToReduce ? (quantityRemaining - quantityToReduce) : 0.0"/>
-
-                            <service-call name="mantle.product.AssetServices.cancel#AssetIssuance"
-                                    in-map="[assetIssuanceId:issuance.assetIssuanceId, cancelDate:unissueDate, quantityToCancel:quantityToReduce,
-                                        orderId:assemblySis.orderId, orderItemSeqId:assemblySis.orderItemSeqId]"/>
-                        </iterate>
-                    </then><else>
-                        <set field="quantityToReduce" from="(issuance.quantity ?: 0.0) &gt; quantityRemaining ? quantityRemaining : issuance.quantity"/>
+                        <set field="quantityToReduce" from="(assemblySis.quantity ?: 0.0) &gt; quantityRemaining ? quantityRemaining : assemblySis.quantity"/>
+                        <set field="curSisQtyRemaining" from="curSisQtyRemaining &gt; quantityToReduce ? (curSisQtyRemaining - quantityToReduce) : 0.0"/>
                         <set field="quantityRemaining" from="quantityRemaining &gt; quantityToReduce ? (quantityRemaining - quantityToReduce) : 0.0"/>
 
                         <service-call name="mantle.product.AssetServices.cancel#AssetIssuance"
-                                in-map="[assetIssuanceId:issuance.assetIssuanceId, cancelDate:unissueDate, quantityToCancel:quantityToReduce]"/>
-                    </else></if>
-                </iterate>
+                                in-map="[assetIssuanceId:issuance.assetIssuanceId, cancelDate:unissueDate, quantityToCancel:quantityToReduce,
+                                    orderId:assemblySis.orderId, orderItemSeqId:assemblySis.orderItemSeqId]"/>
+                    </iterate>
+                </then><else>
+                    <set field="quantityToReduce" from="(issuance.quantity ?: 0.0) &gt; quantityRemaining ? quantityRemaining : issuance.quantity"/>
+                    <set field="quantityRemaining" from="quantityRemaining &gt; quantityToReduce ? (quantityRemaining - quantityToReduce) : 0.0"/>
+
+                    <service-call name="mantle.product.AssetServices.cancel#AssetIssuance"
+                            in-map="[assetIssuanceId:issuance.assetIssuanceId, cancelDate:unissueDate, quantityToCancel:quantityToReduce]"/>
+                </else></if>
             </iterate>
         </actions>
     </service>
@@ -507,7 +522,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="produceWepList" type="List"><parameter name="produceWep" type="Map"/></parameter>
             <parameter name="componentIssuedQtyByProduct" type="Map"/>
             <parameter name="componentUsedQtyByProduct" type="Map"/>
-            <parameter name="componentIssuedAvailable" type="Map"/>
+            <parameter name="componentIssuedAvailable" type="Map"><description>Issued to WE and available, or in other words unused in produced assemblies</description></parameter>
             <parameter name="assemblyCanProduceQty" type="Map"/>
             <parameter name="assemblyReceivedByProduct" type="Map"/>
         </out-parameters>
@@ -532,6 +547,7 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- get BOM data for all Produce products -->
             <entity-find entity-name="mantle.work.effort.WorkEffortProductAssoc" list="produceBomAssocList">
                 <date-filter/>
+                <date-filter from-field-name="componentFromDate" thru-field-name="componentThruDate"/>
                 <econdition field-name="workEffortId"/>
                 <econdition field-name="typeEnumId" value="WeptProduce"/>
             </entity-find>
