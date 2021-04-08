@@ -952,6 +952,7 @@ General Order Placement and eCommerce Usage
             <parameter name="statusId" default-value="PmntPromised"/>
             <parameter name="amount" type="BigDecimal"><description>Defaults to OrderPart.partTotal</description></parameter>
             <parameter name="visitId" default="ec.user.visitId"/>
+            <parameter name="settlementTermId"/>
         </in-parameters>
         <out-parameters>
             <parameter name="paymentId"/>
@@ -967,9 +968,62 @@ General Order Placement and eCommerce Usage
             </entity-find>
             <if condition="billToList"><set field="fromPartyId" from="billToList[0].partyId"/></if>
 
-            <service-call name="mantle.account.PaymentServices.create#Payment" out-map="context"
-                    in-map="context + [amount:(amount ?: orderPart.partTotal), amountUomId:orderHeader.currencyUomId,
-                        fromPartyId:fromPartyId, toPartyId:orderPart.vendorPartyId]"/>
+            <set field="amountUomId" from="orderHeader.currencyUomId"/>
+            <set field="toPartyId" from="orderPart.vendorPartyId"/>
+
+            <if condition="settlementTermId">
+                <entity-find-one entity-name="mantle.account.invoice.SettlementTerm" value-field="settlementTerm" cache="true"/>
+                <if condition="!settlementTerm?.orderPmtServiceRegisterId">
+                    <message type="warning">Selected Term has no Auto Payments Service, creating a single Payment</message></if>
+            </if>
+
+            <if condition="settlementTerm?.orderPmtServiceRegisterId"><then>
+                <service-call name="update#mantle.order.OrderPart"
+                        in-map="[orderId:orderId, orderPartSeqId:orderPartSeqId, settlementTermId:settlementTermId]"/>
+
+                <entity-find-one entity-name="moqui.service.ServiceRegister" value-field="serviceRegister">
+                    <field-map field-name="serviceRegisterId" from="settlementTerm.orderPmtServiceRegisterId"/></entity-find-one>
+                <script><![CDATA[
+                    try {
+                        ec.service.sync().name(serviceRegister.serviceName).parameters(context).softValidate(true).disableAuthz().call()
+                        if (ec.message.hasError()) return
+                    } catch (Throwable t) {
+                        ec.logger.log(300, "Error calling auto order payments service for SettlementTerm ${settlementTermId}", t)
+                    }
+                ]]></script>
+            </then><else>
+                <service-call name="mantle.account.PaymentServices.create#Payment" out-map="context"
+                        in-map="context + [amount:(amount ?: orderPart.partTotal), amountUomId:amountUomId,
+                            fromPartyId:fromPartyId, toPartyId:toPartyId]"/>
+            </else></if>
+        </actions>
+    </service>
+
+    <service verb="create" noun="OrderPayments50Split">
+        <in-parameters>
+            <auto-parameters entity-name="mantle.account.payment.Payment" include="nonpk"><exclude field-name="amountUomId"/>
+                <exclude field-name="acctgTransResultEnumId"/><exclude field-name="reconcileStatusId"/>
+                <exclude field-name="paymentMethodFileId"/></auto-parameters>
+            <parameter name="orderId" required="true"/>
+            <parameter name="orderPartSeqId"/>
+            <parameter name="dueDate" type="Timestamp"/>
+            <parameter name="paymentTypeEnumId" default-value="PtInvoicePayment"/>
+            <parameter name="statusId" default-value="PmntPromised"/>
+            <parameter name="amount" type="BigDecimal"><description>Defaults to OrderPart.partTotal</description></parameter>
+            <parameter name="visitId" default="ec.user.visitId"/>
+            <parameter name="settlementTermId"/>
+        </in-parameters>
+        <actions>
+            <set field="amount" from="amount ?: orderPart.partTotal"/>
+            <if condition="amount == 0.0"><return message="Amount is 0.00, not creating Payments"/></if>
+
+            <set field="advanceAmount" from="amount.divide(2.0, BigDecimal.ROUND_HALF_UP)"/>
+            <set field="remainingAmount" from="amount - advanceAmount"/>
+
+            <service-call name="mantle.account.PaymentServices.create#Payment" out-map="advanceOut"
+                    in-map="context + [amount:advanceAmount]"/>
+            <service-call name="mantle.account.PaymentServices.create#Payment" out-map="remainingOut"
+                    in-map="context + [amount:remainingAmount, dueDate:null]"/>
         </actions>
     </service>
 
