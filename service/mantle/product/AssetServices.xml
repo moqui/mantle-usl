@@ -1763,8 +1763,25 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true">
                 <field-map field-name="assetId"/></entity-find-one>
 
+            <!-- NOTE: AssetDetail must be created before potentially changing the status below; in condition below it uses the prior asset record (ie not refreshed from DB to update QOH) -->
             <service-call name="create#mantle.product.asset.AssetDetail" in-map="context +
                     [quantityOnHandDiff:quantityDiff, availableToPromiseDiff:quantityDiff]"/>
+
+            <!-- if this is serialized inventory update status and set ownerPartyId to customer party -->
+            <if condition="asset.serialNumber &amp;&amp; quantityDiff == -1.0 &amp;&amp; (asset.quantityOnHandTotal == 1.0 || asset.hasQuantity == 'N')">
+                <set field="ownerPartyId" from="null"/>
+                <if condition="orderId &amp;&amp; orderItemSeqId">
+                    <entity-find-one entity-name="mantle.order.OrderItem" value-field="orderItem"/>
+                    <set field="orderPart" from="orderItem?.part"/>
+                    <set field="ownerPartyId" from="orderPart?.customerPartyId"/>
+                </if>
+                <if condition="!ownerPartyId &amp;&amp; shipmentId">
+                    <entity-find-one entity-name="mantle.shipment.Shipment" value-field="shipment"/>
+                    <set field="ownerPartyId" from="shipment?.toPartyId"/>
+                </if>
+                <service-call name="update#mantle.product.asset.Asset"
+                        in-map="[assetId:asset.assetId, statusId:'AstDelivered', ownerPartyId:(ownerPartyId ?: asset.ownerPartyId)]"/>
+            </if>
 
             <!-- reserve the newly available Asset, if needed -->
             <if condition="quantityDiff &gt; 0.0 &amp;&amp; asset.productId">
@@ -1922,6 +1939,19 @@ along with this software (see the LICENSE.md file). If not, see
             </then><else>
                 <entity-update value-field="assetReservation"/>
             </else></if>
+
+            <!-- if this is serialized inventory update status and set ownerPartyId to customer party -->
+            <!-- NOTE: do after AssetDetail create and AssetReservation update so status change does not mess up ATP -->
+            <if condition="asset.serialNumber &amp;&amp; quantity == 1.0 &amp;&amp; (asset.quantityOnHandTotal == 1.0 || asset.hasQuantity == 'N')">
+                <set field="ownerPartyId" from="asset.ownerPartyId"/>
+                <if condition="assetReservation.orderId &amp;&amp; assetReservation.orderItemSeqId">
+                    <set field="orderItem" from="assetReservation.orderItem"/>
+                    <set field="orderPart" from="orderItem?.part"/>
+                    <if condition="orderPart?.customerPartyId"><set field="ownerPartyId" from="orderPart.customerPartyId"/></if>
+                </if>
+                <service-call name="update#mantle.product.asset.Asset"
+                        in-map="[assetId:asset.assetId, statusId:'AstDelivered', ownerPartyId:ownerPartyId]"/>
+            </if>
         </actions>
     </service>
     <service verb="issue" noun="Asset" no-tx-cache="true">
@@ -2482,6 +2512,45 @@ along with this software (see the LICENSE.md file). If not, see
                                 assetId:assetIssuance.assetId]"/>
                 </if>
             </else></if>
+
+            <!-- if this is serialized inventory update status and set ownerPartyId back to prior values (assuming statusId and ownerPartyId are audit logged) -->
+            <if condition="asset.serialNumber &amp;&amp; quantityToCancel == 1.0">
+                <!-- NOTE: get most recent (-changedDate) audit log with an old value for ownerPartyId and statusId -->
+                <set field="oldOwnerPartyId" from="asset.ownerPartyId"/>
+                <entity-find entity-name="moqui.entity.EntityAuditLog" list="ownerAuditLogList" limit="1">
+                    <econdition field-name="changedEntityName" value="mantle.product.asset.Asset"/>
+                    <econdition field-name="changedFieldName" value="ownerPartyId"/>
+                    <econdition field-name="pkPrimaryValue" from="asset.assetId"/>
+                    <econdition field-name="newValueText" from="asset.ownerPartyId"/>
+                    <econdition field-name="oldValueText" operator="is-not-null"/>
+                    <order-by field-name="-changedDate"/>
+                </entity-find>
+                <if condition="ownerAuditLogList"><then>
+                    <set field="oldOwnerPartyId" from="ownerAuditLogList[0].oldValueText"/>
+                </then><else>
+                    <message type="warning">No prior Owner Party for Asset ${asset.assetId} while canceling issuance ${assetIssuanceId}, leaving current owner</message>
+                </else></if>
+
+                <set field="oldStatusId" from="asset.statusId"/>
+                <entity-find entity-name="moqui.entity.EntityAuditLog" list="statusAuditLogList" limit="1">
+                    <econdition field-name="changedEntityName" value="mantle.product.asset.Asset"/>
+                    <econdition field-name="changedFieldName" value="statusId"/>
+                    <econdition field-name="pkPrimaryValue" from="asset.assetId"/>
+                    <econdition field-name="newValueText" from="asset.statusId"/>
+                    <econdition field-name="oldValueText" operator="is-not-null"/>
+                    <order-by field-name="-changedDate"/>
+                </entity-find>
+                <if condition="statusAuditLogList"><then>
+                    <set field="oldStatusId" from="statusAuditLogList[0].oldValueText"/>
+                </then><else>
+                    <message type="warning">No prior Status for Asset ${asset.assetId} while canceling issuance ${assetIssuanceId}, leaving current status</message>
+                </else></if>
+
+                <if condition="ownerAuditLogList || statusAuditLogList">
+                    <service-call name="update#mantle.product.asset.Asset"
+                            in-map="[assetId:asset.assetId, statusId:oldStatusId, ownerPartyId:oldOwnerPartyId]"/>
+                </if>
+            </if>
         </actions>
     </service>
     <service verb="update" noun="AssetIssuedDate">
