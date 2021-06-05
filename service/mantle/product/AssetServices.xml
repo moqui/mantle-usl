@@ -2976,7 +2976,7 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <if condition="toScanLocation">
                 <service-call name="mantle.product.AssetServices.check#ScanLocation" out-map="toScanOut"
-                        in-map="[facilityId:facilityId, scanLocation:toScanLocation]"/>
+                        in-map="[facilityId:facilityId, locationSeqId:toLocationSeqId, containerId:toContainerId, scanLocation:toScanLocation]"/>
                 <set field="toLocationSeqId" from="toLocationSeqId ?: toScanOut.locationSeqId"/>
                 <set field="toContainerId" from="toContainerId ?: toScanOut.containerId"/>
             </if>
@@ -3070,11 +3070,16 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="check" noun="ScanLocation">
         <in-parameters>
             <parameter name="facilityId"/>
+            <parameter name="locationSeqId"/>
+            <parameter name="containerId"><description>May be actual containerId or serialNumber</description></parameter>
             <parameter name="scanLocation"><description>May be locationSeqId within facility, containerId, or container serialNumber</description></parameter>
         </in-parameters>
         <out-parameters>
+            <parameter name="facilityId"/>
             <parameter name="locationSeqId"/>
+            <parameter name="checkFacLoc" type="Map"/>
             <parameter name="containerId"/>
+            <parameter name="container" type="Map"/>
         </out-parameters>
         <actions>
             <!-- see if scanLocation is a locationSeqId in the Facility -->
@@ -3115,6 +3120,27 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="scanLocation" from="null"/>
                 </if>
             </if>
+
+            <if condition="containerId">
+                <if condition="container == null">
+                    <entity-find-one entity-name="mantle.product.asset.Container" value-field="container"/></if>
+                <if condition="container == null">
+                    <entity-find-one entity-name="mantle.product.asset.Container" value-field="container">
+                        <field-map field-name="serialNumber" from="containerId"/></entity-find-one>
+                    <if condition="container == null"><return error="true" message="Container not found with ID or serial number ${containerId}"/></if>
+                    <set field="containerId" from="container.containerId"/>
+                </if>
+                <set field="facilityId" from="container.facilityId"/>
+                <set field="locationSeqId" from="container.locationSeqId"/>
+            </if>
+            <if condition="facilityId &amp;&amp; locationSeqId">
+                <entity-find-one entity-name="mantle.facility.FacilityLocation" value-field="checkFacLoc">
+                    <field-map field-name="facilityId"/><field-map field-name="locationSeqId"/></entity-find-one>
+                <entity-find-one entity-name="mantle.facility.Facility" value-field="facility"/>
+                <if condition="checkFacLoc == null">
+                    <return error="true" message="Location [${locationSeqId}] is not valid in facility ${ec.resource.expand('FacilityNameTemplate', '', facility)}"/>
+                </if>
+            </if>
         </actions>
     </service>
 
@@ -3126,45 +3152,32 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="assetPoolId"/>
             <parameter name="containerId"><description>May be actual containerId or serialNumber</description></parameter>
             <parameter name="scanLocation"><description>May be locationSeqId within facility, containerId, or container serialNumber</description></parameter>
-            <parameter name="quantity" type="BigDecimal"><description>Defaults to quantityOnHandTotal if hasQuantity, generally move entire Asset</description></parameter>
+            <parameter name="quantity" type="BigDecimal"><description>Defaults to quantityOnHandTotal if hasQuantity, if not specified move entire Asset</description></parameter>
             <parameter name="forceNewAsset" type="Boolean" default="false">
                 <description>If true create a new Asset record for the move rather than updating the existing Asset record even if moving full quantity on hand to the same facility.</description></parameter>
+            <parameter name="moveAssetReservationId"/>
         </in-parameters>
         <actions>
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset" for-update="true"/>
             <if condition="asset == null"><message error="true">No asset found for ID ${assetId}</message></if>
             <if condition="!facilityId"><set field="facilityId" from="asset.facilityId"/></if>
 
+            <!-- checks and normalizes facilityId, locationSeqId, containerId, scanLocation -->
             <service-call name="mantle.product.AssetServices.check#ScanLocation" in-map="context" out-map="context"/>
 
             <!-- get facilityId and locationSeqId from Container, do here instead of relying on EECA rule just in case involves a move to another facility -->
-            <if condition="containerId"><then>
-                <if condition="container == null">
-                    <entity-find-one entity-name="mantle.product.asset.Container" value-field="container"/></if>
-                <if condition="container == null">
-                    <entity-find-one entity-name="mantle.product.asset.Container" value-field="container">
-                        <field-map field-name="serialNumber" from="containerId"/></entity-find-one>
-                    <if condition="container == null"><return error="true" message="Container not found with ID or serial number ${containerId}"/></if>
-                    <set field="containerId" from="container.containerId"/>
-                </if>
-                <set field="facilityId" from="container.facilityId"/>
-                <set field="locationSeqId" from="container.locationSeqId"/>
-            </then><else-if condition="asset.containerId">
+            <if condition="!containerId &amp;&amp; asset.containerId">
                 <!-- no containerId passed but Asset has containerId, clear otherwise new location won't get set (will be overridden by container) -->
                 <set field="asset.containerId" from="null"/>
                 <entity-update value-field="asset"/>
-            </else-if></if>
+            </if>
 
             <set field="facLoc" from="asset.location"/>
-            <if condition="locationSeqId"><then>
-                <if condition="checkFacLoc == null"><entity-find-one entity-name="mantle.facility.FacilityLocation" value-field="checkFacLoc">
-                    <field-map field-name="facilityId"/><field-map field-name="locationSeqId"/></entity-find-one></if>
-                <if condition="checkFacLoc == null"><return error="true" message="Location [${locationSeqId}] is not valid in facility ${ec.resource.expand('FacilityNameTemplate', '', asset.facility)}"/></if>
-            </then><else>
+            <if condition="!locationSeqId">
                 <entity-find-one entity-name="mantle.facility.Facility" value-field="facility"><field-map field-name="facilityId"/></entity-find-one>
                 <if condition="facility?.assetInventoryLocRequire == 'Y' &amp;&amp; asset.assetTypeEnumId == 'AstTpInventory'">
-                    <return error="true" message="No location specified, Facility ${facilityId} requires a location for inventory"/></if>
-            </else></if>
+                    <return error="true" message="No location specified, facility ${ec.resource.expand('FacilityNameTemplate', '', facility)} requires a location for inventory"/></if>
+            </if>
 
             <!-- see if the target location's type has an autoStatusId in the Facility -->
             <if condition="checkFacLoc?.locationTypeEnumId">
@@ -3180,56 +3193,95 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- default quantity to QOH -->
             <if condition="quantity &gt; asset.quantityOnHandTotal">
                 <return error="true" message="Move quantity ${quantity?.toPlainString()} is greater than on hand quantity ${asset.quantityOnHandTotal?.toPlainString()}"/></if>
-            <if condition="quantity &gt; asset.availableToPromiseTotal">
-                <message>Warning: move quantity ${quantity?.toPlainString()} is greater than available quantity ${asset.availableToPromiseTotal?.toPlainString()}</message>
+            <if condition="(quantity &gt; asset.availableToPromiseTotal) &amp;&amp; !moveAssetReservationId">
+                <message type="warning">Move quantity ${quantity?.toPlainString()} is greater than available quantity ${asset.availableToPromiseTotal?.toPlainString()}</message>
             </if>
+
+            <log level="warn" message="In move from Asset ${asset.assetId} reservation ${moveAssetReservationId} quantity ${quantity} Asset QOH ${asset.quantityOnHandTotal}"/>
 
             <!-- for partial quantity or facilityId change reduce quantity on original and create new with given quantity -->
             <if condition="forceNewAsset || (quantity &amp;&amp; quantity &lt; asset.quantityOnHandTotal) ||
                     (facilityId &amp;&amp; facilityId != asset.facilityId) || (assetPoolId != asset.assetPoolId)"><then>
-                <!-- clone asset in new facility/location with quantity -->
-                <service-call name="create#mantle.product.asset.Asset" out-map="newAssetOut"
-                        in-map="asset.getMap() + [assetId:null, facilityId:facilityId, locationSeqId:locationSeqId,
+
+                <set field="newStatusId" from="autoStatusId ?: asset.statusId"/>
+
+                <!-- look for an existing Asset record to move to -->
+                <if condition="!forceNewAsset">
+                    <entity-find entity-name="mantle.product.asset.Asset" list="existingAssetList">
+                        <econdition field-name="assetId" operator="not-equals" from="asset.assetId"/>
+                        <econdition field-name="productId" from="asset.productId"/>
+                        <econdition field-name="ownerPartyId" from="asset.ownerPartyId"/>
+                        <econdition field-name="statusId" from="newStatusId"/>
+                        <econdition field-name="assetPoolId"/>
+                        <econdition field-name="facilityId"/>
+                        <econdition field-name="locationSeqId"/>
+                        <econdition field-name="containerId"/>
+                        <econdition field-name="lotId" from="asset.lotId"/>
+                        <econdition field-name="receivedDate" from="asset.receivedDate"/>
+                        <econdition field-name="expectedEndOfLife" from="asset.expectedEndOfLife"/>
+                        <order-by field-name="assetId"/>
+                    </entity-find>
+                </if>
+
+                <if condition="existingAssetList"><then>
+                    <set field="newAssetId" from="existingAssetList[0].assetId"/>
+                    <!-- <log level="warn" message="In move from Asset ${asset.assetId} found existing move to Asset ${existingAssetList[0]}"/> -->
+                </then><else>
+                    <!-- clone asset in new facility/location with quantity -->
+                    <service-call name="create#mantle.product.asset.Asset" out-map="newAssetOut"
+                            in-map="asset.getMap() + [assetId:null, facilityId:facilityId, locationSeqId:locationSeqId,
                                 containerId:containerId, quantityOnHandTotal:0, availableToPromiseTotal:0,
-                                statusId:(autoStatusId ?: asset.statusId), assetPoolId:assetPoolId]"/>
-                <set field="newAssetId" from="newAssetOut.assetId"/>
+                                statusId:newStatusId, assetPoolId:assetPoolId]"/>
+                    <set field="newAssetId" from="newAssetOut.assetId"/>
+                </else></if>
+
+                <!-- <log level="warn" message="In move from Asset ${asset.assetId} newAssetId ${newAssetId} existingAssetList ${existingAssetList}"/> -->
+
+                <!-- increase new asset QOH/ATP by quantity -->
                 <service-call name="create#mantle.product.asset.AssetDetail" out-map="context"
                         in-map="[assetId:newAssetId, effectiveDate:ec.user.nowTimestamp, quantityOnHandDiff:quantity,
                                  availableToPromiseDiff:quantity, productId:productId, otherAssetId:assetId]"/>
 
-                <!-- move reservations if necessary so ATP doesn't go negative
-                    OR if moving from a non-Pick location to a Pick location (along with reserve in Pick location first logic) -->
-                <set field="atpToMoveTotal" from="null"/>
-                <if condition="quantity &gt; asset.availableToPromiseTotal">
-                    <!-- move reservations as needed -->
-                    <set field="atpToMoveTotal" from="quantity - asset.availableToPromiseTotal"/>
-                </if>
-                <!-- moving from facLoc to checkFacLoc -->
-                <!-- <log message="checkFacLoc?.locationTypeEnumId ${checkFacLoc?.locationTypeEnumId} facLoc?.locationTypeEnumId ${facLoc?.locationTypeEnumId}"/> -->
-                <if condition="checkFacLoc?.locationTypeEnumId == 'FltPick' &amp;&amp; facLoc?.locationTypeEnumId != 'FltPick'">
-                    <set field="atpToMoveTotal" from="quantity"/>
-                </if>
-                <if condition="atpToMoveTotal">
-                    <!-- NOTE: no longer call displace#AssetReservations for different facility here, handled below with
-                        call to check#AssetReservations -->
-                    <set field="availableRemaining" from="atpToMoveTotal"/>
-                    <entity-find entity-name="mantle.product.issuance.AssetReservation" list="resList">
-                        <econdition field-name="assetId"/><order-by field-name="reservedDate"/></entity-find>
-                    <iterate list="resList" entry="res">
-                        <if condition="availableRemaining == 0"><break/></if>
-                        <set field="quantityToMove" from="availableRemaining &lt; res.quantity ? availableRemaining : res.quantity"/>
-                        <if condition="quantityToMove == 0"><continue/></if>
-                        <!-- make sure quantityToMove is less than res.quantityNotIssued, don't move issued quantities! -->
-                        <if condition="quantityToMove &gt; res.quantityNotIssued"><set field="quantityToMove" from="res.quantityNotIssued"/></if>
-                        <if condition="quantityToMove &gt; 0">
-                            <service-call name="mantle.product.AssetServices.move#AssetReservation" out-map="moveArOut" out-map-add-to-existing="false"
-                                    in-map="[assetId:newAssetId, assetReservationId:res.assetReservationId, quantity:quantityToMove]"/>
-                            <set field="availableRemaining" from="availableRemaining - moveArOut.quantityMoved"/>
-                        </if>
-                    </iterate>
-                </if>
+                <!-- between increase new Asset and reduce old Asset move AssetReservation(s) -->
+                <if condition="moveAssetReservationId"><then>
+                    <!-- <log level="warn" message="In move from Asset ${asset.assetId} moving reservation ${moveAssetReservationId} to new Asset ${newAssetId}"/> -->
+                    <service-call name="mantle.product.AssetServices.move#AssetReservation" out-map="moveArOut"
+                            in-map="[assetId:newAssetId, assetReservationId:moveAssetReservationId, quantity:quantity]"/>
+                </then><else>
+                    <!-- move reservations if necessary so ATP doesn't go negative
+                        OR if moving from a non-Pick location to a Pick location (along with reserve in Pick location first logic) -->
+                    <set field="atpToMoveTotal" from="null"/>
+                    <if condition="quantity &gt; asset.availableToPromiseTotal">
+                        <!-- move reservations as needed -->
+                        <set field="atpToMoveTotal" from="quantity - asset.availableToPromiseTotal"/>
+                    </if>
+                    <!-- moving from facLoc to checkFacLoc -->
+                    <!-- <log message="checkFacLoc?.locationTypeEnumId ${checkFacLoc?.locationTypeEnumId} facLoc?.locationTypeEnumId ${facLoc?.locationTypeEnumId}"/> -->
+                    <if condition="checkFacLoc?.locationTypeEnumId == 'FltPick' &amp;&amp; facLoc?.locationTypeEnumId != 'FltPick'">
+                        <set field="atpToMoveTotal" from="quantity"/>
+                    </if>
+                    <if condition="atpToMoveTotal">
+                        <!-- NOTE: no longer call displace#AssetReservations for different facility here, handled below with
+                            call to check#AssetReservations -->
+                        <set field="availableRemaining" from="atpToMoveTotal"/>
+                        <entity-find entity-name="mantle.product.issuance.AssetReservation" list="resList">
+                            <econdition field-name="assetId"/><order-by field-name="reservedDate"/></entity-find>
+                        <iterate list="resList" entry="res">
+                            <if condition="availableRemaining == 0"><break/></if>
+                            <set field="quantityToMove" from="availableRemaining &lt; res.quantity ? availableRemaining : res.quantity"/>
+                            <if condition="quantityToMove == 0"><continue/></if>
+                            <!-- make sure quantityToMove is less than res.quantityNotIssued, don't move issued quantities! -->
+                            <if condition="quantityToMove &gt; res.quantityNotIssued"><set field="quantityToMove" from="res.quantityNotIssued"/></if>
+                            <if condition="quantityToMove &gt; 0">
+                                <service-call name="mantle.product.AssetServices.move#AssetReservation" out-map="moveArOut" out-map-add-to-existing="false"
+                                        in-map="[assetId:newAssetId, assetReservationId:res.assetReservationId, quantity:quantityToMove]"/>
+                                <set field="availableRemaining" from="availableRemaining - moveArOut.quantityMoved"/>
+                            </if>
+                        </iterate>
+                    </if>
+                </else></if>
 
-                <!-- reduce asset QOH/ATP by quantity -->
+                <!-- reduce original asset QOH/ATP by quantity -->
                 <service-call name="create#mantle.product.asset.AssetDetail" out-map="context"
                         in-map="[assetId:assetId, effectiveDate:ec.user.nowTimestamp, quantityOnHandDiff:-quantity,
                                  availableToPromiseDiff:-quantity, productId:productId, otherAssetId:newAssetId]"/>
@@ -3247,6 +3299,7 @@ along with this software (see the LICENSE.md file). If not, see
 
                     <set field="statusId" from="autoStatusId"/>
                 </if>
+                <!-- <log level="warn" message="In move from Asset ${asset.assetId} update whole Asset"/> -->
                 <service-call name="update#mantle.product.asset.Asset" in-map="context"/>
                 <set field="newAssetId" from="assetId"/>
             </else></if>
@@ -3268,7 +3321,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <set field="newFacLoc" from="newAsset.location"/>
-            <message>Moved asset ${ec.resource.expand('AssetNameTemplate', '', asset)} from ${ec.resource.expand('FacilityLocationNameTemplate', '', facLoc?:[:])} to ${ec.resource.expand('FacilityLocationNameTemplate', '', newFacLoc?:[:])}${container ? ' in container ' + (container.serialNumber ?: container.description ?: containerId) : ''}.</message>
+            <message>Moved ${quantity?.toPlainString()} from Asset ${ec.resource.expand('AssetNameTemplate', '', asset)} from ${ec.resource.expand('FacilityLocationNameTemplate', '', facLoc?:[:])} to Asset ${newAssetId ?: asset.assetId} ${ec.resource.expand('FacilityLocationNameTemplate', '', newFacLoc?:[:])}${container ? ' in container ' + (container.serialNumber ?: container.description ?: containerId) : ''}.</message>
         </actions>
     </service>
 
