@@ -755,9 +755,9 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <!-- =============================================== -->
-    <!-- ========== Shipping/Packing Services ========== -->
-    <!-- =============================================== -->
+    <!-- =================================================== -->
+    <!-- ========== Pick, Pack, and Ship Services ========== -->
+    <!-- =================================================== -->
 
     <service-include verb="get" noun="ShipmentLoadPickInfo" location="component://mantle-usl/service/mantle/shipment/ShipmentInfoServices.xml"/>
     <service-include verb="get" noun="ShipmentPickPackInfo" location="component://mantle-usl/service/mantle/shipment/ShipmentInfoServices.xml"/>
@@ -787,22 +787,36 @@ along with this software (see the LICENSE.md file). If not, see
                 </else></if>
             </if>
 
-            <if condition="!shipmentId">
-                <entity-find entity-name="mantle.shipment.Shipment" limit="containerShipmentList">
+            <if condition="shipmentId"><then>
+                <service-call name="mantle.shipment.ShipmentServices.pickMove#ShipmentProduct" in-map="context" out-map="context"/>
+            </then><else>
+                <entity-find entity-name="mantle.shipment.Shipment" list="containerShipmentList">
                     <econdition field-name="pickContainerId" from="toContainerId"/>
                     <econdition field-name="statusId" operator="in" value="ShipInput,ShipScheduled"/>
                     <select-field field-name="shipmentId"/>
                 </entity-find>
                 <if condition="containerShipmentList.size() == 0"><then>
-                    <return error="true" message="No Shipment ID specified and no unpicked Shipment found assigned to Container ${toContainerId}"/>
+                    <return error="true" message="No unpicked Shipment (Input or Scheduled) found assigned to Container ${toContainerId}"/>
                 </then><else-if condition="containerShipmentList.size() == 1">
                     <set field="shipmentId" from="containerShipmentList[0].shipmentId"/>
                     <service-call name="mantle.shipment.ShipmentServices.pickMove#ShipmentProduct" in-map="context" out-map="context"/>
                 </else-if><else>
-                    <!-- TODO this could be improved to loop through Shipments in Container and pick/move for each Shipment until quantity parameter fully picked (and warn if any remaining, or error?) -->
-                    <return error="true" message="No Shipment ID specified and Container ${toContainerId} has ${containerShipmentList.size()} unpicked Shipments assigned"/>
+                    <!-- loop through Shipments in Container and pick/move for each Shipment until quantity parameter fully picked (and warn if any remaining) -->
+                    <set field="quantityToPick" from="quantity"/>
+                    <iterate list="containerShipmentList" entry="containerShipment">
+                        <!-- <log level="warn" message="pickmove shipment ${containerShipment.shipmentId} quantityToPick ${quantityToPick}"/> -->
+                        <if condition="quantityToPick == 0.0"><break/></if>
+                        <service-call name="mantle.shipment.ShipmentServices.pickMove#ShipmentProduct"
+                                in-map="context + [shipmentId:containerShipment.shipmentId, quantity:quantityToPick, insufficientQtyWarn:false]"
+                                out-map="pickMoveOut" out-map-add-to-existing="false"/>
+                        <set field="quantityToPick" from="quantityToPick - (pickMoveOut.quantityPicked ?: 0.0)"/>
+                    </iterate>
+
+                    <if condition="quantityToPick &gt; 0.0">
+                        <message type="danger">Only ${(quantity - quantityToPick).toPlainString()} found to pick out of the ${quantity.toPlainString()} requested, ${quantityToPick.toPlainString()} should be returned to the shelf</message>
+                    </if>
                 </else></if>
-            </if>
+            </else></if>
         </actions>
     </service>
     <service verb="pickMove" noun="ShipmentProduct">
@@ -816,6 +830,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="scanLocation"><description>May be locationSeqId within facility, containerId, or container serialNumber</description></parameter>
 
             <parameter name="quantity" type="BigDecimal" default="1.0"/>
+            <parameter name="insufficientQtyWarn" type="Boolean" default="true"/>
         </in-parameters>
         <out-parameters>
             <parameter name="quantityPicked" type="BigDecimal"/>
@@ -857,7 +872,9 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!facilityId"><return error="true" message="No Origin Facility found on Shipment ${shipmentId}${toContainer != null ? ' or To Container ' + toContainer.containerId : ''}"/></if>
 
             <!-- checks and normalizes facilityId, locationSeqId, containerId, scanLocation -->
+            <!-- <log level="warn" message="before scanLocation ${scanLocation} locationSeqId ${locationSeqId} containerId ${containerId}"/> -->
             <service-call name="mantle.product.AssetServices.check#ScanLocation" in-map="context" out-map="context"/>
+            <!-- <log level="warn" message="after scanLocation ${scanLocation} locationSeqId ${locationSeqId} containerId ${containerId}"/> -->
 
             <!-- handle by ShipmentItemSource records -->
             <entity-find entity-name="mantle.shipment.ShipmentItemSource" list="sisList">
@@ -892,9 +909,14 @@ along with this software (see the LICENSE.md file). If not, see
                                 <field-map field-name="assetId" from="curAssetId"/></entity-find-one>
                             <!-- exclude Assets that are not in the specified from container or from location -->
                             <if condition="(containerId &amp;&amp; containerId != curAsset.containerId) || (locationSeqId &amp;&amp; locationSeqId != curAsset.locationSeqId)">
-                                <continue/></if>
+                                <!-- <log level="warn" message="pickmove skip Asset ${curAssetId} shipment ${shipmentId} product ${productId} containerId ${containerId} curAsset.containerId ${curAsset.containerId} locationSeqId ${locationSeqId} curAsset.locationSeqId ${curAsset.locationSeqId}"/> -->
+                                <continue/>
+                            </if>
                             <!-- exclude Assets already in the to Container -->
-                            <if condition="toContainer != null &amp;&amp; toContainer.containerId == curAsset.containerId"><continue/></if>
+                            <if condition="toContainer != null &amp;&amp; toContainer.containerId == curAsset.containerId">
+                                <!-- <log level="warn" message="pickmove skip Asset ${curAssetId} shipment ${shipmentId} product ${productId} toContainer.containerId ${toContainer.containerId} curAsset.containerId ${curAsset.containerId}"/> -->
+                                <continue/>
+                            </if>
                             <script>resAssetMap.put(curAssetId, curAsset)</script>
                         </if>
                     </iterate>
@@ -904,8 +926,8 @@ along with this software (see the LICENSE.md file). If not, see
                         <!-- if no Asset in resAssetMap is one we should skip, wrong location, etc -->
                         <if condition="curAsset == null"><continue/></if>
 
-                        <set field="quantityToPick" from="assetReservation.quantityNotIssued > sisQuantityRemaining ?
-                                sisQuantityRemaining : assetReservation.quantityNotIssued"/>
+                        <set field="resAvailable" from="(assetReservation.quantityNotIssued ?: 0.0) - (assetReservation.quantityNotAvailable ?: 0.0)"/>
+                        <set field="quantityToPick" from="resAvailable &gt; sisQuantityRemaining ? sisQuantityRemaining : resAvailable"/>
                         <if condition="quantityToPick &lt;= 0.0"><continue/></if>
 
                         <set field="sisQuantityRemaining" from="sisQuantityRemaining - quantityToPick"/>
@@ -928,7 +950,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </iterate>
 
-            <if condition="quantityPicked &lt; quantity">
+            <if condition="insufficientQtyWarn &amp;&amp; quantityPicked &lt; quantity">
                 <message type="danger">Only ${quantityPicked?.toPlainString()} found to pick out of the ${quantity?.toPlainString()} requested, ${(quantity - quantityPicked)?.toPlainString()} should be returned to the shelf</message>
             </if>
         </actions>
