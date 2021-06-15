@@ -1360,13 +1360,12 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="quantity &gt; assetReservation.quantityNotIssued">
                 <return error="true" message="Quantity to move (${quantity}) is greater than reservation [${assetReservationId}] quantity not yet issued (${assetReservation.quantityNotIssued}), not moving reservation"/></if>
 
-            <if condition="forceFullQuantity">
+            <if condition="forceFullQuantity"><then>
                 <set field="quantityToMove" from="quantity"/>
-                <else>
-                    <set field="quantityToMove" from="asset.availableToPromiseTotal &lt; quantity ? asset.availableToPromiseTotal : quantity"/>
-                    <if condition="quantityToMove &lt; 0.0"><set field="quantityToMove" from="0.0"/></if>
-                </else>
-            </if>
+            </then><else>
+                <set field="quantityToMove" from="asset.availableToPromiseTotal &lt; quantity ? asset.availableToPromiseTotal : quantity"/>
+                <if condition="quantityToMove &lt; 0.0"><set field="quantityToMove" from="0.0"/></if>
+            </else></if>
 
             <set field="quantityMoved" from="quantityToMove"/>
             <if condition="quantityToMove == 0.0"><return/></if>
@@ -1392,10 +1391,28 @@ along with this software (see the LICENSE.md file). If not, see
                             assetReservation.quantityNotAvailable - quantityToMove : 0.0"/>
                 <entity-update value-field="assetReservation"/>
             </then><else>
-                <!-- create a new reservation, split the quantity -->
-                <service-call name="create#mantle.product.issuance.AssetReservation" out-map="newResOut"
-                        in-map="assetReservation.getMap() + [assetReservationId:null, assetId:assetId,
-                            quantity:quantityToMove, quantityNotAvailable:0.0, quantityNotIssued:quantityToMove]"/>
+                <!-- see if there is an existing reservation on the target assetId to add to -->
+                <entity-find entity-name="mantle.product.issuance.AssetReservation" list="existingReservationList">
+                    <econdition field-name="assetId"/>
+                    <econdition field-name="orderId" from="assetReservation.orderId"/>
+                    <econdition field-name="orderItemSeqId" from="assetReservation.orderItemSeqId"/>
+                    <order-by field-name="assetReservationId"/>
+                </entity-find>
+                <if condition="existingReservationList"><then>
+                    <set field="existingRes" from="existingReservationList[0]"/>
+                    <set field="newAssetReservationId" from="existingRes.assetReservationId"/>
+                    <service-call name="update#mantle.product.issuance.AssetReservation" out-map="newResOut"
+                            in-map="[assetReservationId:newAssetReservationId,
+                                quantity:((existingRes.quantity ?: 0.0) + quantityToMove),
+                                quantityNotIssued:((existingRes.quantityNotIssued ?: 0.0) + quantityToMove)]"/>
+                </then><else>
+                    <!-- create a new reservation, split the quantity -->
+                    <service-call name="create#mantle.product.issuance.AssetReservation" out-map="newResOut"
+                            in-map="assetReservation.getMap() + [assetReservationId:null, assetId:assetId,
+                                quantity:quantityToMove, quantityNotAvailable:0.0, quantityNotIssued:quantityToMove]"/>
+                    <set field="newAssetReservationId" from="newResOut.assetReservationId"/>
+                </else></if>
+
                 <!-- decrement old reservation quantities -->
                 <set field="assetReservation.quantity" from="assetReservation.quantity - quantityToMove"/>
                 <set field="assetReservation.quantityNotAvailable"
@@ -1414,7 +1431,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- decrement new Asset ATP -->
                 <service-call name="create#mantle.product.asset.AssetDetail" in-map="[assetId:assetId,
                     effectiveDate:ec.user.nowTimestamp, availableToPromiseDiff:-quantityToMove,
-                    assetReservationId:newResOut.assetReservationId, productId:assetReservation.productId,
+                    assetReservationId:newAssetReservationId, productId:assetReservation.productId,
                     orderId:assetReservation.orderId, orderItemSeqId:assetReservation.orderItemSeqId]"/>
             </else></if>
         </actions>
@@ -3194,10 +3211,9 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="quantity &gt; asset.quantityOnHandTotal">
                 <return error="true" message="Move quantity ${quantity?.toPlainString()} is greater than on hand quantity ${asset.quantityOnHandTotal?.toPlainString()}"/></if>
             <if condition="(quantity &gt; asset.availableToPromiseTotal) &amp;&amp; !moveAssetReservationId">
-                <message type="warning">Move quantity ${quantity?.toPlainString()} is greater than available quantity ${asset.availableToPromiseTotal?.toPlainString()}</message>
-            </if>
+                <message type="warning">Move quantity ${quantity?.toPlainString()} is greater than available quantity ${asset.availableToPromiseTotal?.toPlainString()}</message></if>
 
-            <log level="warn" message="In move from Asset ${asset.assetId} reservation ${moveAssetReservationId} quantity ${quantity} Asset QOH ${asset.quantityOnHandTotal}"/>
+            <!-- <log level="warn" message="In move from Asset ${asset.assetId} reservation ${moveAssetReservationId} quantity ${quantity} Asset QOH ${asset.quantityOnHandTotal}"/> -->
 
             <!-- for partial quantity or facilityId change reduce quantity on original and create new with given quantity -->
             <if condition="forceNewAsset || (quantity &amp;&amp; quantity &lt; asset.quantityOnHandTotal) ||
