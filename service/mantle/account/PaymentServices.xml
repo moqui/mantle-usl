@@ -459,7 +459,10 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
     <service verb="set" noun="PaymentAutoInfo">
-        <in-parameters><auto-parameters entity-name="mantle.account.payment.Payment" include="nonpk"/></in-parameters>
+        <in-parameters>
+            <parameter name="paymentId"><description>Not required, used to exclude current Payment from total of other payments</description></parameter>
+            <auto-parameters entity-name="mantle.account.payment.Payment" include="nonpk"/>
+        </in-parameters>
         <out-parameters><auto-parameters entity-name="mantle.account.payment.Payment" include="nonpk"/></out-parameters>
         <actions>
             <entity-find entity-name="mantle.party.PartyRole" list="fromOrgInternalList">
@@ -525,7 +528,17 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
                 <if condition="orderPartSeqId &amp;&amp; !amount">
                     <entity-find-one entity-name="mantle.order.OrderPart" value-field="orderPart"/>
-                    <set field="amount" from="orderPart?.partTotal ?: 0.0"/>
+
+                    <entity-find entity-name="mantle.account.payment.Payment" list="partPaymentList">
+                        <econdition field-name="orderId"/>
+                        <econdition field-name="orderPartSeqId"/>
+                        <econdition field-name="statusId" operator="not-in" value="PmntCancelled,PmntVoid,PmntDeclined"/>
+                        <econdition field-name="paymentId" operator="not-equals" ignore-if-empty="true"/>
+                    </entity-find>
+                    <set field="partOtherPaymentTotal" from="partPaymentList*.amount.sum() ?: 0.0"/>
+
+                    <set field="amount" from="(orderPart?.partTotal ?: 0.0) - partOtherPaymentTotal"/>
+                    <if condition="amount &lt; 0.0"><set field="amount" from="0.0"/></if>
                 </if>
             </if>
 
@@ -1304,7 +1317,7 @@ along with this software (see the LICENSE.md file). If not, see
                     in-map="[paymentId:payment.paymentId, payment:payment, productStoreId:orderHeader.productStoreId,
                         cardSecurityCode:cardSecurityCodeByPaymentId?.get(payment.paymentId)]"/>
 
-                <if condition="!authOut.paymentGatewayResponse">
+                <if condition="!authOut.paymentGatewayResponse &amp;&amp; payment.amount">
                     <set field="authFailed" from="true"/>
                     <log level="error" message="Authorize Payment [${payment.paymentId}] failed with no PaymentGatewayResponse!"/>
                     <service-call name="mantle.account.PaymentServices.get#PaymentDescription"
@@ -1391,11 +1404,19 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- if Payment.statusId is PmntDelivered, don't auth (if PmntAuthorized allow for re-auth) -->
             <if condition="payment.statusId == 'PmntDelivered'">
-                <log level="info" message="Not authorizing Payment [${paymentId}], already delivered (captured)"/>
+                <log message="Not authorizing Payment ${paymentId}, already delivered (captured)"/>
                 <return/>
             </if>
             <if condition="payment.statusId in ['PmntCancelled', 'PmntVoid']">
                 <return message="Not authorizing cancelled or void Payment ${paymentId} [${payment.statusId}]"/></if>
+
+            <if condition="payment.amount == null || payment.amount == 0.0">
+                <log message="Payment ${paymentId} has a zero amount, setting status to Authorized and Delivered without gateway authorization or capture"/>
+                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:payment.paymentId, statusId:'PmntAuthorized']"/>
+                <service-call name="update#mantle.account.payment.Payment"
+                        in-map="[paymentId:payment.paymentId, statusId:'PmntDelivered', effectiveDate:(payment.effectiveDate ?: ec.user.nowTimestamp)]"/>
+                <return/>
+            </if>
 
             <!-- see if associated PaymentMethod has a paymentGatewayConfigId first, override Payment or other settings, override parameter too -->
             <if condition="payment.paymentMethodId">
