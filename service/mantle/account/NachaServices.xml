@@ -29,6 +29,8 @@ along with this software (see the LICENSE.md file). If not, see
                 the next week day after fileDate is used.</description></parameter>
             <parameter name="nachaEntryDescription"><description>Overrides BankAccount.nachaEntryDescription</description></parameter>
             <parameter name="fileTypeEnumId" default-value="PmftNacha"/>
+            <parameter name="addOffsetRecord" type="Boolean" default="false">
+                <description>Add a single offset record to create a 'balanced' NACHA file</description></parameter>
             <parameter name="produceSystemMessage" type="Boolean" default="false"/>
         </in-parameters>
         <out-parameters>
@@ -39,6 +41,14 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="paymentMethod"/>
             <entity-find-one entity-name="mantle.account.method.BankAccount" value-field="bankAccount"/>
             <if condition="!bankAccount"><return error="true" message="Payment method [${paymentMethodId}] is not a bank account"/></if>
+
+            <if condition="addOffsetRecord">
+                <!-- if adding offset record check bankAccount's routingNumber and accountNumber -->
+                <if condition="!bankAccount.accountNumber">
+                    <return error="true" message="Account Number is missing on internal Bank Account (ID ${paymentMethodId})"/></if>
+                <if condition="!bankAccount.routingNumber || bankAccount.routingNumber.length() != 9">
+                    <return error="true" message="Routing Number is not 9 characters on internal Bank Account (ID ${paymentMethodId})"/></if>
+            </if>
 
             <!-- find applicable payments (match fromPartyId and statusId=PmntAuthorized, or toPartyId and PmntPromised) -->
             <entity-find entity-name="mantle.account.payment.Payment" list="originalPaymentList" for-update="true">
@@ -121,6 +131,16 @@ along with this software (see the LICENSE.md file). If not, see
             <script><![CDATA[
                 import org.moqui.context.ExecutionContext
                 import org.moqui.entity.EntityValue
+
+                static String getRoutingCheckDigit(String routingNumber) {
+                    String routingWeights = "37137137"
+                    int routingCheckSum = 0
+                    for (int i = 0; i < 8; i++) routingCheckSum += (Character.digit(routingNumber.charAt(i), 10)) * (Character.digit(routingWeights.charAt(i), 10))
+                    int routingCheckSumMod = 10 - (routingCheckSum % 10)
+                    if (routingCheckSumMod == 10) routingCheckSumMod = 0
+                    return routingCheckSumMod as String
+                }
+
                 ExecutionContext ec = context.ec
 
                 // Handy output checking lines, paste below to line up output
@@ -188,7 +208,7 @@ along with this software (see the LICENSE.md file). If not, see
 
                 // Entry Detail (6) & Addenda (7)
                 long entryCount = 0, routingNumberSum = 0
-                BigDecimal debitAmountTotal = 0, creditAmountTotal = 0
+                BigDecimal debitAmountTotal = 0.0, creditAmountTotal = 0.0
                 paymentList = []
                 for (EntityValue payment in originalPaymentList) {
                     // add payment to context for error messages using ec.resource.expand()
@@ -213,12 +233,7 @@ along with this software (see the LICENSE.md file). If not, see
                         continue
                     }
                     // calculate routing number check digit
-                    String routingWeights = "37137137"
-                    int routingCheckSum = 0
-                    for (int i = 0; i < 8; i++) routingCheckSum += (Character.digit(routingNumber.charAt(i), 10)) * (Character.digit(routingWeights.charAt(i), 10))
-                    int routingCheckSumMod = 10 - (routingCheckSum % 10)
-                    if (routingCheckSumMod == 10) routingCheckSumMod = 0
-                    String routingCheckDigit = routingCheckSumMod as String
+                    String routingCheckDigit = getRoutingCheckDigit(routingNumber)
                     // add first 8 digits of routingNumber to routingNumberSum
                     routingNumberSum += (routingNumber.substring(0, 8) as long)
 
@@ -247,7 +262,7 @@ along with this software (see the LICENSE.md file). If not, see
                     String otherPartyId = payment.fromPartyId == paymentMethod.ownerPartyId ? payment.toPartyId : payment.fromPartyId
                     EntityValue otherParty = ec.entity.find("mantle.party.PartyDetail").condition("partyId", otherPartyId).one()
 
-                    // user "X" + rightmost 14 chars if paymentId length is longer than 15 chars
+                    // use "X" + rightmost 14 chars if paymentId length is longer than 15 chars
                     String individualId = payment.paymentId
                     if (individualId.length() > 15) individualId = "X" + individualId.substring(0, 14)
 
@@ -283,7 +298,7 @@ along with this software (see the LICENSE.md file). If not, see
                     entry.append(accountNumber.padRight(17, ' '))
                     // 30-39: Amount (10 digits, no decimal point, last 2 digits are decimal values, left pad with 0)
                     entry.append(amountStr.padLeft(10, '0'))
-                    // 40-54: Individual or Company ID for company (15 chars), use Party.pseudoId
+                    // 40-54: Individual or Company ID for company (15 chars)
                     entry.append(individualId.toUpperCase().padRight(15, ' '))
                     // 55-76: Individual or Company Name (22 chars)
                     entry.append(indName.toUpperCase().padRight(22, ' '))
@@ -298,6 +313,63 @@ along with this software (see the LICENSE.md file). If not, see
                     lines.add(entry)
 
                     // FUTURE: Addenda (7) with ANSI ASC X12.4, X12.85, or other data
+                }
+
+                if (addOffsetRecord) {
+                    String routingNumber = bankAccount.routingNumber
+                    // calculate routing number check digit
+                    String routingCheckDigit = getRoutingCheckDigit(routingNumber)
+                    // add first 8 digits of routingNumber to routingNumberSum
+                    routingNumberSum += (routingNumber.substring(0, 8) as long)
+
+                    String accountNumber = bankAccount.accountNumber
+                    if (accountNumber.length() > 17) accountNumber = accountNumber.substring(0, 17)
+
+                    BigDecimal netCredit = creditAmountTotal - debitAmountTotal
+
+                    if (netCredit != 0.0) {
+                        // NOTE: if isNetDebit then we create a credit offset, otherwise we create a debit offset
+                        boolean isNetDebit = netCredit < 0.0
+                        BigDecimal netAmount = isNetDebit ? netCredit.negate() : netCredit
+
+                        String amountStr = netAmount.movePointRight(2).longValueExact() as String
+                        if (isNetDebit) creditAmountTotal += netAmount else debitAmountTotal += netAmount
+
+                        // get Individual/Company Name
+                        String indName = paymentMethod.companyNameOnAccount
+                        if (indName.length() > 22) indName = indName.substring(0, 22)
+
+                        entryCount++
+
+                        // Entry Detail (6)
+                        StringBuilder entry = new StringBuilder()
+                        // 01-01: Record Type Code = '6'
+                        entry.append("6")
+                        // 02-03: Transaction Code: checking/etc credit '22', debit '27'; savings credit '32', debit '37'
+                        // if this is a net debit, create a credit; otherwise create a debit
+                        entry.append(isNetDebit ? "22" : "27")
+                        // 04-11: Receiving DFI R/T number (8 digits)
+                        entry.append(routingNumber.substring(0, 8))
+                        // 12-12: R/T number check digit
+                        entry.append(routingCheckDigit)
+                        // 13-29: Receiving DFI account number (last 17 digits, right space padded)
+                        entry.append(accountNumber.padRight(17, ' '))
+                        // 30-39: Amount (10 digits, no decimal point, last 2 digits are decimal values, left pad with 0)
+                        entry.append(amountStr.padLeft(10, '0'))
+                        // 40-54: Individual or Company ID for company (15 chars)
+                        entry.append("OFFSET".padRight(15, ' '))
+                        // 55-76: Individual or Company Name (22 chars)
+                        entry.append(indName.toUpperCase().padRight(22, ' '))
+                        // 77-78: Discretionary Data (2 chars); leave blank for now, for WEB or other special transactions may need a value
+                        entry.append("  ")
+                        // 79-79: Addenda record indicator, always '0' since not using Addenda (7) records (would be '1' if there is one or more addenda records)
+                        entry.append("0")
+                        // 80-94: Trace number (15 chars); first 8 chars from Immediate Destination, plus index (entryCount zero left padded to 7 chars)
+                        entry.append(bankAccount.nachaImmedDest.substring(0, 8))
+                        entry.append((entryCount as String).padLeft(7, '0'))
+
+                        lines.add(entry)
+                    }
                 }
 
                 String routingNumberSumStr = routingNumberSum as String
