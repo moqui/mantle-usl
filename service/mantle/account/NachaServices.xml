@@ -29,8 +29,11 @@ along with this software (see the LICENSE.md file). If not, see
                 the next week day after fileDate is used.</description></parameter>
             <parameter name="nachaEntryDescription"><description>Overrides BankAccount.nachaEntryDescription</description></parameter>
             <parameter name="fileTypeEnumId" default-value="PmftNacha"/>
-            <parameter name="addOffsetRecord" type="Boolean" default="false">
-                <description>Add a single offset record to create a 'balanced' NACHA file</description></parameter>
+            <parameter name="addNewLine" type="Boolean">
+                <description>Add a new line character (\n, hex 0A) after each record, otherwise all records on same line; defaults to BankAccount.nachaAddNewLine (Y/N) or 'true'</description>
+            </parameter>
+            <parameter name="addOffsetRecord" type="Boolean">
+                <description>Add a single offset record to create a 'balanced' NACHA file; defaults to BankAccount.nachaAddOffsetRecord (Y/N) or 'false'</description></parameter>
             <parameter name="produceSystemMessage" type="Boolean" default="false"/>
         </in-parameters>
         <out-parameters>
@@ -40,7 +43,10 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="paymentMethod"/>
             <entity-find-one entity-name="mantle.account.method.BankAccount" value-field="bankAccount"/>
-            <if condition="!bankAccount"><return error="true" message="Payment method [${paymentMethodId}] is not a bank account"/></if>
+            <if condition="bankAccount == null"><return error="true" message="Payment method ${paymentMethodId} is not a bank account"/></if>
+
+            <if condition="addNewLine == null"><set field="addNewLine" from="!'N'.equals(bankAccount.nachaAddNewLine)"/></if>
+            <if condition="addOffsetRecord == null"><set field="addOffsetRecord" from="'Y'.equals(bankAccount.nachaAddOffsetRecord)"/></if>
 
             <if condition="addOffsetRecord">
                 <!-- if adding offset record check bankAccount's routingNumber and accountNumber -->
@@ -114,6 +120,10 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="nachaEntryDescription" from="nachaEntryDescription ?: bankAccount.nachaEntryDescription"/>
             <if condition="!nachaEntryDescription || nachaEntryDescription.length() &gt; 10">
                 <message error="true">NACHA Entry Description field (${nachaEntryDescription}) on Bank Account or service parameter must be specified and not more than 10 characters</message></if>
+
+            <set field="nachaOdfiId" from="bankAccount.nachaOdfiId ?: bankAccount.nachaImmedDest.take(8)"/>
+            <if condition="nachaOdfiId.length() &gt; 8">
+                <message error="true">NACHA Originating DFI ID (${nachaOdfiId}) on Bank Account must not be more than 8 digits</message></if>
 
             <if condition="!effectiveEntryDate">
                 <!-- FUTURE: support some sort of configuration for the holidays to skip -->
@@ -199,8 +209,8 @@ along with this software (see the LICENSE.md file). If not, see
                 batchHeader.append(" ".padRight(3, ' '))
                 // 79-79: Originator Status Code = '1'
                 batchHeader.append("1")
-                // 80-87: Originating DFI Identification; same as Immediate Destination, last character trimmed for 8 chars
-                batchHeader.append(bankAccount.nachaImmedDest.substring(0, 8))
+                // 80-87: Originating DFI Identification
+                batchHeader.append(nachaOdfiId)
                 // 88-94: Batch Number (7 chars); always "0000001" since we're doing one batch per file, future: for multiple batches increment this per batch header
                 batchHeader.append("1".padLeft(7, '0'))
 
@@ -306,8 +316,8 @@ along with this software (see the LICENSE.md file). If not, see
                     entry.append("  ")
                     // 79-79: Addenda record indicator, always '0' since not using Addenda (7) records (would be '1' if there is one or more addenda records)
                     entry.append("0")
-                    // 80-94: Trace number (15 chars); first 8 chars from Immediate Destination, plus index (entryCount zero left padded to 7 chars)
-                    entry.append(bankAccount.nachaImmedDest.substring(0, 8))
+                    // 80-94: Trace number (15 chars); ODFI ID, plus index (entryCount zero left padded to 7 chars)
+                    entry.append(nachaOdfiId)
                     entry.append((entryCount as String).padLeft(7, '0'))
 
                     lines.add(entry)
@@ -364,8 +374,8 @@ along with this software (see the LICENSE.md file). If not, see
                         entry.append("  ")
                         // 79-79: Addenda record indicator, always '0' since not using Addenda (7) records (would be '1' if there is one or more addenda records)
                         entry.append("0")
-                        // 80-94: Trace number (15 chars); first 8 chars from Immediate Destination, plus index (entryCount zero left padded to 7 chars)
-                        entry.append(bankAccount.nachaImmedDest.substring(0, 8))
+                        // 80-94: Trace number (15 chars); ODFI ID, plus index (entryCount zero left padded to 7 chars)
+                        entry.append(nachaOdfiId)
                         entry.append((entryCount as String).padLeft(7, '0'))
 
                         lines.add(entry)
@@ -399,8 +409,8 @@ along with this software (see the LICENSE.md file). If not, see
                 batchControl.append(" ".padRight(19, ' '))
                 // 74-79: Reserverd blank (leave blank, 6 spaces)
                 batchControl.append(" ".padRight(6, ' '))
-                // 80-87: Originating DFI ID; first 8 chars from Immediate Destination
-                batchControl.append(bankAccount.nachaImmedDest.substring(0, 8))
+                // 80-87: Originating DFI ID
+                batchControl.append(nachaOdfiId)
                 // 88-94: Batch Number (7 chars); same as Batch Header; always "0000001" since we're doing one batch per file
                 batchControl.append("1".padLeft(7, '0'))
 
@@ -437,7 +447,8 @@ along with this software (see the LICENSE.md file). If not, see
                 StringBuilder ftSb = new StringBuilder(95 * lines.size())
                 for (StringBuilder line in lines) {
                     if (line.length() != 94) ec.message.addError(ec.resource.expand('Generated line does not have exactly 94 chars: ${line}','',[line:line]))
-                    ftSb.append(line).append('\n')
+                    ftSb.append(line)
+                    if (addNewLine) ftSb.append('\n')
                 }
                 // get the String value
                 fileText = ftSb.toString()
