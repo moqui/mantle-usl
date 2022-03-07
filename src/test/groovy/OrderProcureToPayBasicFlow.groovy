@@ -685,7 +685,7 @@ class OrderProcureToPayBasicFlow extends Specification {
 
         // generate NACHA file, mark payment delivered (done automatically when file generated)
         ec.service.sync().name("mantle.account.NachaServices.generate#NachaFile")
-                .parameter("paymentMethodId", "ZIRET_BA").call()
+                .parameter("paymentMethodId", "ZIRET_BA").parameter("addOffsetRecord", true).call()
 
         // find PaymentApplication for validation
         EntityList pappList = ec.entity.find("mantle.account.payment.PaymentApplication")
