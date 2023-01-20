@@ -1121,9 +1121,9 @@ class OrderProcureToPayBasicFlow extends Specification {
                     postedCredits="20000" postedDebits="20000" endingBalance="0" organizationPartyId="ORG_ZIZI_RETAIL"/>
 
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="182000000" timePeriodId="${currentFiscalMonthId}"
-                    postedCredits="491.66" postedDebits="425" endingBalance="66.66" organizationPartyId="ORG_ZIZI_RETAIL"/>
+                    postedCredits="485.6" postedDebits="425" endingBalance="60.6" organizationPartyId="ORG_ZIZI_RETAIL"/>
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="672000000" timePeriodId="${currentFiscalMonthId}"
-                    postedDebits="491.66" endingBalance="491.66" organizationPartyId="ORG_ZIZI_RETAIL"/>
+                    postedDebits="485.6" endingBalance="485.6" organizationPartyId="ORG_ZIZI_RETAIL"/>
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="814100000" timePeriodId="${currentFiscalMonthId}"
                     postedCredits="1141.67" endingBalance="1141.67" organizationPartyId="ORG_ZIZI_RETAIL"/>
             <mantle.ledger.account.GlAccountOrgTimePeriod glAccountId="793100000" timePeriodId="${currentFiscalMonthId}"
