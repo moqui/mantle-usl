@@ -443,7 +443,7 @@ class OrderToCashBasicFlow extends Specification {
 
             <invoices invoiceId="55500" invoiceTypeEnumId="InvoiceSales" statusId="InvoicePmtRecvd" toPartyId="CustJqp" fromPartyId="ORG_ZIZI_RETAIL" 
                     description="For Order ${cartOrderId} part 01 and Shipment ${shipResult.shipmentId}" productStoreId="POPC_DEFAULT" 
-                    settlementTermId="NetLastNext" acctgTransResultEnumId="AtrSuccess" invoiceDate="${effectiveTime}" 
+                    settlementTermId="Net30" acctgTransResultEnumId="AtrSuccess" invoiceDate="${effectiveTime}" 
                     currencyUomId="USD" invoiceTotal="170.61" unpaidTotal="0" appliedPaymentsTotal="170.61">
                 <paymentApplications amountApplied="170.61" appliedDate="${effectiveTime}" acctgTransResultEnumId="AtrSuccess" paymentApplicationId="55500" paymentId="55500"/>
 
