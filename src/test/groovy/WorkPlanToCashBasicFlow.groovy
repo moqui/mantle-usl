@@ -40,6 +40,9 @@ class WorkPlanToCashBasicFlow extends Specification {
         ec.user.setEffectiveTime(effectiveThruDate)
         effectiveTime = effectiveThruDate.time
 
+        // wait for jobs from previous tests to finish, avoid messing up EntityAuditLog sequenced IDs, up to 5 seconds
+        ec.factory.waitWorkerPoolEmpty(50)
+
         ec.entity.tempSetSequencedIdPrimary("mantle.account.invoice.Invoice", 55900, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.account.invoice.InvoiceItemAssoc", 55900, 10)
         ec.entity.tempSetSequencedIdPrimary("mantle.ledger.transaction.AcctgTrans", 55900, 10)
