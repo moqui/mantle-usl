@@ -501,18 +501,51 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
 
+            <!-- 1. Check that the payment methods that are sent have the same immedDestName and immedOrigName, if not
+            we throw an  error. -->
+            <set field="bankAccountInfoList" from="[]"/>
+            <iterate list="paymentMethodIdList" entry="paymentMethodId">
+                <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="paymentMethod"/>
+                <entity-find-one entity-name="mantle.account.method.BankAccount" value-field="bankAccount"/>
+
+                <!-- File Header fields -->
+                <if condition="!bankAccount.nachaImmedDest || bankAccount.nachaImmedDest.length() &lt; 9 || bankAccount.nachaImmedDest.length() &gt; 10">
+                    <message error="true">NACHA Immediate Destination field (${bankAccount.nachaImmedDest}) on Bank Account must be 9 or 10 characters</message></if>
+                <if condition="!bankAccount.nachaImmedOrig || bankAccount.nachaImmedOrig.length() &lt; 9 || bankAccount.nachaImmedOrig.length() &gt; 10">
+                    <message error="true">NACHA Immediate Origin field (${bankAccount.nachaImmedOrig}) on Bank Account must be 9 or 10 characters</message></if>
+                <set field="nachaImmedDestName" from="bankAccount.nachaImmedDestName ?: bankAccount.bankName"/>
+                <if condition="!nachaImmedDestName || nachaImmedDestName.length() &gt; 23">
+                    <message error="true">NACHA Immediate Destination Name field (${nachaImmedDestName}) on Bank Account must be specified and not more than 23 characters</message></if>
+                <set field="nachaImmedOrigName" from="bankAccount.nachaImmedOrigName ?: paymentMethod.companyNameOnAccount"/>
+                <if condition="!nachaImmedOrigName || nachaImmedOrigName.length() &gt; 23">
+                    <message error="true">NACHA Immediate Origin Name field (${nachaImmedOrigName}) on Bank Account must be specified and not more than 23 characters</message></if>
+
+                <if condition="bankAccountInfoList.size() &gt; 0">
+                    <if condition="bankAccountInfoList.last().nachaImmedDestName != nachaImmedDestName">
+                        <message error="true">Found a mismatch in nachaImmedDestName</message>
+                    </if>
+                    <if condition="bankAccountInfoList.last().nachaImmedOrigName != nachaImmedOrigName">
+                        <message error="true">Found a mismatch in nachaImmedOrigName</message>
+                    </if>
+                    <!-- Checks the Message Facade error message list (ec.message.errors) and if
+                    not empty returns with an error, otherwise does nothing. -->
+                    <check-errors/>
+                </if>
+
+                <set field="itemMap" from="[:]"/>
+                <script>
+                    itemMap.put('nachaImmedDestName',nachaImmedDestName);
+                    itemMap.put('nachaImmedOrigName',nachaImmedOrigName);
+                    bankAccountInfoList.add(itemMap);
+                </script>
+            </iterate>
+
+            <!-- 2. Retrieve the first bank account from the payment method list so that we can have file header fields -->
             <set field="paymentMethodId" from="paymentMethodIdList.getAt(0)"/>
-
-            <log level="error" message="paymentMethodId -> ${paymentMethodId}"/>
-
             <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="paymentMethod">
                 <field-map field-name="paymentMethodId"/>
             </entity-find-one>
-
-            <log level="error" message="paymentMethod -> ${paymentMethod}"/>
-
             <entity-find-one entity-name="mantle.account.method.BankAccount" value-field="bankAccount"/>
-            <log level="error" message="bankAccount -> ${bankAccount}"/>
 
             <!-- count of files sent today for File ID Modifier in File Header char 34 -->
             <set field="todayRange" from="ec.user.getPeriodRange('day', '0')"/>
@@ -525,29 +558,20 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- set/check some configuration values -->
 
-            <!-- File Header fields -->
+            <!-- File Header fields (TODO: probably need to remove this as it could be done in verification process) -->
             <if condition="!bankAccount.nachaImmedDest || bankAccount.nachaImmedDest.length() &lt; 9 || bankAccount.nachaImmedDest.length() &gt; 10">
                 <message error="true">NACHA Immediate Destination field (${bankAccount.nachaImmedDest}) on Bank Account must be 9 or 10 characters</message></if>
             <if condition="!bankAccount.nachaImmedOrig || bankAccount.nachaImmedOrig.length() &lt; 9 || bankAccount.nachaImmedOrig.length() &gt; 10">
                 <message error="true">NACHA Immediate Origin field (${bankAccount.nachaImmedOrig}) on Bank Account must be 9 or 10 characters</message></if>
             <set field="nachaImmedDestName" from="bankAccount.nachaImmedDestName ?: bankAccount.bankName"/>
-
-            <log level="error" message="nachaImmedDestName -> ${nachaImmedDestName}"/>
-
             <if condition="!nachaImmedDestName || nachaImmedDestName.length() &gt; 23">
                 <message error="true">NACHA Immediate Destination Name field (${nachaImmedDestName}) on Bank Account must be specified and not more than 23 characters</message></if>
             <set field="nachaImmedOrigName" from="bankAccount.nachaImmedOrigName ?: paymentMethod.companyNameOnAccount"/>
-
-            <log level="error" message="nachaImmedOrigName -> ${nachaImmedOrigName}"/>
-
             <if condition="!nachaImmedOrigName || nachaImmedOrigName.length() &gt; 23">
                 <message error="true">NACHA Immediate Origin Name field (${nachaImmedOrigName}) on Bank Account must be specified and not more than 23 characters</message></if>
-
             <set field="nachaOdfiId" from="bankAccount.nachaOdfiId ?: bankAccount.nachaImmedDest.take(8)"/>
             <if condition="nachaOdfiId.length() &gt; 8">
                 <message error="true">NACHA Originating DFI ID (${nachaOdfiId}) on Bank Account must not be more than 8 digits</message></if>
-
-            <log level="error" message="nachaOdfiId -> ${nachaOdfiId}"/>
 
             <if condition="!effectiveEntryDate">
                 <!-- FUTURE: support some sort of configuration for the holidays to skip -->
@@ -556,12 +580,23 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="effectiveEntryDate" from="nextDayOut.nextDayDate"/>
             </if>
 
+<!--            TODO: maybe remove this as well since it's in verificaiton process-->
             <check-errors/>
+
             <!-- create a PaymentMethodFile record, get the paymentMethodFileId (used in the file) -->
             <service-call name="create#mantle.account.method.PaymentMethodFile" in-map="context" out-map="context"/>
 
+            <!-- global level variables that need to be put in the file header and file control sections of the file -->
             <set field="lines" from="[]"/>
-<!--            <set field="minDepositAmount" from="productMinUom.value" type="BigDecimal"/>-->
+            <set field="paymentList" from="[]"/>
+            <set field="debitAmountTotal" type="BigDecimal" value="0.0"/>
+            <set field="creditAmountTotal" type="BigDecimal" value="0.0"/>
+            <set field="entryCount" value="0" type="Long"/>
+            <set field="routingNumberSumStr" type="String"/>
+            <set field="debitAmountTotalStr" type="String"/>
+            <set field="creditAmountTotalStr" type="String"/>
+
+            <!-- this script generates the file header of the NACHA file -->
             <script><![CDATA[
                 import org.moqui.context.ExecutionContext
                 import org.moqui.entity.EntityValue
@@ -610,6 +645,7 @@ along with this software (see the LICENSE.md file). If not, see
 
                 ]]></script>
 
+            <!-- Go through each payment of the paymentMethods in the list and generate batch sections in the NACHA file -->
             <iterate list="paymentMethodIdList" entry="paymentMethodId">
 
                 <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="paymentMethod"/>
@@ -649,10 +685,6 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="effectiveDate" operator="less-equals" from="thruDate"/>
                     <order-by field-name="effectiveDate"/>
                 </entity-find>
-
-                <iterate list="originalPaymentList" entry="originalPayment">
-                    <log message="originalPayment -> ${originalPayment}" level="error"/>
-                </iterate>
 
                 <!-- no payments? return now with a message -->
                 <if condition="!originalPaymentList"><return message="No pending ACH payments found for payment method [${paymentMethodId}]"/></if>
@@ -695,11 +727,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <check-errors/>
 
                 <!-- generate the NACHA Batch for paymentMethodId -->
-                <set field="entryCount" value="0" type="Long"/>
-                <set field="routingNumberSumStr" type="String"/>
-                <set field="debitAmountTotalStr" type="String"/>
-                <set field="creditAmountTotalStr" type="String"/>
-                <set field="paymentList" from="[]"/>
                 <script><![CDATA[
 
                     // Batch Header (5)
@@ -734,7 +761,6 @@ along with this software (see the LICENSE.md file). If not, see
 
                     // Entry Detail (6) & Addenda (7)
                     long routingNumberSum = 0
-                    BigDecimal debitAmountTotal = 0.0, creditAmountTotal = 0.0
                     for (EntityValue payment in originalPaymentList) {
                         // add payment to context for error messages using ec.resource.expand()
                         ec.context.put("payment", payment)
@@ -932,17 +958,9 @@ along with this software (see the LICENSE.md file). If not, see
                     lines.add(batchControl)
 
                     ]]></script>
-
             </iterate>
 
             <script><![CDATA[
-
-                ec.logger.error("routingNumberSumStr -> ${routingNumberSumStr}")
-                ec.logger.error("entryCount -> ${entryCount}")
-                ec.logger.error("debitAmountTotalStr -> ${debitAmountTotalStr}")
-                ec.logger.error("creditAmountTotalStr -> ${creditAmountTotalStr}")
-                ec.logger.error("bankAccount.nachaCompanyId.toUpperCase() -> ${bankAccount.nachaCompanyId.toUpperCase()}")
-
                 // File Control (9)
                 StringBuilder fileControl = new StringBuilder()
                 // 01-01: Record Type Code = '9'
