@@ -12,7 +12,7 @@ You should have received a copy of the CC0 Public Domain Dedication
 along with this software (see the LICENSE.md file). If not, see
 <http://creativecommons.org/publicdomain/zero/1.0/>.
 -->
-<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-2.1.xsd">
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
 
     <service verb="get" noun="DescendantPeriods">
         <in-parameters>
@@ -89,7 +89,7 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="create" noun="TimePeriod">
-        <description>If previousPeriodId is not specified must specify fromDate, partyId, and timePeriodTypeId.
+        <description>If previousPeriodId and currentPeriodId are not specified must specify fromDate, partyId, and timePeriodTypeId.
             Checks for an existing TimePeriod for the partyId, timePeriodTypeId, and fromDate.
             If thruDate is empty (common case) will be calculated.
             The periodName field can be empty and one will be generated.
@@ -98,6 +98,7 @@ along with this software (see the LICENSE.md file). If not, see
         </description>
         <in-parameters>
             <auto-parameters entity-name="mantle.party.time.TimePeriod" include="nonpk"/>
+            <parameter name="nextPeriodId"><description>If specified create the Previous period, before this one</description></parameter>
             <parameter name="isClosed" default-value="N"/>
         </in-parameters>
         <out-parameters>
@@ -106,33 +107,42 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="previousPeriod">
                 <field-map field-name="timePeriodId" from="previousPeriodId"/></entity-find-one>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="previousPeriodParent">
+                <field-map field-name="timePeriodId" from="previousPeriod?.parentPeriodId"/></entity-find-one>
 
-            <if condition="previousPeriod"><then>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="nextPeriod">
+                <field-map field-name="timePeriodId" from="nextPeriodId"/></entity-find-one>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="nextPeriodParent">
+                <field-map field-name="timePeriodId" from="nextPeriod?.parentPeriodId"/></entity-find-one>
+
+            <!-- get some defaults from previous or next period, or validate parameters -->
+            <if condition="previousPeriod != null"><then>
                 <if condition="!partyId"><set field="partyId" from="previousPeriod.partyId"/></if>
                 <if condition="!timePeriodTypeId"><set field="timePeriodTypeId" from="previousPeriod.timePeriodTypeId"/></if>
                 <if condition="fromDate == null"><script>
-                    def thruDateDt = java.time.ZonedDateTime.ofInstant(
+                    def fromDateDt = java.time.ZonedDateTime.ofInstant(
                             java.time.Instant.ofEpochMilli((long) previousPeriod.thruDate.time), java.time.ZoneId.systemDefault())
-                    thruDateDt = thruDateDt.plusDays(1)
-                    fromDate = java.sql.Date.from(thruDateDt.toInstant())
+                    fromDateDt = fromDateDt.plusDays(1)
+                    fromDate = java.sql.Date.from(fromDateDt.toInstant())
                 </script></if>
-                <if condition="!parentPeriodId &amp;&amp; previousPeriod.parentPeriodId">
-                    <!-- see if previous period's parent time range covers the new period, otherwise see if it has a next or create one -->
-                    <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="previousPeriodParent">
-                        <field-map field-name="timePeriodId" from="previousPeriod.parentPeriodId"/></entity-find-one>
-                    <if condition="previousPeriodParent.thruDate >= fromDate"><then>
-                        <set field="parentPeriodId" from="previousPeriod.parentPeriodId"/>
-                    </then><else>
-                        <!-- find the next parent TimePeriod (gets nextTimePeriodId, nextTimePeriod) -->
-                        <service-call name="mantle.party.TimeServices.getOrCreate#NextTimePeriod"
-                                in-map="[timePeriodId:previousPeriod.parentPeriodId]" out-map="createNextParentOut"/>
-                        <set field="parentPeriodId" from="createNextParentOut.nextTimePeriodId"/>
-                    </else></if>
+            </then><else-if condition="nextPeriod != null">
+                <if condition="nextPeriod.previousPeriodId">
+                    <set field="timePeriodId" from="nextPeriod.previousPeriodId"/>
+                    <return/>
                 </if>
-            </then><else>
-                <if condition="!partyId"><message error="true">With no previousPeriodId must specify partyId</message></if>
-                <if condition="!timePeriodTypeId"><message error="true">With no previousPeriodId must specify timePeriodTypeId</message></if>
-                <if condition="!fromDate &amp;&amp; !thruDate"><message error="true">With no previousPeriodId must specify fromDate or thruDate</message></if>
+
+                <if condition="!partyId"><set field="partyId" from="nextPeriod.partyId"/></if>
+                <if condition="!timePeriodTypeId"><set field="timePeriodTypeId" from="nextPeriod.timePeriodTypeId"/></if>
+                <if condition="thruDate == null"><script>
+                    def thruDateDt = java.time.ZonedDateTime.ofInstant(
+                            java.time.Instant.ofEpochMilli((long) nextPeriod.fromDate.time), java.time.ZoneId.systemDefault())
+                    thruDateDt = thruDateDt.minusDays(1)
+                    thruDate = java.sql.Date.from(thruDateDt.toInstant())
+                </script></if>
+            </else-if><else>
+                <if condition="!partyId"><message error="true">With no previousPeriodId or nextPeriodId must specify partyId</message></if>
+                <if condition="!timePeriodTypeId"><message error="true">With no previousPeriodId or nextPeriodId must specify timePeriodTypeId</message></if>
+                <if condition="!fromDate &amp;&amp; !thruDate"><message error="true">With no previousPeriodId or nextPeriodId must specify fromDate or thruDate</message></if>
                 <check-errors/>
             </else></if>
 
@@ -143,6 +153,12 @@ along with this software (see the LICENSE.md file). If not, see
                 java.time.temporal.TemporalUnit field = getTemporalUnitFromUomId(timePeriodType.lengthUomId)
                 // use the database time zone, for Date fields this avoid moving across day boundaries
                 def fromDateDt = java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(thruDate.time), java.time.ZoneId.systemDefault())
+                // step forward by one day so fromDate is the first day of this period, not the last day of the previous
+                // NOTE: add one day before subtracting the time period instead of after; found case where
+                //     subtracting 1 month went from the 30th of one month (Nov) to the 30th of the previous month (Oct)
+                //     instead of the 31st, moving the day of month to the first for the fromDate of the following
+                //     period first solves the problem
+                fromDateDt = fromDateDt.plusDays(1)
 
                 BigDecimal periodLength = timePeriodType.periodLength
                 if (periodLength < 1 && timePeriodType.lengthUomId == 'TF_mon') {
@@ -154,8 +170,6 @@ along with this software (see the LICENSE.md file). If not, see
                 } else {
                     fromDateDt = fromDateDt.minus(periodLength.longValue(), field)
                 }
-                // step forward by one day so fromDate is the first day of this period, not the last day of the previous
-                fromDateDt = fromDateDt.plusDays(1)
                 fromDate = java.sql.Date.from(fromDateDt.toInstant())
             ]]></script>
             </then><else>
@@ -164,8 +178,10 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- see if there is already a TimePeriod for the partyId, timePeriodTypeId, and fromDate -->
             <entity-find entity-name="mantle.party.time.TimePeriod" list="existingPeriodList">
-                <econdition field-name="partyId"/><econdition field-name="timePeriodTypeId"/>
-                <econdition field-name="fromDate"/></entity-find>
+                <econdition field-name="partyId"/>
+                <econdition field-name="timePeriodTypeId"/>
+                <econdition field-name="fromDate"/>
+            </entity-find>
             <if condition="existingPeriodList">
                 <log level="warn" message="In create#TimePeriod existing ${timePeriodType.description} Time Period for Party [${partyId}] starting on ${fromDate}: ${existingPeriodList}"/>
                 <set field="timePeriodId" from="existingPeriodList[0].timePeriodId"/>
@@ -194,19 +210,46 @@ along with this software (see the LICENSE.md file). If not, see
                 thruDate = java.sql.Date.from(thruDateDt.toInstant())
                 ]]></script></if>
 
-            <!-- Set a default period num -->
+            <!-- handle parent periods, now that we have fromDate and thruDate -->
+            <if condition="previousPeriod != null"><then>
+                <if condition="!parentPeriodId &amp;&amp; previousPeriod.parentPeriodId">
+                    <!-- see if previous period's parent time range covers the new period, otherwise see if it has a next or create one -->
+                    <if condition="previousPeriodParent.thruDate >= thruDate"><then>
+                        <set field="parentPeriodId" from="previousPeriod.parentPeriodId"/>
+                    </then><else>
+                        <!-- find the next parent TimePeriod (gets nextTimePeriodId, nextTimePeriod) -->
+                        <service-call name="mantle.party.TimeServices.getOrCreate#NextTimePeriod"
+                                in-map="[timePeriodId:previousPeriod.parentPeriodId]" out-map="createNextParentOut"/>
+                        <set field="parentPeriodId" from="createNextParentOut.nextTimePeriodId"/>
+                    </else></if>
+                </if>
+            </then><else-if condition="nextPeriod != null">
+                <if condition="!parentPeriodId &amp;&amp; nextPeriod.parentPeriodId">
+                    <!-- see if current period's parent time range covers the new period, otherwise see if it has a previous or create one -->
+                    <if condition="nextPeriodParent.fromDate &lt;= fromDate"><then>
+                        <set field="parentPeriodId" from="nextPeriod.parentPeriodId"/>
+                    </then><else>
+                        <!-- find the previous parent TimePeriod (gets previousTimePeriodId, previousTimePeriod) -->
+                        <service-call name="mantle.party.TimeServices.getOrCreate#PreviousTimePeriod"
+                                in-map="[timePeriodId:nextPeriod.parentPeriodId]" out-map="createPrevParentOut"/>
+                        <set field="parentPeriodId" from="createPrevParentOut.previousTimePeriodId"/>
+                    </else></if>
+                </if>
+            </else-if></if>
+
+            <!-- set a default period num, now that we have from/thru dates and parent period -->
             <if condition="!periodNum">
+                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="parentPeriod">
+                    <field-map field-name="timePeriodId" from="parentPeriodId"/></entity-find-one>
                 <if condition="previousPeriod?.periodNum &amp;&amp; parentPeriodId &amp;&amp; previousPeriod?.parentPeriodId"><then>
                     <!-- see if each parent has a parent, if so use those -->
-                    <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="parentPeriod">
-                        <field-map field-name="timePeriodId" from="parentPeriodId"/></entity-find-one>
-                    <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="previousPeriodParent">
-                        <field-map field-name="timePeriodId" from="previousPeriod.parentPeriodId"/></entity-find-one>
                     <if condition="(parentPeriod.parentPeriodId ?: parentPeriodId) == (previousPeriodParent.parentPeriodId ?: previousPeriod.parentPeriodId)">
                         <then><set field="periodNum" from="previousPeriod.periodNum + 1"/></then>
                         <else><set field="periodNum" from="1"/></else>
                     </if>
-                </then><else>
+                </then><else-if condition="nextPeriod?.periodNum &amp;&amp; parentPeriodId &amp;&amp; nextPeriod?.parentPeriodId &amp;&amp; (parentPeriod.parentPeriodId ?: parentPeriodId) == (nextPeriodParent.parentPeriodId ?: nextPeriod.parentPeriodId)">
+                    <set field="periodNum" from="nextPeriod.periodNum - 1"/>
+                </else-if><else>
                     <!-- calculate based on calendar year -->
                     <set field="fromDateDt" from="java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(fromDate.time), java.time.ZoneId.systemDefault())"/>
                     <if condition="timePeriodType.lengthUomId == 'TF_yr'"><then>
@@ -248,6 +291,11 @@ along with this software (see the LICENSE.md file). If not, see
                     }
                 }
             ]]></script>
+
+            <if condition="nextPeriod != null &amp;&amp; timePeriodId">
+                <set field="nextPeriod.previousPeriodId" from="timePeriodId"/>
+                <entity-update value-field="nextPeriod"/>
+            </if>
         </actions>
     </service>
     <service verb="reset" noun="TimePeriodNames">
@@ -311,6 +359,7 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="delete#mantle.party.time.TimePeriod" in-map="[timePeriodId:timePeriodId]"/>
         </actions>
     </service>
+
     <service verb="getOrCreate" noun="TimePeriod">
         <in-parameters>
             <auto-parameters entity-name="mantle.party.time.TimePeriod" include="nonpk"/>
@@ -378,6 +427,29 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="nextTimePeriodId" from="nextTimePeriod?.timePeriodId"/>
         </actions>
     </service>
+    <service verb="getOrCreate" noun="PreviousTimePeriod">
+        <in-parameters><parameter name="timePeriodId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="previousTimePeriodId"/>
+            <parameter name="previousTimePeriod" type="EntityValue"/>
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="currentPeriod">
+                <field-map field-name="timePeriodId"/></entity-find-one>
+
+            <if condition="currentPeriod.previousPeriodId"><then>
+                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="previousTimePeriod">
+                    <field-map field-name="timePeriodId" from="currentPeriod.previousPeriodId"/></entity-find-one>
+            </then><else>
+                <service-call name="mantle.party.TimeServices.create#TimePeriod" out-map="createTpOut"
+                        in-map="[nextPeriodId:timePeriodId]"/>
+                <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="previousTimePeriod">
+                    <field-map field-name="timePeriodId" from="createTpOut.timePeriodId"/></entity-find-one>
+            </else></if>
+            <set field="previousTimePeriodId" from="previousTimePeriod.timePeriodId"/>
+        </actions>
+    </service>
+
     <service verb="get" noun="TimePeriodInfo">
         <description>Get Timestamp values for fromDate/thruDate on a TimePeriod in a standardized way for TimeZone, etc</description>
         <in-parameters>
