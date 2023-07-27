@@ -651,17 +651,17 @@ class WorkPlanToCashBasicFlow extends Specification {
                 quantity="1" amount="123.45" description="Fleabag Inn 2 nights"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="03" itemTypeEnumId="ItemTimeEntry"
-                quantity="6" amount="40" itemDate="${effectiveThruDate.time}"/>
-            <mantle.work.time.TimeEntry timeEntryId="55900" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="03"/>
-            <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="04" itemTypeEnumId="ItemTimeEntry"
-                quantity="1.5" amount="40" itemDate="${effectiveThruDate.time}"/>
-            <mantle.work.time.TimeEntry timeEntryId="55901" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="04"/>
-            <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="05" itemTypeEnumId="ItemTimeEntry"
                 quantity="2" amount="40"/>
-            <mantle.work.time.TimeEntry timeEntryId="55902" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="05"/>
-            <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="06" itemTypeEnumId="ItemTimeEntry"
+            <mantle.work.time.TimeEntry timeEntryId="55902" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="03"/>
+            <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="04" itemTypeEnumId="ItemTimeEntry"
+                quantity="6" amount="40" itemDate="${effectiveThruDate.time}"/>
+            <mantle.work.time.TimeEntry timeEntryId="55900" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="04"/>
+            <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="05" itemTypeEnumId="ItemTimeEntry"
                 quantity="4" amount="40" itemDate="${effectiveThruDate.time}"/>
-            <mantle.work.time.TimeEntry timeEntryId="55903" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="06"/>
+            <mantle.work.time.TimeEntry timeEntryId="55903" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="05"/>
+            <mantle.account.invoice.InvoiceItem invoiceId="${expInvResult.invoiceId}" invoiceItemSeqId="06" itemTypeEnumId="ItemTimeEntry"
+                quantity="1.5" amount="40" itemDate="${effectiveThruDate.time}"/>
+            <mantle.work.time.TimeEntry timeEntryId="55901" vendorInvoiceId="${expInvResult.invoiceId}" vendorInvoiceItemSeqId="06"/>
 
             <mantle.ledger.transaction.AcctgTrans acctgTransId="55900" acctgTransTypeEnumId="AttPurchaseInvoice"
                 organizationPartyId="${vendorResult.partyId}" transactionDate="${startYear + '-11-08'}" isPosted="Y" postedDate="${effectiveTime}"
@@ -671,13 +671,13 @@ class WorkPlanToCashBasicFlow extends Specification {
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="02" debitCreditFlag="D"
                 amount="123.45" glAccountId="681100000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="02"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="03" debitCreditFlag="D"
-                amount="240" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="03"/>
+                amount="80" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="03"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="04" debitCreditFlag="D"
-                amount="60" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="04"/>
+                amount="240" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="04"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="05" debitCreditFlag="D"
-                amount="80" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="05"/>
+                amount="160" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="05"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="06" debitCreditFlag="D"
-                amount="160" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="06"/>
+                amount="60" glAccountId="550000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="06"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55900" acctgTransEntrySeqId="07" debitCreditFlag="C"
                 amount="1009.12" glAccountTypeEnumId="GatAccountsPayable" glAccountId="212000000" reconcileStatusId="AterNot" isSummary="N"/>
             <mantle.work.effort.WorkEffortInvoice invoiceId="${expInvResult.invoiceId}" workEffortId="TEST"/>
@@ -751,17 +751,17 @@ class WorkPlanToCashBasicFlow extends Specification {
                 fromPartyId="${vendorResult.partyId}" toPartyId="${clientResult.partyId}" statusId="InvoiceFinalized" invoiceDate="${startYear + '-11-08'}"
                 currencyUomId="USD"/><!-- varies based on settings: description="Invoice for project Test Project [TEST]" -->
             <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="01"
-                itemTypeEnumId="ItemTimeEntry" quantity="6" amount="60" itemDate="${effectiveThruDate.time}"/>
-            <mantle.work.time.TimeEntry timeEntryId="55900" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="01"/>
-            <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="02"
-                itemTypeEnumId="ItemTimeEntry" quantity="1.5" amount="60" itemDate="${effectiveThruDate.time}"/>
-            <mantle.work.time.TimeEntry timeEntryId="55901" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="02"/>
-            <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="03"
                 itemTypeEnumId="ItemTimeEntry" quantity="2" amount="60"/>
-            <mantle.work.time.TimeEntry timeEntryId="55902" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="03"/>
-            <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="04"
+            <mantle.work.time.TimeEntry timeEntryId="55902" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="01"/>
+            <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="02"
+                itemTypeEnumId="ItemTimeEntry" quantity="6" amount="60" itemDate="${effectiveThruDate.time}"/>
+            <mantle.work.time.TimeEntry timeEntryId="55900" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="02"/>
+            <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="03"
                 itemTypeEnumId="ItemTimeEntry" quantity="4" amount="0" itemDate="${effectiveThruDate.time}"/>
-            <mantle.work.time.TimeEntry timeEntryId="55903" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="04"/>
+            <mantle.work.time.TimeEntry timeEntryId="55903" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="03"/>
+            <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="04"
+                itemTypeEnumId="ItemTimeEntry" quantity="1.5" amount="60" itemDate="${effectiveThruDate.time}"/>
+            <mantle.work.time.TimeEntry timeEntryId="55901" invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="04"/>
 
             <mantle.account.invoice.InvoiceItem invoiceId="${clientInvResult.invoiceId}" invoiceItemSeqId="05"
                 itemTypeEnumId="ItemExpTravAir" quantity="1" amount="345.67" description="United SFO-LAX"/>
@@ -776,11 +776,11 @@ class WorkPlanToCashBasicFlow extends Specification {
                 organizationPartyId="${vendorResult.partyId}" transactionDate="${startYear + '-11-08'}" isPosted="Y" postedDate="${effectiveTime}"
                 glFiscalTypeEnumId="GLFT_ACTUAL" amountUomId="USD" otherPartyId="${clientResult.partyId}" invoiceId="${clientInvResult.invoiceId}"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55902" acctgTransEntrySeqId="01" debitCreditFlag="C"
-                amount="360" glAccountId="412000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="01"/>
+                amount="120" glAccountId="412000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="01"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55902" acctgTransEntrySeqId="02" debitCreditFlag="C"
-                amount="90" glAccountId="412000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="02"/>
+                amount="360" glAccountId="412000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="02"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55902" acctgTransEntrySeqId="03" debitCreditFlag="C"
-                amount="120" glAccountId="412000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="03"/>
+                amount="90" glAccountId="412000000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="04"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55902" acctgTransEntrySeqId="04" debitCreditFlag="C"
                 amount="345.67" glAccountId="681100000" reconcileStatusId="AterNot" isSummary="N" invoiceItemSeqId="05"/>
             <mantle.ledger.transaction.AcctgTransEntry acctgTransId="55902" acctgTransEntrySeqId="05" debitCreditFlag="C"
