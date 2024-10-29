@@ -78,7 +78,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="partyId" required="true" default="ec.user.userAccount?.partyId"><description>Assumed to be logged in and trusted to make query with parameters</description></parameter>
             <parameter name="linkBase"><description>Send user to this link with agreementId filled in like https://yourserver.com/content. Will have ?agreementId=${agreementId} with the actual agreementId appended to the end</description></parameter>
 
-            <parameter name="agreementTypeEnumIdList"><description>(optional) List of different agreementTypeEnumId's that are allowed</description></parameter>
+            <parameter name="agreementTypeEnumIdList" type="List"><description>(optional) List of different agreementTypeEnumId's that are allowed</description></parameter>
             <parameter name="organizationPartyId"><description>(optional) If set will only find template agreements for this organizationPartyId</description></parameter>
             <parameter name="organizationRoleTypeId"><description>(optional) If set will only find template agreements with this organizationRoleTypeId</description></parameter>
         </in-parameters>
@@ -87,8 +87,10 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="needsSignature" type="Boolean"/>
         </out-parameters>
         <actions>
+            <if condition="!agreementTypeEnumIdList"><set field="agreementTypeEnumIdList" from="[]"/></if>
+            <set field="agreementTypeEnumIdList" from="agreementTypeEnumIdList.findAll{ ec.logger.warn('typeof it '+it.getClass().getName()); it != null &amp;&amp; it != '' }"/>
             <entity-find entity-name="mantle.party.agreement.Agreement" list="agreementTemplateList">
-                <econdition field-name="isTemplate" value="Y" ignore-if-empty="true"/>
+                <econdition field-name="isTemplate" value="Y"/>
 
                 <econdition field-name="agreementTypeEnumId" operator="in" from="agreementTypeEnumIdList" ignore="agreementTypeEnumIdList.size() == 0"/>
                 <econdition field-name="organizationPartyId" from="organizationPartyId" ignore="!organizationPartyId"/>
@@ -97,13 +99,16 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <order-by field-name="-agreementDate,-fromDate"/>
             </entity-find>
+            <if condition="agreementTemplateList.size() == 0">
+                <return error="true" message="No agreements found"/>
+            </if>
             <log level="warn" message="AgreementList service called with partyId=${partyId}, agreementTypeEnumIdList=${agreementTypeEnumIdList}, organizationPartyId=${organizationPartyId}, organizationRoleTypeId=${organizationRoleTypeId}, agreementTemplateList.size=${agreementTemplateList.size()} list=${agreementTemplateList}"/>
 
             <entity-find entity-name="mantle.party.agreement.Agreement" list="agreementSignedList">
                 <econdition field-name="otherPartyId" from="partyId"/>
                 <econdition field-name="templateAgreementId" operator="in" from="agreementTemplateList.agreementId"/>
 
-                <econdition field-name="agreementTypeEnumId" operator="in" from="agreementTypeEnumIdList" ignore="agreementTypeEnumIdList.size() == 0"/>
+                <econdition field-name="agreementTypeEnumId" operator="in" from="agreementTypeEnumIdList" ignore="agreementTypeEnumIdList.size()"/>
                 <econdition field-name="organizationPartyId" from="organizationPartyId" ignore="!organizationPartyId"/>
                 <econdition field-name="organizationRoleTypeId" from="organizationRoleTypeId" ignore="!organizationRoleTypeId"/>
                 <date-filter/>
@@ -113,16 +118,22 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="agreementList" from="[]"/>
             <iterate list="agreementTemplateList" entry="agreementTemplate">
                 <set field="signedByUser" from="false"/>
-                <if condition="agreementTemplateSignedIdList.find{ it == agreementTemplate.agreementId }.size() &gt; 0">
+                <set field="agreementTemplateSignedIdListSize" from="agreementTemplateSignedIdList.find{ it == agreementTemplate.agreementId }?.size()?:0"/>
+                <if condition="agreementTemplateSignedIdListSize &gt; 0">
                     <set field="signedByUser" from="true"/>
                 </if>
-                <if condition="agreementList.find{ it.agreementId == agreementTemplate.agreementId }.size() == 0"><then>
+                <if condition="agreementTemplateSignedIdListSize == 0"><then>
+                    <if condition="!agreementTemplate.description">
+                        <log level="warn" message="Agreement ${agreementTemplate.agreementId} has no description and is being set to Agreement"/>
+                        <set field="agreementTemplate.description" value="Agreement"/>
+                    </if>
                     <set field="agreementList" from="agreementList + [signedByUser:signedByUser,agreementId:agreementTemplate.agreementId,
                         description:agreementTemplate.description]"/>
                 </then><else>
                     <log level="warn" message="Agreement ${agreementTemplate.agreementId} already in list"/>
                 </else></if>
             </iterate>
+            <log level="warn" message="AgreementList service returning agreementList.size=${agreementList.size()} list=${agreementList}"/>
             <set field="needsSignature" from="agreementList.find{ it.signedByUser == false }.size() &gt; 0"/>
 
             <log level="warn" message="AgreementList service returning agreementList.size=${agreementList.size()} list=${agreementList}"/>
@@ -135,32 +146,43 @@ along with this software (see the LICENSE.md file). If not, see
                 <parameter name="agreementId"/>
             </parameter>
             <parameter name="agreementDate"/>
+
+            <parameter name="agreementTypeEnumIdList" type="List"><description>(optional) List of different agreementTypeEnumId's that are allowed</description></parameter>
+            <parameter name="organizationPartyId"><description>(optional) If set will only find template agreements for this organizationPartyId</description></parameter>
+            <parameter name="organizationRoleTypeId"><description>(optional) If set will only find template agreements with this organizationRoleTypeId</description></parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="signedAgreementList" type="List"/>
         </out-parameters>
         <actions>
-            <set field="agreementsToSignList" from="agreementList.findAll{ it.signedByUser != null &amp;&amp; it.agreementId != null }"/>
-            <set field="agreementsToWarnList" from="(agreementList - agreementsToSignList).findAll{ agreement.signedByUser == null || agreement.agreementId == null }"/>
-
-            <iterate list="agreementsToWarnList" entry="agreementTemplateWarn">
-                <log level="warn" message="AgreementList service called with invalid agreementTemplateWarn=${agreementTemplateWarn}. signedByUser and agreementId are required"/>
+            <iterate list="agreementList" entry="agreement">
+                <if condition="agreement.signedByUser == null">
+                    <set field="agreement.signedByUser" from="false"/>
+                </if>
+                <if condition="agreement.signedByUser.getClass().getName() != 'java.lang.Boolean'">
+                    <set field="agreement.signedByUser" from="agreement.signedByUser as Boolean"/>
+                </if>
             </iterate>
+            <set field="agreement" from="null"/>
 
-            <iterate list="agreementsToSignList" entry="agreementTemplateInput">
-                <if condition="agreementTemplateInput.signedByUser == false">
-                    <log level="warn" message="sign#AgreementList service called with invalid agreementTemplateInput=${agreementTemplateInput}. Agreement not signed"/>
-                    <continue/></if>
-                <entity-find-one entity-name="mantle.party.agreement.Agreement" value-field="newAgreement"
-                        auto-field-map="[agreementId:agreementTemplateInput]"/>
-                <if condition="newAgreement == null">
-                    <log level="warn" message="sign#AgreementList service called with invalid agreementTemplateInput=${agreementTemplateInput}. Agreement not found"/>
-                    <continue/>
-                </if>
-                <if condition="newAgreement.isTemplate == 'N'">
-                    <log level="warn" message="sign#AgreementList service called with invalid agreementTemplateInput=${agreementTemplateInput}. Agreement is not a template"/>
-                    <continue/>
-                </if>
+            <if condition="!agreementTypeEnumIdList"><set field="agreementTypeEnumIdList" from="[]"/></if>
+            <set field="agreementTypeEnumIdList" from="agreementTypeEnumIdList.findAll{ ec.logger.warn('typeof it '+it.getClass().getName()); it != null &amp;&amp; it != '' }"/>
+
+            <set field="agreementsToSignList" from="agreementList.findAll{ it.signedByUser != null &amp;&amp; it.agreementId != null }"/>
+<!--            <set field="agreementsToSignList" from="agreementsToSignList.findAll{ it.signedByUser != null &amp;&amp; it.signedByUser as Boolean == true }"/>-->
+
+            <entity-find entity-name="mantle.party.agreement.Agreement" list="agreementTemplateList">
+                <econdition field-name="agreementId" operator="in" from="agreementsToSignList*.agreementId"/>
+                <econdition field-name="isTemplate" value="Y"/>
+
+                <econdition field-name="agreementTypeEnumId" operator="in" from="agreementTypeEnumIdList" ignore="agreementTypeEnumIdList.size() == 0"/>
+                <econdition field-name="organizationPartyId" from="organizationPartyId" ignore="!organizationPartyId"/>
+                <econdition field-name="organizationRoleTypeId" from="organizationRoleTypeId" ignore="!organizationRoleTypeId"/>
+                <date-filter/>
+
+                <order-by field-name="-agreementDate,-fromDate"/>
+            </entity-find>
+            <iterate list="agreementTemplateList" entry="newAgreement">
                 <set field="templateAgreementId" from="newAgreement.agreementId"/>
 
                 <set field="newAgreement.agreementId" from="null"/>
@@ -187,6 +209,48 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <set field="signedAgreementList" from="signedAgreementList + [agreementId:newAgreement.agreementId]"/>
             </iterate>
+        </actions>
+    </service>
+    <service verb="get" noun="AgreementText">
+        <in-parameters>
+            <parameter name="agreementId" required="true"/>
+<!--            <parameter name="versionName"/>-->
+
+            <parameter name="agreementTypeEnumIdList" type="List"><description>(optional) List of different agreementTypeEnumId's that are allowed</description></parameter>
+            <parameter name="organizationPartyId"><description>(optional) If set will only find template agreements for this organizationPartyId</description></parameter>
+            <parameter name="organizationRoleTypeId"><description>(optional) If set will only find template agreements with this organizationRoleTypeId</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="pageLocation"/>
+            <parameter name="agreementText"/>
+        </out-parameters>
+        <actions>
+            <if condition="!agreementTypeEnumIdList"><set field="agreementTypeEnumIdList" from="[]"/></if>
+            <set field="agreementTypeEnumIdList" from="agreementTypeEnumIdList.findAll{ ec.logger.warn('typeof it '+it.getClass().getName()); it != null &amp;&amp; it != '' }"/>
+            <entity-find entity-name="mantle.party.agreement.Agreement" list="agreementTemplateList" limit="1">
+                <econdition field-name="agreementId"/>
+                <econdition field-name="isTemplate" value="Y"/>
+
+                <econdition field-name="agreementTypeEnumId" operator="in" from="agreementTypeEnumIdList" ignore="agreementTypeEnumIdList.size() == 0"/>
+                <econdition field-name="organizationPartyId" from="organizationPartyId" ignore="!organizationPartyId"/>
+                <econdition field-name="organizationRoleTypeId" from="organizationRoleTypeId" ignore="!organizationRoleTypeId"/>
+                <date-filter/></entity-find>
+            <if condition="agreementTemplateList.size() == 0 || !agreementTemplateList.getFirst().agreementId">
+                <return error="true" message="Agreement not found"/>
+            </if>
+
+            <set field="agreementId" from="agreementTemplateList.getFirst().agreementId"/>
+            <entity-find entity-name="mantle.party.agreement.AgreementContent" list="agreementList">
+                <econdition field-name="agreementId"/>
+                <econdition field-name="contentTypeEnumId" value="AcntDocument"/>
+                <econdition field-name="contentLocation" operator="is-not-null"/>
+                <order-by field-name="-contentDate"/></entity-find>
+            <if condition="agreementList.size() == 0 || !agreementList.getFirst().contentLocation">
+                <return error="true" message="Agreement not found"/>
+            </if>
+
+            <set field="pageLocation" from="agreementList.getFirst().contentLocation"/>
+            <set field="agreementText" from="ec.resource.getLocationReference(pageLocation).getText()"/>
         </actions>
     </service>
 </services>
