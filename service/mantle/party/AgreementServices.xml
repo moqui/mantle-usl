@@ -85,6 +85,7 @@ along with this software (see the LICENSE.md file). If not, see
         <out-parameters>
             <parameter name="agreementList" type="List"/>
             <parameter name="needsSignature" type="Boolean"/>
+            <parameter name="partyId"/>
         </out-parameters>
         <actions>
             <if condition="!agreementTypeEnumIdList"><set field="agreementTypeEnumIdList" from="[]"/></if>
@@ -115,16 +116,81 @@ along with this software (see the LICENSE.md file). If not, see
                 <date-filter/>
             </entity-find>
 
-<!--            <log level="warn" message="AgreementList service found ${agreementSignedList.size()} signed agreements ${agreementSignedList}"/>-->
+            <entity-find entity-name="mantle.party.agreement.AgreementWikiPage" list="agreementWikiPageList">
+                <econdition field-name="agreementId" operator="in" from="agreementSignedList*.agreementId"/>
+                <order-by field-name="-agreementDate"/>
+            </entity-find>
 
+            <log level="warn" message="agreementWikiPageList=${agreementWikiPageList}"/>
+
+            <entity-find entity-name="moqui.resource.wiki.WikiPage" list="wikiPageList">
+                <econdition field-name="wikiPageId" operator="in" from="agreementWikiPageList*.wikiPageId"/>
+                <econdition field-name="restrictView" value="N" or-null="true"/>
+            </entity-find>
+            <log level="warn" message="wikiPageList=${wikiPageList}"/>
+
+<!--            <log level="warn" message="AgreementList service found ${agreementSignedList.size()} signed agreements ${agreementSignedList}"/>-->
             <set field="agreementTemplateSignedIdList" from="agreementSignedList*.templateAgreementId"/>
             <set field="agreementList" from="[]"/>
             <iterate list="agreementTemplateList" entry="agreementTemplate">
-                <set field="signedByUser" from="false"/>
-                <set field="agreementDate" from="null"/>
-                <set field="agreementTemplateSignedIdListSize" from="agreementTemplateSignedIdList.find{ it == agreementTemplate.agreementId }?.size()?:0"/>
-                <if condition="agreementTemplateSignedIdListSize &gt; 0">
-                    <set field="signedByUser" from="true"/>
+                <filter-map-list list="agreementSignedList" to-list="agreementSignedListFiltered">
+                    <field-map field-name="templateAgreementId" from="agreementTemplate.agreementId"/>
+                    <date-filter/></filter-map-list>
+                <set field="agreement" from="null"/>
+                <set field="signedByUser" from="null"/>
+                <set field="ver" from="null"/>
+                <if condition="agreementSignedListFiltered.size() == 0"><then>
+                    <set field="signedByUser" from="false"/>
+                </then><else-if condition="agreementSignedListFiltered.size() == 1">
+                    <set field="agreement" from="agreementSignedListFiltered[0]"/>
+                </else-if><else-if condition="agreementSignedListFiltered.size() &gt; 1">
+                    <set field="agreement" from="agreementSignedListFiltered.sort{ -it.agreementDate }[0]"/>
+                </else-if></if>
+                <!-- remove agreement from agreementSignedList so we don't have to iterate over it again -->
+                <log level="warn" message="agreement=${agreement}"/>
+
+<!--                &lt;!&ndash; Find the Agreement wiki page-->
+                <set field="agreementWikiPage" from="null"/>
+                <if condition="agreement">
+<!--                    <set field="agreementSignedList" from="agreementSignedList - agreement"/>-->
+                    <filter-map-list list="agreementWikiPageList" to-list="agreementWikiPageListFiltered">
+                        <field-map field-name="agreementId" from="agreement.agreementId"/>
+                    </filter-map-list>
+                    <if condition="agreementWikiPageListFiltered.size() == 0"><then>
+                        <set field="signedByUser" from="false"/>
+                    </then><else-if condition="agreementWikiPageListFiltered.size() == 1">
+                        <set field="agreementWikiPage" from="agreementWikiPageListFiltered[0]"/>
+                    </else-if><else-if condition="agreementWikiPageListFiltered.size() &gt; 1">
+                        <set field="agreementWikiPage" from="agreementWikiPageListFiltered.sort{ -it.agreementDate }[0]"/>
+                    </else-if></if>
+                </if>
+
+                <set field="wikiPage" from="null"/>
+                <if condition="agreement &amp;&amp; agreementWikiPage">
+<!--                    <set field="agreementWikiPageList" from="agreementWikiPageList - agreementWikiPage"/>-->
+                    <filter-map-list list="wikiPageList" to-list="wikiPageListFiltered">
+                        <field-map field-name="wikiPageId" from="agreementWikiPage.wikiPageId"/>
+                    </filter-map-list>
+                    <if condition="wikiPageListFiltered.size() == 0"><then>
+                        <set field="signedByUser" from="false"/>
+                    </then><else-if condition="wikiPageListFiltered.size() == 1">
+                        <set field="wikiPage" from="wikiPageListFiltered[0]"/>
+                    </else-if><else-if condition="wikiPageListFiltered.size() &gt; 1">
+                        <log level="warn" message="Multiple wiki pages found with agreementId=${agreement.agreementId} and wikiPageId=${agreementWikiPage.wikiPageId}"/>
+                        <set field="wikiPage" from="wikiPageListFiltered.sort{ -it.lastUpdatedStamp }[0]"/>
+                    </else-if></if>
+                    <set field="ver" from="wikiPage?.publishedVersionName"/>
+                    <if condition="agreementWikiPage.versionName == wikiPage.publishedVersionName">
+                        <set field="signedByUser" from="true"/>
+                    </if>
+                    <if condition="!signedByUser &amp;&amp; (agreementWikiPage.versionName.isBigDecimal()
+                        &amp;&amp; wikiPage.publishedVersionName.isBigDecimal() &amp;&amp;
+                        new BigDecimal(wikiPage.publishedVersionName) &lt; new BigDecimal(agreementWikiPage.versionName))">
+                        <log level="warn" message="agreementWikiPage.versionName=${agreementWikiPage.versionName} is newer than wikiPage.publishedVersionName=${wikiPage.publishedVersionName}"/>
+                        <set field="signedByUser" from="true"/>
+                    <else>
+                        <set field="signedByUser" from="false"/>
+                    </else></if>
                 </if>
 
                 <set field="agreementListSize" from="agreementList.find{ it.agreementId == agreementTemplate.agreementId }?.size()?:0"/>
@@ -134,7 +200,8 @@ along with this software (see the LICENSE.md file). If not, see
                         <set field="agreementTemplate.description" value="Agreement"/>
                     </if>
                     <set field="agreementList" from="agreementList + [signedByUser:signedByUser,agreementId:agreementTemplate.agreementId,
-                        description:agreementTemplate.description]"/>
+                        description:agreementTemplate.description,ver:ver,wikiPageId:wikiPage?.wikiPageId,agreementId:agreement?.agreementId,
+                        agreementTemplateId:agreementTemplate.agreementId]"/>
                 </then><else>
                     <log level="warn" message="Agreement ${agreementTemplate.agreementId} already in list"/>
                 </else></if>
@@ -142,7 +209,6 @@ along with this software (see the LICENSE.md file). If not, see
 <!--            <log level="warn" message="AgreementList service returning agreementList.size=${agreementList.size()} list=${agreementList}"/>-->
             <set field="agreementListSignedCount" from="agreementList.find{ it.signedByUser == false }?.size()?:0"/>
             <set field="needsSignature" from="agreementListSignedCount &gt; 0"/>
-
 <!--            <log level="warn" message="AgreementList service returning agreementList.size=${agreementList.size()} list=${agreementList}"/>-->
         </actions>
     </service>
@@ -167,45 +233,23 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <if condition="!agreementTypeEnumIdList"><set field="agreementTypeEnumIdList" from="[]"/></if>
             <set field="agreementTypeEnumIdList" from="agreementTypeEnumIdList.findAll{ it != null &amp;&amp; it != '' }"/>
-            <entity-find entity-name="mantle.party.agreement.Agreement" list="agreementTemplateList">
-                <econdition field-name="isTemplate" value="Y"/>
-
-                <econdition field-name="agreementTypeEnumId" operator="in" from="agreementTypeEnumIdList" ignore="agreementTypeEnumIdList.size() == 0"/>
-                <econdition field-name="organizationPartyId" from="organizationPartyId" ignore="!organizationPartyId"/>
-                <econdition field-name="organizationRoleTypeId" from="organizationRoleTypeId" ignore="!organizationRoleTypeId"/>
-                <date-filter/>
-
-                <order-by field-name="-agreementDate,-fromDate"/>
-            </entity-find>
-            <if condition="agreementTemplateList.size() == 0">
-                <return error="true" message="No agreements found"/>
-            </if>
-
             <iterate list="agreementList" entry="agreement">
+                <if condition="agreement.signedByUser.getClass().getName() != 'java.lang.Boolean'">
+                    <set field="agreement.signedByUser" from="agreement.signedByUser == 'true' ? true : (agreement.signedByUser == 'false' ? false : null)"/>
+                </if>
                 <if condition="agreement.signedByUser == null">
                     <set field="agreement.signedByUser" from="false"/>
                 </if>
-                <if condition="agreement.signedByUser.getClass().getName() != 'java.lang.Boolean'">
-                    <set field="agreement.signedByUser" from="agreement.signedByUser as Boolean"/>
-                </if>
             </iterate>
             <set field="agreement" from="null"/>
-
-            <set field="agreementsToSignList" from="agreementList.findAll{ it.signedByUser != null &amp;&amp; it.agreementId != null }"/>
 <!--            <set field="agreementsToSignList" from="agreementsToSignList.findAll{ it.signedByUser != null &amp;&amp; it.signedByUser as Boolean == true }"/>-->
 
-            <entity-find entity-name="mantle.party.agreement.Agreement" list="agreementTemplateList">
-                <econdition field-name="agreementId" operator="in" from="agreementsToSignList*.agreementId"/>
-                <econdition field-name="templateAgreementId" operator="in" from="agreementTemplateList*.agreementId"/>
-                <econdition field-name="isTemplate" value="Y"/>
+            <service-call name="mantle.party.AgreementServices.find#AgreementList" in-map="context" out-map="agreementMap"/>
+            <if condition="agreementMap.needsSignature == false">
+                <return message="No agreements need to be signed"/>
+            </if>
 
-                <econdition field-name="agreementTypeEnumId" operator="in" from="agreementTypeEnumIdList" ignore="agreementTypeEnumIdList.size() == 0"/>
-                <econdition field-name="organizationPartyId" from="organizationPartyId" ignore="!organizationPartyId"/>
-                <econdition field-name="organizationRoleTypeId" from="organizationRoleTypeId" ignore="!organizationRoleTypeId"/>
-                <date-filter/>
-
-                <order-by field-name="-agreementDate,-fromDate"/>
-            </entity-find>
+            <log level="warn" message="sign#AgreementList context.toString()=${context.toString()}"/>
 
             <set field="signedAgreementList" from="[]"/>
             <iterate list="agreementTemplateList" entry="newAgreement">
