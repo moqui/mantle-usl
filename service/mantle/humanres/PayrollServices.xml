@@ -604,38 +604,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <return message="Employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)} is no longer employed"/></if>
 
             <if condition="salaryFlag == 'Y'"><then>
-                <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
-                <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
-                    <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
-                    <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp" or-null="true"/>
-                    <econdition field-name="partyRelationshipId"/>
-                    <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
-                    <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
-                </entity-find>
-
-                <if condition="!employmentSalaryList">
-                    <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
-                <set field="employmentSalary" from="employmentSalaryList[0]"/>
-
-                <set field="payAmount" from="employmentSalary.amount"/>
-                <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
-
-                <!-- handle partial period for salary (first and last, ie by from and thru) -->
-                <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; fromTimestamp">
-                    <set field="partialFrom" from="employment.fromDate"/></if>
-                <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; thruTimestamp">
-                    <set field="partialThru" from="employment.thruDate"/></if>
-                <if condition="partialFrom || partialThru">
-                    <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
-                        <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
-                    <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time+24*60*60*1000-1)"/>
-                        <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
-                    <!-- TODO: this is messy, consider working days, etc? -->
-                    <!-- for now do a simple ratio of milliseconds -->
-                    <set field="partialTime" from="partialThruDate.time - partialFromDate.time"/>
-                    <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
-                    <set field="payAmount" from="ec.l10n.roundCurrency(payAmount * (partialTime/periodTime), currencyUomId)"/>
-                </if>
+                <service-call name="mantle.humanres.PayrollServices.get#SalaryPayAmount" in-map="context" out-map="context"/>
             </then><else>
                 <!-- Gather uninvoiced time entries -->
                 <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList" for-update="true">
@@ -656,6 +625,55 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- round according to currency -->
                 <set field="payAmount" from="ec.l10n.roundCurrency(payAmount, currencyUomId)"/>
             </else></if>
+        </actions>
+    </service>
+
+    <service verb="get" noun="SalaryPayAmount">
+        <in-parameters>
+            <parameter name="employment" type="Map" required="true"/>
+            <parameter name="timePeriod" type="Map" required="true"/>
+            <parameter name="fromDetail" type="Map"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="payAmount" type="BigDecimal"/>
+            <parameter name="currencyUomId"/>
+        </out-parameters>
+        <actions>
+            <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="[timePeriod:timePeriod]" out-map="periodInfo"/>
+            <set field="fromTimestamp" from="periodInfo.fromTimestamp"/>
+            <set field="thruTimestamp" from="periodInfo.thruTimestamp"/>
+            <!-- NOTE: if salary changes mid-period, pro-rate the rate by applicable time? currently uses salary on period thruDate -->
+            <entity-find entity-name="mantle.humanres.employment.EmploymentSalary" list="employmentSalaryList">
+                <econdition field-name="fromDate" operator="less-equals" from="thruTimestamp"/>
+                <econdition field-name="thruDate" operator="greater-equals" from="fromTimestamp" or-null="true"/>
+                <econdition field-name="partyRelationshipId" from="employment.partyRelationshipId"/>
+                <econdition field-name="timePeriodTypeId" from="timePeriod.timePeriodTypeId"/>
+                <order-by field-name="-fromDate"/><!-- if more than one get most recent -->
+            </entity-find>
+
+            <if condition="!employmentSalaryList">
+                <return error="true" message="No salary found for salaried employee ${ec.resource.expand('PartyNameTemplate', '', fromDetail)}"/></if>
+            <set field="employmentSalary" from="employmentSalaryList[0]"/>
+
+            <set field="payAmount" from="employmentSalary.amount"/>
+            <set field="currencyUomId" from="employmentSalary.currencyUomId"/>
+
+            <!-- handle partial period for salary (first and last, ie by from and thru) -->
+            <if condition="employment.fromDate != null &amp;&amp; employment.fromDate &gt; fromTimestamp">
+                <set field="partialFrom" from="employment.fromDate"/></if>
+            <if condition="employment.thruDate != null &amp;&amp; employment.thruDate &lt; thruTimestamp">
+                <set field="partialThru" from="employment.thruDate"/></if>
+            <if condition="partialFrom || partialThru">
+                <if condition="partialFrom"><set field="partialFromDate" from="new java.sql.Date(partialFrom.time)"/>
+                    <else><set field="partialFromDate" from="timePeriod.fromDate"/></else></if>
+                <if condition="partialThru"><set field="partialThruDate" from="new java.sql.Date(partialThru.time+24*60*60*1000-1)"/>
+                    <else><set field="partialThruDate" from="timePeriod.thruDate"/></else></if>
+                <!-- TODO: this is messy, consider working days, etc? -->
+                <!-- for now do a simple ratio of milliseconds -->
+                <set field="partialTime" from="partialThruDate.time - partialFromDate.time"/>
+                <set field="periodTime" from="timePeriod.thruDate.time - timePeriod.fromDate.time"/>
+                <set field="payAmount" from="ec.l10n.roundCurrency(payAmount * (partialTime/periodTime), currencyUomId)"/>
+            </if>
         </actions>
     </service>
 
