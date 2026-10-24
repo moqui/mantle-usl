@@ -67,96 +67,80 @@ along with this software (see the LICENSE.md file). If not, see
             // TODO: filter by productId
         </script>
         <service-call name="org.moqui.search.SearchServices.search#CountBySource" out-map="globalOut"
-                in-map="[indexName:indexName, sourceMap:searchSourceMap,
-                    documentTypeList:[orderItemDocumentName,prodEstimateDocumentName,assetDocumentName,runConsumeDocumentName,runProduceDocumentName]]"/>
+                in-map="{indexName:indexName, sourceMap:searchSourceMap,
+                    documentTypeList:[orderItemDocumentName,prodEstimateDocumentName,assetDocumentName,runConsumeDocumentName,runProduceDocumentName]}"/>
         <log level="warn" message="========== globalOut.responseString: ${globalOut.searchResponse.toString()}"/>
         -->
         <actions><script><![CDATA[
-            import org.moqui.elasticsearch.ElasticSearchUtil
+            // aggregation sums are decimals on Postgres and numbers on OpenSearch; the projection works in numbers
+            const num = (value) => value == null ? 0 : (typeof value === 'number' ? value : toDecimal(value).toNumber())
+            const notIn = (name, values) => ({field: {name: name, op: 'in', values: values, negate: true}})
+            const missingOrBefore = (name, millis) => ({bool: {any: [{field: {name: name, op: 'exists', negate: true}},
+                    {field: {name: name, op: 'range', lte: millis}}]}})
+            const estThruMillis = estThruDate ? Number(estThruDate) : null
+            infoByProductId = {}
 
-            String estThruDateStr = estThruDate ? (estThruDate.getTime() as String) : null
-            // consolidate the results into a single Map by productId
-            infoByProductId = [:] as Map<String, Map>
+            // the sums per product of one document type, set on that product's map in infoByProductId
+            function sumsByProduct(documentType, clauses, sumFields) {
+                clauses = [{field: {name: 'productId', op: 'in', values: productIdList}}].concat(clauses)
+                if (facilityId) clauses.push({field: {name: 'facilityId', op: 'eq', value: facilityId}})
+                const sums = {}
+                for (const [name, field] of Object.entries(sumFields)) sums[name] = {sum: {field: field}}
+                const result = ec.search.aggregate({documentType: documentType, filter: {bool: {all: clauses}},
+                        aggs: {products: {terms: {field: 'productId', size: maxResults}, aggs: sums}}})
+                for (const bucket of result.products.buckets) {
+                    const infoMap = infoByProductId[bucket.key] || (infoByProductId[bucket.key] = {})
+                    for (const name of Object.keys(sumFields)) infoMap[name] = num(bucket[name])
+                }
+            }
+
+            if (!ec.search.isAvailable()) { ec.message.addMessage("Search is not configured, no projected inventory", "danger"); return }
 
             if (getOrderItemData) {
-                List andList = [[terms:[productId: productIdList]],
-                                [bool:[must_not:[terms:[partStatusId: ['OrderCompleted', 'OrderRejected', 'OrderCancelled']]]]]]
-                if (facilityId) andList.add([term: [facilityId: facilityId]])
-                if (estThruDateStr) andList.add([or: [[missing: [field: 'requiredByDate']],
-                                                      [range: [requiredByDate: [lte: estThruDateStr, format: 'epoch_millis']]]]])
-
-                ElasticSearchUtil.simpleAggSearch((String) indexName, [(String) orderItemDocumentName], maxResults,
-                        [bool:[filter:andList]], "productId",
-                        [orderQuantitySum:'orderQuantity', quantityReservedSum:'reservations.quantityReserved',
-                              quantityNotAvailableSum:'reservations.quantityNotAvailable', quantityNotIssuedSum:'reservations.quantityNotIssued'],
-                        infoByProductId, ec)
+                const clauses = [notIn('partStatusId', ['OrderCompleted', 'OrderRejected', 'OrderCancelled'])]
+                if (estThruMillis != null) clauses.push(missingOrBefore('requiredByDate', estThruMillis))
+                sumsByProduct(orderItemDocumentName, clauses,
+                        {orderQuantitySum:'orderQuantity', quantityReservedSum:'reservations.quantityReserved',
+                         quantityNotAvailableSum:'reservations.quantityNotAvailable', quantityNotIssuedSum:'reservations.quantityNotIssued'})
             }
 
             if (getProdEstimateData) {
-                List andList = [[terms:[productId:productIdList]], [range:[readyDate:[gte:'now/d', lte:estThruDateStr, format:'epoch_millis']]]]
-                if (facilityId) andList.add([term:[facilityId:facilityId]])
-
-                ElasticSearchUtil.simpleAggSearch((String) indexName, [(String) prodEstimateDocumentName], maxResults,
-                        [bool:[filter:andList]], "productId", [prodEstQuantitySum:'prodEstQuantity'],
-                        infoByProductId, ec)
+                // ready from the start of today through estThruDate, if there is one
+                const today = new Date()
+                today.setHours(0, 0, 0, 0)
+                const readyRange = {name: 'readyDate', op: 'range', gte: today.getTime()}
+                if (estThruMillis != null) readyRange.lte = estThruMillis
+                sumsByProduct(prodEstimateDocumentName, [{field: readyRange}], {prodEstQuantitySum:'prodEstQuantity'})
             }
 
             if (getAssetData) {
-                List andList = [[terms:[productId:productIdList]], [term:[statusId:'AstAvailable']]]
-                if (facilityId) andList.add([term:[facilityId:facilityId]])
-
-                ElasticSearchUtil.simpleAggSearch((String) indexName, [(String) assetDocumentName], maxResults,
-                        [bool:[filter:andList]], "productId",
-                        [availableToPromiseTotalSum:'availableToPromiseTotal', quantityOnHandTotalSum:'quantityOnHandTotal'],
-                        infoByProductId, ec)
+                sumsByProduct(assetDocumentName, [{field: {name: 'statusId', op: 'eq', value: 'AstAvailable'}}],
+                        {availableToPromiseTotalSum:'availableToPromiseTotal', quantityOnHandTotalSum:'quantityOnHandTotal'})
             }
 
             if (getRunConsumeData) {
-                List andList = [[terms:[productId:productIdList]], [bool:[must_not:[terms:[statusId:['WeComplete','WeClosed','WeCancelled']]]]]]
-                if (facilityId) andList.add([term: [facilityId:facilityId]])
-                if (estThruDateStr) andList.add([or: [[missing:[field:'estimatedStartDate']],
-                                                      [range:[estimatedStartDate:[lte:estThruDateStr, format:'epoch_millis']]]]])
-
-                ElasticSearchUtil.simpleAggSearch((String) indexName, [(String) runConsumeDocumentName], maxResults,
-                        [bool:[filter:andList]], "productId",
-                        [estimatedConsumeQuantitySum:'estimatedConsumeQuantity', consumeQuantitySum:'issuances.consumeQuantity'],
-                        infoByProductId, ec)
+                const clauses = [notIn('statusId', ['WeComplete', 'WeClosed', 'WeCancelled'])]
+                if (estThruMillis != null) clauses.push(missingOrBefore('estimatedStartDate', estThruMillis))
+                sumsByProduct(runConsumeDocumentName, clauses,
+                        {estimatedConsumeQuantitySum:'estimatedConsumeQuantity', consumeQuantitySum:'issuances.consumeQuantity'})
             }
 
             if (getRunProduceData) {
-                List andList = [[terms:[productId:productIdList]], [bool:[must_not:[terms:[statusId:['WeComplete','WeClosed','WeCancelled']]]]]]
-                if (facilityId) andList.add([term:[facilityId:facilityId]])
-                if (estThruDateStr) andList.add([or: [[missing:[field:'estimatedStartDate']],
-                                                      [range:[estimatedStartDate:[lte:estThruDateStr, format:'epoch_millis']]]]])
-
-                ElasticSearchUtil.simpleAggSearch((String) indexName, [(String) runProduceDocumentName], maxResults,
-                        [bool:[filter:andList]], "productId",
-                        [estimatedProduceQuantitySum:'estimatedProduceQuantity', produceQuantitySum:'receipts.produceQuantity'],
-                        infoByProductId, ec)
+                const clauses = [notIn('statusId', ['WeComplete', 'WeClosed', 'WeCancelled'])]
+                if (estThruMillis != null) clauses.push(missingOrBefore('estimatedStartDate', estThruMillis))
+                sumsByProduct(runProduceDocumentName, clauses,
+                        {estimatedProduceQuantitySum:'estimatedProduceQuantity', produceQuantitySum:'receipts.produceQuantity'})
             }
 
-            // set zero defaults, calculate totals
-            for (Map infoMap in infoByProductId.values()) {
-                // default all values to 0
-                if (infoMap.orderQuantitySum == null) infoMap.orderQuantitySum = 0
-                if (infoMap.quantityReservedSum == null) infoMap.quantityReservedSum = 0
-                if (infoMap.quantityNotAvailableSum == null) infoMap.quantityNotAvailableSum = 0
-                if (infoMap.quantityNotIssuedSum == null) infoMap.quantityNotIssuedSum = 0
-
-                if (infoMap.prodEstQuantitySum == null) infoMap.prodEstQuantitySum = 0
-                if (infoMap.availableToPromiseTotalSum == null) infoMap.availableToPromiseTotalSum = 0
-                if (infoMap.quantityOnHandTotalSum == null) infoMap.quantityOnHandTotalSum = 0
-
-                if (infoMap.estimatedConsumeQuantitySum == null) infoMap.estimatedConsumeQuantitySum = 0
-                if (infoMap.consumeQuantitySum == null) infoMap.consumeQuantitySum = 0
-                if (infoMap.estimatedProduceQuantitySum == null) infoMap.estimatedProduceQuantitySum = 0
-                if (infoMap.produceQuantitySum == null) infoMap.produceQuantitySum = 0
+            const sumNames = ['orderQuantitySum', 'quantityReservedSum', 'quantityNotAvailableSum', 'quantityNotIssuedSum',
+                    'prodEstQuantitySum', 'availableToPromiseTotalSum', 'quantityOnHandTotalSum', 'estimatedConsumeQuantitySum',
+                    'consumeQuantitySum', 'estimatedProduceQuantitySum', 'produceQuantitySum']
+            for (const infoMap of Object.values(infoByProductId)) {
+                for (const name of sumNames) if (infoMap[name] == null) infoMap[name] = 0
 
                 infoMap.orderNotReserved = infoMap.orderQuantitySum - infoMap.quantityReservedSum
-                infoMap.estRunConsumeRemaining = infoMap.estimatedConsumeQuantitySum - infoMap.consumeQuantitySum
-                if (infoMap.estRunConsumeRemaining < 0) infoMap.estRunConsumeRemaining = 0
-                infoMap.estRunProduceRemaining = infoMap.estimatedProduceQuantitySum - infoMap.produceQuantitySum
-                if (infoMap.estRunProduceRemaining < 0) infoMap.estRunProduceRemaining = 0
+                infoMap.estRunConsumeRemaining = Math.max(infoMap.estimatedConsumeQuantitySum - infoMap.consumeQuantitySum, 0)
+                infoMap.estRunProduceRemaining = Math.max(infoMap.estimatedProduceQuantitySum - infoMap.produceQuantitySum, 0)
 
                 infoMap.totalProjected = infoMap.availableToPromiseTotalSum - infoMap.orderNotReserved -
                         infoMap.estRunConsumeRemaining + infoMap.estRunProduceRemaining + infoMap.prodEstQuantitySum
@@ -183,43 +167,35 @@ along with this software (see the LICENSE.md file). If not, see
             https://www.elastic.co/guide/en/elasticsearch/reference/current/search-aggregations-metrics.html
         -->
         <actions><script><![CDATA[
-            import org.elasticsearch.action.search.SearchResponse
-            import org.elasticsearch.script.Script
-            import org.elasticsearch.script.ScriptType
-            import org.elasticsearch.search.aggregations.AggregationBuilder
-            import org.elasticsearch.search.aggregations.AggregationBuilders
-            import org.moqui.elasticsearch.ElasticSearchUtil
+            // aggregation metrics are decimals on Postgres and numbers on OpenSearch; the summaries work in numbers
+            const num = (value) => value == null ? 0 : (typeof value === 'number' ? value : toDecimal(value).toNumber())
+            infoByProductId = {}
+            if (!ec.search.isAvailable()) { ec.message.addMessage("Search is not configured, no price history", "danger"); return }
 
-            String fromDateStr = fromDate ? (fromDate.getTime() as String) : null
-            String thruDateStr = thruDate.getTime() as String
+            const clauses = [{field: {name: 'productId', op: 'in', values: productIdList}},
+                    {field: {name: 'partStatusId', op: 'in', values: ['OrderRejected', 'OrderCancelled'], negate: true}}]
+            if (facilityId) clauses.push({field: {name: 'facilityId', op: 'eq', value: facilityId}})
+            // alternative to allow placedDate to be null: an any of placedDate missing or in range
+            const placedRange = {name: 'placedDate', op: 'range', lte: Number(thruDate)}
+            if (fromDate) placedRange.gte = Number(fromDate)
+            clauses.push({field: placedRange})
 
-            List andList = [[terms: [productId: productIdList]], [bool: [must_not: [terms: [partStatusId: ['OrderRejected', 'OrderCancelled']]]]]]
-            if (facilityId) andList.add([term: [facilityId: facilityId]])
-            // alternative to allow placedDate to be null: if (fromDateStr) andList.add([or: [[missing:[field:'placedDate']], [range:['placedDate':[gte:fromDateStr]]]]])
-            if (fromDateStr) andList.add([range: ['placedDate': [gte: fromDateStr, format: 'epoch_millis']]])
-            andList.add([range: ['placedDate': [lte: thruDateStr, format: 'epoch_millis']]])
-
-            AggregationBuilder aggBuilder = AggregationBuilders.terms("products").field("productId").size(maxResults)
-                    .subAggregation(AggregationBuilders.sum("orderQuantitySum").field("orderQuantity"))
-                    .subAggregation(AggregationBuilders.min("unitAmountMin").field("unitAmount"))
-                    .subAggregation(AggregationBuilders.max("unitAmountMax").field("unitAmount"))
-                    .subAggregation(AggregationBuilders.sum("weightedAmountSum").field("orderItemTotal"))
-
-            SearchResponse searchResponse = ElasticSearchUtil.aggregationSearch((String) indexName, [(String) orderItemDocumentName],
-                    maxResults, [bool: [filter: andList]], aggBuilder, ec)
+            const result = ec.search.aggregate({documentType: orderItemDocumentName, filter: {bool: {all: clauses}},
+                    aggs: {products: {terms: {field: 'productId', size: maxResults}, aggs: {
+                        orderQuantitySum: {sum: {field: 'orderQuantity'}},
+                        unitAmountMin: {min: {field: 'unitAmount'}},
+                        unitAmountMax: {max: {field: 'unitAmount'}},
+                        weightedAmountSum: {sum: {field: 'orderItemTotal'}}}}}})
 
             // consolidate the results into a single Map by productId
-            infoByProductId = [:]
-            for (def bucket in searchResponse.getAggregations().get('products').getBuckets()) {
-                String productId = bucket.getKey()
-                BigDecimal orderQuantitySum = bucket.getAggregations().get('orderQuantitySum').getValue()
-                BigDecimal weightedAmountSum = bucket.getAggregations().get('weightedAmountSum').getValue()
-                BigDecimal weightedAmountAvg = (weightedAmountSum / orderQuantitySum).setScale(2, BigDecimal.ROUND_HALF_UP)
-                addToMapInMap(productId, 'orderQuantitySum', orderQuantitySum, infoByProductId)
-                addToMapInMap(productId, 'unitAmountMin', bucket.getAggregations().get('unitAmountMin').getValue(), infoByProductId)
-                addToMapInMap(productId, 'unitAmountMax', bucket.getAggregations().get('unitAmountMax').getValue(), infoByProductId)
-                addToMapInMap(productId, 'weightedAmountSum', weightedAmountSum, infoByProductId)
-                addToMapInMap(productId, 'weightedAmountAvg', weightedAmountAvg, infoByProductId)
+            for (const bucket of result.products.buckets) {
+                const orderQuantitySum = num(bucket.orderQuantitySum)
+                const weightedAmountSum = num(bucket.weightedAmountSum)
+                // rounded to 2 places, half up; zero when there is no quantity
+                const weightedAmountAvg = orderQuantitySum === 0 ? 0 : Math.round((weightedAmountSum / orderQuantitySum) * 100) / 100
+                infoByProductId[bucket.key] = {orderQuantitySum: orderQuantitySum, unitAmountMin: num(bucket.unitAmountMin),
+                        unitAmountMax: num(bucket.unitAmountMax), weightedAmountSum: weightedAmountSum,
+                        weightedAmountAvg: weightedAmountAvg}
             }
         ]]></script></actions>
     </service>

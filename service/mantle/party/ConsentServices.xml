@@ -1,0 +1,1452 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- Consent and unsubscribe. Consent lives on the data Mantle already has, with a history added:
+        - whether an address may be solicited is PartyContactMech.allowSolicitation;
+        - list membership and unsubscription are ContactListParty statuses (CLPT_ACCEPTED and CLPT_IN_USE are
+          subscribed, CLPT_PENDING waits for an opt-in, CLPT_UNSUBS_PENDING for an unsubscribe's confirmation,
+          CLPT_UNSUBSCRIBED is out);
+        - mantle.party.PartyConsent records each grant (PconGranted) and withdrawal (PconWithdrawn) with its purpose
+          (PcpMarketingEmail, PcpSms, PcpPhone, PcpDataProcessing), source (PcsForm, PcsImport, PcsEmailLink, PcsStaff,
+          PcsApi), date, evidence and who recorded it. Rows are history: the current state of a purpose for an address (or
+          for the party, with no contactMechId) is its latest row without a contactListId; a row with a contactListId is
+          that list's subscription history.
+
+        The consent lists are those of types that send outside the organization (Marketing, Newsletter, Announcement, or
+        no type). A mailbox (type MAILBOX) is membership, not consent: it counts only once it has members by email (a
+        current member row with a preferredContactMechId, which the later mailbox email bridge sets).
+
+        A list requires confirmation of an unsubscribe when it has a current ContactListEmail of type CONT_UNSUB_VER
+        (Unsubscribe Verify): the unsubscribe then goes to CLPT_UNSUBS_PENDING with a new ContactListParty.optInVerifyCode,
+        and the verification email (send#UnsubscribeVerifyEmail, the row's emailTemplateId) goes to the address with a link
+        to the page carrying the code (/u/<new token>?verifyCode=<code>); a verifyCode that matches, a signed-in user's
+        confirmed=true, or a one-click POST completes it. The withdrawal is recorded when it is asked for.
+
+        Unsubscribe links: create#UnsubscribeToken makes a random token (ec.user.randomString(32): 32 URL-safe characters,
+        192 bits) for a party on a list, usually one per message sent, and keeps only its hash in
+        mantle.marketing.contact.ContactListToken (tokenHash, ec.user.singleUseCodeHash), so the stored rows give no working
+        links; thruDate revokes or expires one. The public page /u/<token> (a token-route whose check is
+        check#UnsubscribeToken: a known token is let through, an ended one only to say so) reads resolve#UnsubscribeToken
+        (read only, so a mail scanner fetching the link changes nothing) and posts unsubscribe#ContactListParty or
+        apply#UnsubscribePreferences. These run for an anonymous visitor (authenticate anonymous-view and anonymous-all,
+        which let their entity operations run without a login) and check the token before they read anything else: an
+        unknown, revoked or expired token gets the one error "This unsubscribe link is not valid or has expired" and no
+        data, and they answer only about the token's party and the lists of the token list's organization.
+
+        The RFC 8058 one-click POST (List-Unsubscribe-Post: List-Unsubscribe=One-Click) goes to the List-Unsubscribe URL,
+        the page's own /u/<token>: the route's post-transition runs a transition of the route's screen for a POST there,
+        after the token check (/u/<token>/oneClick, the List-Unsubscribe of the messages sent before, runs it too), which
+        calls unsubscribe#ContactListParty({token: '<token from the URL>', listUnsubscribe: 'One-Click'}) with the
+        form field List-Unsubscribe: it unsubscribes the party from the token's list, CLPT_UNSUBSCRIBED with no
+        confirmation step, and records the withdrawal with source PcsEmailLink; a second POST changes nothing. The header
+        values come from create#UnsubscribeToken (listUnsubscribeHeaders); mantle.marketing.ContactListServices
+        send#ContactListEmail makes one per message it sends. -->
+
+    <service verb="store" noun="PartyConsent">
+        <description>
+            Records a grant (PconGranted) or withdrawal (PconWithdrawn) of consent for a purpose: for an address
+            (contactMechId, one of the party's), for the party (none), or as a list subscription change (contactListId).
+            Each call is a new PartyConsent row. For a marketing purpose of an address (PcpMarketingEmail for an email
+            address; PcpSms or PcpPhone for a phone number) without a list, the address's allowSolicitation is set to
+            match: Y while any of those purposes is granted on it, else N, on each of its current PartyContactMech rows
+            through ContactServices.store#PartyContactMech. The source defaults to PcsStaff for a signed-in user, else
+            PcsApi. A signed-in user does not record consent for another user's personal contact.
+        </description>
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="purposeEnumId" required="true"><description>PartyConsentPurpose</description></parameter>
+            <parameter name="statusId" required="true"><description>PconGranted or PconWithdrawn</description></parameter>
+            <parameter name="contactMechId"/>
+            <parameter name="contactListId"/>
+            <parameter name="consentDate" type="Timestamp"><description>Defaults to now; an import may give the original date</description></parameter>
+            <parameter name="sourceEnumId"><description>PartyConsentSource</description></parameter>
+            <parameter name="evidenceText"/>
+            <parameter name="comments"/>
+            <parameter name="updateSolicitation" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="partyConsentId"/>
+            <parameter name="allowSolicitation"><description>The address's new allowSolicitation, when it follows this change</description></parameter>
+            <parameter name="solicitationUpdatedCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            // newest first: by consentDate, then by id (sequenced, so a later row has the larger id)
+            const idOrder = (a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)
+            const newestFirst = (a, b) => ((toMillis(b.consentDate) ?? 0) - (toMillis(a.consentDate) ?? 0)) ||
+                    idOrder(String(b.partyConsentId), String(a.partyConsentId))
+            // the purposes that solicit through each kind of address
+            const solicitationPurposes = {CmtEmailAddress: ['PcpMarketingEmail'], CmtTelecomNumber: ['PcpSms', 'PcpPhone']}
+            partyConsentId = null
+            allowSolicitation = null
+            solicitationUpdatedCount = 0
+            const userId = ec.user.userId || null
+            const enumIn = (enumId, enumTypeId) => !!enumId && ec.entity.find('moqui.basic.Enumeration').condition('enumId', enumId)
+                    .condition('enumTypeId', enumTypeId).useCache(true).one() != null
+            if (!enumIn(purposeEnumId, 'PartyConsentPurpose')) { ec.message.addError(`Unknown consent purpose ${purposeEnumId}`); return }
+            if (statusId !== 'PconGranted' && statusId !== 'PconWithdrawn') {
+                ec.message.addError(`A consent is PconGranted or PconWithdrawn, not ${statusId}`); return }
+            if (!sourceEnumId) sourceEnumId = userId ? 'PcsStaff' : 'PcsApi'
+            if (!enumIn(sourceEnumId, 'PartyConsentSource')) { ec.message.addError(`Unknown consent source ${sourceEnumId}`); return }
+            const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+            // a personal contact is its owner's; the anonymous unsubscribe services run with no user
+            if (party == null || (userId && party.privateOwnerUserId && party.privateOwnerUserId !== userId)) {
+                ec.message.addError(`Party ${partyId} not found`); return }
+            let contactMech = null
+            if (contactMechId) {
+                if (ec.entity.find('mantle.party.contact.PartyContactMech').condition({partyId: partyId, contactMechId: contactMechId}).count() === 0) {
+                    ec.message.addError(`Contact information ${contactMechId} is not party ${partyId}'s`); return }
+                contactMech = ec.entity.find('mantle.party.contact.ContactMech').condition('contactMechId', contactMechId).one()
+            }
+            if (contactListId && ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', contactListId).one() == null) {
+                ec.message.addError(`Contact list ${contactListId} not found`); return }
+
+            partyConsentId = ec.service.sync().name('create#mantle.party.PartyConsent').parameters({partyId: partyId,
+                contactMechId: contactMechId || null, purposeEnumId: purposeEnumId, statusId: statusId,
+                consentDate: consentDate || ec.user.nowTimestamp, sourceEnumId: sourceEnumId, evidenceText: evidenceText || null,
+                contactListId: contactListId || null, userId: userId, comments: comments || null}).call()?.partyConsentId ?? null
+            if (ec.message.hasError()) return
+
+            // allowSolicitation follows the marketing purposes of the address
+            if (!updateSolicitation || contactMech == null || contactListId) return
+            const purposes = solicitationPurposes[contactMech.contactMechTypeEnumId] || []
+            if (!purposes.includes(purposeEnumId)) return
+            const rows = Array.from(ec.entity.find('mantle.party.PartyConsent').condition('partyId', partyId)
+                    .condition('contactMechId', contactMechId).condition('purposeEnumId', 'in', purposes).condition('contactListId', null).list())
+            rows.sort(newestFirst)
+            const latest = {}
+            for (const row of rows) if (!latest[row.purposeEnumId]) latest[row.purposeEnumId] = row
+            allowSolicitation = Object.values(latest).some((row) => row.statusId === 'PconGranted') ? 'Y' : 'N'
+            const pcms = Array.from(ec.entity.find('mantle.party.contact.PartyContactMech').condition('partyId', partyId)
+                    .condition('contactMechId', contactMechId).condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list())
+            const done = new Set()
+            for (const pcm of pcms) {
+                if (pcm.allowSolicitation === allowSolicitation || done.has(pcm.contactMechPurposeId)) continue
+                done.add(pcm.contactMechPurposeId)
+                ec.service.sync().name('mantle.party.ContactServices.store#PartyContactMech').parameters({partyId: partyId,
+                    contactMechId: contactMechId, contactMechPurposeId: pcm.contactMechPurposeId, allowSolicitation: allowSolicitation}).call()
+                if (ec.message.hasError()) return
+                solicitationUpdatedCount++
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="PartyConsentState">
+        <description>
+            A party's consent state, for the Consent edit dialog, a Customer 360 box and the unsubscribe page:
+            consentList, the current state of each purpose per address and for the party (the latest row without a list);
+            addressList, the party's current email addresses and phone numbers (and earlier ones that have consent rows)
+            with their allowSolicitation and consentList; listList, the consent lists the party has a row on (not
+            mailboxes unless they have members by email) with the party's status (its latest current row, else its latest
+            row), subscribed, and the list's last consent change; grantedPurposeEnumIds. sameOwnerAsListId limits the lists
+            to those of that list's organization (ownerPartyId, an empty one matching only empty ones).
+        </description>
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="sameOwnerAsListId"/>
+            <parameter name="includeArchived" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="consentList" type="List"><parameter name="consent" type="Map"/></parameter>
+            <parameter name="addressList" type="List"><parameter name="address" type="Map"/></parameter>
+            <parameter name="listList" type="List"><parameter name="list" type="Map"/></parameter>
+            <parameter name="grantedPurposeEnumIds" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const CLP = 'mantle.marketing.contact.ContactListParty'
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            const idOrder = (a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)
+            const newestFirst = (a, b) => ((toMillis(b.consentDate) ?? 0) - (toMillis(a.consentDate) ?? 0)) ||
+                    idOrder(String(b.partyConsentId), String(a.partyConsentId))
+            consentList = []; addressList = []; listList = []; grantedPurposeEnumIds = []
+            const userId = ec.user.userId || null
+            const nowMillis = toMillis(ec.user.nowTimestamp)
+            const isCurrent = (row) => (row.fromDate == null || toMillis(row.fromDate) <= nowMillis) &&
+                    (row.thruDate == null || toMillis(row.thruDate) > nowMillis)
+            const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+            if (party == null || (userId && party.privateOwnerUserId && party.privateOwnerUserId !== userId)) {
+                ec.message.addError(`Party ${partyId} not found`); return }
+
+            const entry = (row) => ({partyConsentId: row.partyConsentId, contactMechId: row.contactMechId ?? null,
+                purposeEnumId: row.purposeEnumId, statusId: row.statusId, granted: row.statusId === 'PconGranted',
+                consentDate: row.consentDate ?? null, sourceEnumId: row.sourceEnumId ?? null, evidenceText: row.evidenceText ?? null,
+                contactListId: row.contactListId ?? null, userId: row.userId ?? null, comments: row.comments ?? null})
+            const rows = Array.from(ec.entity.find('mantle.party.PartyConsent').condition('partyId', partyId).list())
+            rows.sort(newestFirst)
+            const current = new Map()
+            const lastByList = new Map()
+            for (const row of rows) {
+                if (row.contactListId) { if (!lastByList.has(row.contactListId)) lastByList.set(row.contactListId, row); continue }
+                const key = `${row.contactMechId || ''}|${row.purposeEnumId}`
+                if (!current.has(key)) current.set(key, row)
+            }
+            consentList = Array.from(current.values()).map(entry)
+            grantedPurposeEnumIds = Array.from(new Set(consentList.filter((consent) => consent.granted).map((consent) => consent.purposeEnumId)))
+
+            // the addresses: current email addresses and phone numbers, then earlier ones with consent rows
+            const phoneText = (tn) => [tn.countryCode ? '+' + tn.countryCode : null, tn.areaCode, tn.contactNumber].filter((part) => part).join(' ')
+            const addresses = new Map()
+            const currentDate = cf.makeConditionDate('fromDate', 'thruDate', null)
+            for (const info of ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition('partyId', partyId).condition(currentDate)
+                    .condition('contactMechTypeEnumId', 'in', ['CmtEmailAddress', 'CmtTelecomNumber']).orderBy('fromDate').list()) {
+                let address = addresses.get(info.contactMechId)
+                if (address == null) {
+                    address = {contactMechId: info.contactMechId, contactMechTypeEnumId: info.contactMechTypeEnumId,
+                        addressText: info.infoString ?? null, contactMechPurposeIds: [], allowSolicitation: null, isCurrent: true, consentList: []}
+                    addresses.set(info.contactMechId, address)
+                }
+                address.contactMechPurposeIds.push(info.contactMechPurposeId)
+                // Y on any row wins, then N
+                if (info.allowSolicitation === 'Y' || (info.allowSolicitation === 'N' && address.allowSolicitation !== 'Y'))
+                    address.allowSolicitation = info.allowSolicitation
+            }
+            for (const consent of consentList) {
+                if (!consent.contactMechId || addresses.has(consent.contactMechId)) continue
+                const mech = ec.entity.find('mantle.party.contact.ContactMech').condition('contactMechId', consent.contactMechId).one()
+                addresses.set(consent.contactMechId, {contactMechId: consent.contactMechId, contactMechTypeEnumId: mech?.contactMechTypeEnumId ?? null,
+                    addressText: mech?.infoString ?? null, contactMechPurposeIds: [], allowSolicitation: null, isCurrent: false, consentList: []})
+            }
+            for (const address of addresses.values()) {
+                if (address.contactMechTypeEnumId === 'CmtTelecomNumber') {
+                    const tn = ec.entity.find('mantle.party.contact.TelecomNumber').condition('contactMechId', address.contactMechId).one()
+                    if (tn != null) address.addressText = phoneText(tn)
+                }
+                address.consentList = consentList.filter((consent) => consent.contactMechId === address.contactMechId)
+            }
+            addressList = Array.from(addresses.values())
+
+            // the consent lists the party has a row on
+            const memberRows = Array.from(ec.entity.find(CLP).condition('partyId', partyId).orderBy('-fromDate').list())
+            const listIds = Array.from(new Set(memberRows.map((row) => row.contactListId)))
+            if (listIds.length === 0) return
+            let ownerFilter = undefined
+            if (sameOwnerAsListId) {
+                const ownerList = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', sameOwnerAsListId).one()
+                ownerFilter = ownerList?.ownerPartyId ?? null
+            }
+            // a mailbox is membership, not consent, until it has members by email
+            const emailMembers = (contactListId) => ec.entity.find(CLP).condition('contactListId', contactListId)
+                    .condition('preferredContactMechId', 'is-not-null', null).condition(currentDate).count() > 0
+            const lists = Array.from(ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', 'in', listIds)
+                    .orderBy('contactListName').list())
+            for (const list of lists) {
+                if (list.contactListTypeEnumId === 'MAILBOX' && !emailMembers(list.contactListId)) continue
+                if (ownerFilter !== undefined && (list.ownerPartyId ?? null) !== ownerFilter) continue
+                const isArchived = list.archivedDate != null && toMillis(list.archivedDate) <= nowMillis
+                if (isArchived && !includeArchived) continue
+                const mine = memberRows.filter((row) => row.contactListId === list.contactListId)
+                const row = mine.find(isCurrent) || mine[0]
+                const last = lastByList.get(list.contactListId)
+                listList.push({contactListId: list.contactListId, contactListName: list.contactListName ?? null,
+                    description: list.description ?? null, contactListTypeEnumId: list.contactListTypeEnumId ?? null,
+                    contactMechTypeEnumId: list.contactMechTypeEnumId ?? null, ownerPartyId: list.ownerPartyId ?? null,
+                    isArchived: isArchived, statusId: row.statusId ?? null, isCurrent: isCurrent(row),
+                    subscribed: isCurrent(row) && ['CLPT_ACCEPTED', 'CLPT_IN_USE'].includes(row.statusId),
+                    unsubscribePending: isCurrent(row) && row.statusId === 'CLPT_UNSUBS_PENDING',
+                    fromDate: row.fromDate ?? null, thruDate: row.thruDate ?? null, preferredContactMechId: row.preferredContactMechId ?? null,
+                    lastConsentStatusId: last?.statusId ?? null, lastChangeDate: last?.consentDate ?? null, lastSourceEnumId: last?.sourceEnumId ?? null})
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="PartyConsentHistory">
+        <description>
+            The consent audit of a party, newest first: when, purpose, granted or withdrawn, source, evidence, the address
+            and list, and who recorded it, with the descriptions; by address, purpose and list, a page at a time.
+        </description>
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="contactMechId"/>
+            <parameter name="purposeEnumId"/>
+            <parameter name="contactListId"/>
+            <parameter name="pageIndex" type="Integer" default="0"/>
+            <parameter name="pageSize" type="Integer" default="50"/>
+            <parameter name="pageNoLimit" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="historyList" type="List"><parameter name="history" type="Map"/></parameter>
+            <parameter name="historyListCount" type="Integer"/>
+            <parameter name="historyListPageIndex" type="Integer"/>
+            <parameter name="historyListPageSize" type="Integer"/>
+            <parameter name="historyListPageMaxIndex" type="Integer"/>
+            <parameter name="historyListPageRangeLow" type="Integer"/>
+            <parameter name="historyListPageRangeHigh" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            const idOrder = (a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)
+            const newestFirst = (a, b) => ((toMillis(b.consentDate) ?? 0) - (toMillis(a.consentDate) ?? 0)) ||
+                    idOrder(String(b.partyConsentId), String(a.partyConsentId))
+            historyList = []
+            historyListCount = 0
+            const userId = ec.user.userId || null
+            const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+            if (party == null || (userId && party.privateOwnerUserId && party.privateOwnerUserId !== userId)) {
+                ec.message.addError(`Party ${partyId} not found`); return }
+            let find = ec.entity.find('mantle.party.PartyConsent').condition('partyId', partyId)
+            if (contactMechId) find = find.condition('contactMechId', contactMechId)
+            if (purposeEnumId) find = find.condition('purposeEnumId', purposeEnumId)
+            if (contactListId) find = find.condition('contactListId', contactListId)
+            const rows = Array.from(find.list())
+            rows.sort(newestFirst)
+            historyListCount = rows.length
+            const pageIndexInt = pageNoLimit ? 0 : Math.max(0, Math.trunc(Number(pageIndex || 0)))
+            const pageSizeInt = Math.max(1, Math.trunc(Number(pageSize || 50)))
+            historyListPageIndex = pageIndexInt
+            historyListPageSize = pageNoLimit ? Math.max(1, historyListCount) : pageSizeInt
+            historyListPageMaxIndex = Math.max(0, Math.ceil(historyListCount / historyListPageSize) - 1)
+            historyListPageRangeLow = historyListCount ? pageIndexInt * historyListPageSize + 1 : 0
+            historyListPageRangeHigh = Math.min(historyListCount, (pageIndexInt + 1) * historyListPageSize)
+            const page = pageNoLimit ? rows : rows.slice(pageIndexInt * pageSizeInt, (pageIndexInt + 1) * pageSizeInt)
+
+            const enumText = (enumId) => enumId ? (ec.entity.find('moqui.basic.Enumeration').condition('enumId', enumId).useCache(true).one()?.description ?? enumId) : null
+            const statusText = (statusId) => statusId ? (ec.entity.find('moqui.basic.StatusItem').condition('statusId', statusId).useCache(true).one()?.description ?? statusId) : null
+            const phoneText = (tn) => [tn.countryCode ? '+' + tn.countryCode : null, tn.areaCode, tn.contactNumber].filter((part) => part).join(' ')
+            const addressTexts = new Map()
+            const addressText = (id) => {
+                if (!id) return null
+                if (!addressTexts.has(id)) {
+                    const mech = ec.entity.find('mantle.party.contact.ContactMech').condition('contactMechId', id).one()
+                    let text = mech?.infoString ?? null
+                    if (mech?.contactMechTypeEnumId === 'CmtTelecomNumber') {
+                        const tn = ec.entity.find('mantle.party.contact.TelecomNumber').condition('contactMechId', id).one()
+                        if (tn != null) text = phoneText(tn)
+                    }
+                    addressTexts.set(id, text)
+                }
+                return addressTexts.get(id)
+            }
+            const listNames = new Map()
+            const listName = (id) => {
+                if (!id) return null
+                if (!listNames.has(id)) listNames.set(id, ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', id).one()?.contactListName ?? id)
+                return listNames.get(id)
+            }
+            const userNames = new Map()
+            const userName = (id) => {
+                if (!id) return null
+                if (!userNames.has(id)) {
+                    const account = ec.entity.find('moqui.security.UserAccount').condition('userId', id).useCache(true).one()
+                    userNames.set(id, account?.userFullName || account?.username || id)
+                }
+                return userNames.get(id)
+            }
+            historyList = page.map((row) => ({partyConsentId: row.partyConsentId, consentDate: row.consentDate ?? null,
+                purposeEnumId: row.purposeEnumId, purposeDescription: enumText(row.purposeEnumId), statusId: row.statusId,
+                statusDescription: statusText(row.statusId), granted: row.statusId === 'PconGranted', sourceEnumId: row.sourceEnumId ?? null,
+                sourceDescription: enumText(row.sourceEnumId), evidenceText: row.evidenceText ?? null, comments: row.comments ?? null,
+                contactMechId: row.contactMechId ?? null, addressText: addressText(row.contactMechId), contactListId: row.contactListId ?? null,
+                contactListName: listName(row.contactListId), userId: row.userId ?? null, userName: userName(row.userId)}))
+        ]]></script></actions>
+    </service>
+
+    <service verb="find" noun="Consents">
+        <description>
+            The Consent list: one row per party with consent data (a PartyConsent row, a row on a consent list, or a
+            current email address or phone number with allowSolicitation set), those the user may see (not another
+            user's personal contacts, not merged parties): its name, primary email (EmailPrimary first) and phone
+            (PhonePrimary, then PhoneMobile, first) with their allowSolicitation, its consent lists with its status on
+            each, the purposes granted and withdrawn (current states), and the last change with its source.
+            Filters: text (part of the name, an email, a phone number or the party id); contactListId (on that list);
+            statusId, a ContactListParty status (CLPT_*: on contactListId, or on any consent list) or a consent status
+            (PconGranted, PconWithdrawn: of purposeEnumId, or of any purpose); purposeEnumId (granted, unless statusId
+            says withdrawn); changedFromDate and changedThruDate (a consent change in the period); allowSolicitation (Y or
+            N on any current address). A page at a time, or with exportCsv every match as CSV text (csvText).
+        </description>
+        <in-parameters>
+            <parameter name="text"/>
+            <parameter name="contactListId"/>
+            <parameter name="statusId"/>
+            <parameter name="purposeEnumId"/>
+            <parameter name="changedFromDate" type="Timestamp"/>
+            <parameter name="changedThruDate" type="Timestamp"/>
+            <parameter name="allowSolicitation"/>
+            <parameter name="orderByField" default-value="-lastChangeDate"><description>partyName, lastChangeDate, emailAddress
+                or partyId, with - for descending</description></parameter>
+            <parameter name="pageIndex" type="Integer" default="0"/>
+            <parameter name="pageSize" type="Integer" default="50"/>
+            <parameter name="pageNoLimit" type="Boolean" default="false"/>
+            <parameter name="exportCsv" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="consentList" type="List"><parameter name="consent" type="Map"/></parameter>
+            <parameter name="consentListCount" type="Integer"/>
+            <parameter name="consentListPageIndex" type="Integer"/>
+            <parameter name="consentListPageSize" type="Integer"/>
+            <parameter name="consentListPageMaxIndex" type="Integer"/>
+            <parameter name="consentListPageRangeLow" type="Integer"/>
+            <parameter name="consentListPageRangeHigh" type="Integer"/>
+            <parameter name="csvText"/>
+            <parameter name="fileName"/>
+            <parameter name="contentType"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const CLP = 'mantle.marketing.contact.ContactListParty'
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            const idOrder = (a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)
+            const newestFirst = (a, b) => ((toMillis(b.consentDate) ?? 0) - (toMillis(a.consentDate) ?? 0)) ||
+                    idOrder(String(b.partyConsentId), String(a.partyConsentId))
+            consentList = []
+            consentListCount = 0
+            csvText = null
+            const userId = ec.user.userId || null
+            const nowMillis = toMillis(ec.user.nowTimestamp)
+            const currentDate = cf.makeConditionDate('fromDate', 'thruDate', null)
+            const isCurrent = (row) => (row.fromDate == null || toMillis(row.fromDate) <= nowMillis) &&
+                    (row.thruDate == null || toMillis(row.thruDate) > nowMillis)
+            const addressTypes = ['CmtEmailAddress', 'CmtTelecomNumber']
+            const pageIndexInt = pageNoLimit || exportCsv ? 0 : Math.max(0, Math.trunc(Number(pageIndex || 0)))
+            const pageSizeInt = Math.max(1, Math.trunc(Number(pageSize || 50)))
+            const listStatus = statusId && String(statusId).startsWith('CLPT_') ? statusId : null
+            const consentStatus = statusId && !listStatus ? statusId : null
+
+            // the consent lists: every list but a mailbox without members by email
+            const allLists = Array.from(ec.entity.find('mantle.marketing.contact.ContactList').list())
+            const mailboxIds = allLists.filter((list) => list.contactListTypeEnumId === 'MAILBOX').map((list) => list.contactListId)
+            const emailMailboxIds = new Set(mailboxIds.length ? Array.from(ec.entity.find(CLP).condition('contactListId', 'in', mailboxIds)
+                    .condition('preferredContactMechId', 'is-not-null', null).condition(currentDate).selectField('contactListId')
+                    .distinct(true).list()).map((row) => row.contactListId) : [])
+            const listById = new Map(allLists.filter((list) => list.contactListTypeEnumId !== 'MAILBOX' || emailMailboxIds.has(list.contactListId))
+                    .map((list) => [list.contactListId, list]))
+            const consentListIds = Array.from(listById.keys())
+            if (contactListId && !listById.has(contactListId)) return
+
+            // the candidate parties, narrowed by the filters a query can apply
+            let candidates = null
+            const narrow = (ids) => {
+                const set = new Set(ids)
+                candidates = candidates == null ? set : new Set(Array.from(candidates).filter((id) => set.has(id)))
+            }
+            const partyIdsOf = (find) => Array.from(find.selectField('partyId').distinct(true).list()).map((row) => row.partyId)
+            if (contactListId) narrow(partyIdsOf(ec.entity.find(CLP).condition('contactListId', contactListId)))
+            if (changedFromDate || changedThruDate) {
+                let find = ec.entity.find('mantle.party.PartyConsent')
+                if (changedFromDate) find = find.condition('consentDate', 'greater-equals', new Date(toMillis(changedFromDate)))
+                if (changedThruDate) find = find.condition('consentDate', 'less', new Date(toMillis(changedThruDate)))
+                narrow(partyIdsOf(find))
+            }
+            if (allowSolicitation) narrow(partyIdsOf(ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition(currentDate)
+                    .condition('contactMechTypeEnumId', 'in', addressTypes).condition('allowSolicitation', allowSolicitation)))
+            if (candidates == null) {
+                candidates = new Set(partyIdsOf(ec.entity.find('mantle.party.PartyConsent')))
+                if (consentListIds.length) for (const id of partyIdsOf(ec.entity.find(CLP).condition('contactListId', 'in', consentListIds))) candidates.add(id)
+                for (const id of partyIdsOf(ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition(currentDate)
+                        .condition('contactMechTypeEnumId', 'in', addressTypes).condition('allowSolicitation', 'is-not-null', null))) candidates.add(id)
+            }
+            const candidateIds = Array.from(candidates)
+
+            // each candidate's row, read a chunk of parties at a time
+            const phoneText = (tn) => [tn.countryCode ? '+' + tn.countryCode : null, tn.areaCode, tn.contactNumber].filter((part) => part).join(' ')
+            const phoneRank = ['PhonePrimary', 'PhoneMobile']
+            const rank = (purposeId) => { const index = phoneRank.indexOf(purposeId); return index < 0 ? phoneRank.length : index }
+            const group = (list, key) => {
+                const map = new Map()
+                for (const item of list) { const id = item[key]; if (!map.has(id)) map.set(id, []); map.get(id).push(item) }
+                return map
+            }
+            const rows = []
+            for (let start = 0; start < candidateIds.length; start += 200) {
+                const ids = candidateIds.slice(start, start + 200)
+                const parties = Array.from(ec.entity.find('mantle.party.PartyDetail').condition('partyId', 'in', ids).list())
+                const infosByParty = group(Array.from(ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition('partyId', 'in', ids)
+                        .condition(currentDate).condition('contactMechTypeEnumId', 'in', addressTypes).orderBy('fromDate').list()), 'partyId')
+                const phonesByParty = group(Array.from(ec.entity.find('mantle.party.contact.PartyContactMechTelecomNumber').condition('partyId', 'in', ids)
+                        .condition(currentDate).orderBy('fromDate').list()), 'partyId')
+                const consentsByParty = group(Array.from(ec.entity.find('mantle.party.PartyConsent').condition('partyId', 'in', ids).list()), 'partyId')
+                const membersByParty = consentListIds.length ? group(Array.from(ec.entity.find(CLP).condition('partyId', 'in', ids)
+                        .condition('contactListId', 'in', consentListIds).orderBy('-fromDate').list()), 'partyId') : new Map()
+                for (const party of parties) {
+                    if (party.privateOwnerUserId && party.privateOwnerUserId !== userId) continue
+                    if (party.mergedToPartyId) continue
+                    const infos = infosByParty.get(party.partyId) || []
+                    const emails = infos.filter((info) => info.contactMechTypeEnumId === 'CmtEmailAddress' && info.infoString)
+                            .sort((a, b) => (a.contactMechPurposeId === 'EmailPrimary' ? 0 : 1) - (b.contactMechPurposeId === 'EmailPrimary' ? 0 : 1))
+                    const phones = (phonesByParty.get(party.partyId) || []).slice().sort((a, b) => rank(a.contactMechPurposeId) - rank(b.contactMechPurposeId))
+                    const flagOf = (contactMechId) => {
+                        const flags = infos.filter((info) => info.contactMechId === contactMechId).map((info) => info.allowSolicitation)
+                        return flags.includes('Y') ? 'Y' : flags.includes('N') ? 'N' : null
+                    }
+                    const consents = (consentsByParty.get(party.partyId) || []).slice().sort(newestFirst)
+                    const current = new Map()
+                    for (const consent of consents) {
+                        if (consent.contactListId) continue
+                        const key = `${consent.contactMechId || ''}|${consent.purposeEnumId}`
+                        if (!current.has(key)) current.set(key, consent)
+                    }
+                    const states = Array.from(current.values())
+                    const granted = Array.from(new Set(states.filter((state) => state.statusId === 'PconGranted').map((state) => state.purposeEnumId)))
+                    const withdrawn = Array.from(new Set(states.filter((state) => state.statusId === 'PconWithdrawn' && !granted.includes(state.purposeEnumId))
+                            .map((state) => state.purposeEnumId)))
+                    const members = membersByParty.get(party.partyId) || []
+                    const lists = []
+                    for (const [id, listRows] of group(members, 'contactListId')) {
+                        const row = listRows.find(isCurrent) || listRows[0]
+                        const list = listById.get(id)
+                        lists.push({contactListId: id, contactListName: list?.contactListName ?? id, statusId: row.statusId ?? null,
+                            subscribed: isCurrent(row) && ['CLPT_ACCEPTED', 'CLPT_IN_USE'].includes(row.statusId)})
+                    }
+                    lists.sort((a, b) => String(a.contactListName).localeCompare(String(b.contactListName)))
+                    const last = consents[0] || null
+                    const email = emails[0] || null
+                    const phone = phones[0] || null
+                    rows.push({partyId: party.partyId, partyTypeEnumId: party.partyTypeEnumId ?? null,
+                        partyName: ec.resource.expand('PartyFullNameTemplate', '', party).trim() || party.partyId,
+                        emailAddress: email?.infoString ?? null, emailContactMechId: email?.contactMechId ?? null,
+                        emailAllowSolicitation: email ? flagOf(email.contactMechId) : null,
+                        phoneNumber: phone ? phoneText(phone) : null, phoneContactMechId: phone?.contactMechId ?? null,
+                        phoneAllowSolicitation: phone ? flagOf(phone.contactMechId) : null,
+                        listList: lists, grantedPurposeEnumIds: granted, withdrawnPurposeEnumIds: withdrawn,
+                        lastChangeDate: last?.consentDate ?? null, lastSourceEnumId: last?.sourceEnumId ?? null, lastStatusId: last?.statusId ?? null,
+                        lastPurposeEnumId: last?.purposeEnumId ?? null, lastContactListId: last?.contactListId ?? null,
+                        _search: [party.partyId, ec.resource.expand('PartyFullNameTemplate', '', party), party.organizationName,
+                            ...infos.map((info) => info.infoString), ...(phonesByParty.get(party.partyId) || []).map((tn) =>
+                                `${tn.countryCode ?? ''}${tn.areaCode ?? ''}${tn.contactNumber ?? ''}`)].filter((part) => part).join(' ').toLowerCase(),
+                        _flags: infos.map((info) => info.allowSolicitation), _states: states})
+                }
+            }
+
+            // the filters on what the rows hold
+            const needle = text ? String(text).trim().toLowerCase() : ''
+            const needleDigits = needle.replace(/[^0-9]/g, '')
+            const matches = rows.filter((row) => {
+                if (needle && !row._search.includes(needle) && !(needleDigits.length >= 3 && needleDigits === needle.replace(/[\s()+.-]/g, '')
+                        && row._search.replace(/[^0-9 ]/g, '').includes(needleDigits))) return false
+                if (contactListId && !row.listList.some((list) => list.contactListId === contactListId)) return false
+                if (listStatus && !row.listList.some((list) => (!contactListId || list.contactListId === contactListId) && list.statusId === listStatus)) return false
+                if (consentStatus) {
+                    if (purposeEnumId) {
+                        const state = consentStatus === 'PconGranted' ? row.grantedPurposeEnumIds.includes(purposeEnumId)
+                                : row.withdrawnPurposeEnumIds.includes(purposeEnumId)
+                        if (!state) return false
+                    } else if (!row._states.some((state) => state.statusId === consentStatus)) return false
+                } else if (purposeEnumId && !row.grantedPurposeEnumIds.includes(purposeEnumId)) return false
+                if (allowSolicitation && !row._flags.includes(allowSolicitation)) return false
+                return true
+            })
+
+            // order, then a page
+            const descending = String(orderByField || '').startsWith('-')
+            const sortField = String(orderByField || '-lastChangeDate').replace(/^[-+^]+/, '') || 'lastChangeDate'
+            const sortValue = (row) => sortField === 'lastChangeDate' ? (toMillis(row.lastChangeDate) ?? -Infinity)
+                    : String(row[sortField] ?? '').toLowerCase()
+            matches.sort((a, b) => {
+                const left = sortValue(a), right = sortValue(b)
+                const order = left < right ? -1 : left > right ? 1 : String(a.partyName).localeCompare(String(b.partyName))
+                return descending ? -order : order
+            })
+            for (const row of matches) { delete row._search; delete row._flags; delete row._states }
+            consentListCount = matches.length
+            const pageAll = pageNoLimit || exportCsv
+            consentListPageIndex = pageIndexInt
+            consentListPageSize = pageAll ? Math.max(1, consentListCount) : pageSizeInt
+            consentListPageMaxIndex = Math.max(0, Math.ceil(consentListCount / consentListPageSize) - 1)
+            consentListPageRangeLow = consentListCount ? pageIndexInt * consentListPageSize + 1 : 0
+            consentListPageRangeHigh = Math.min(consentListCount, (pageIndexInt + 1) * consentListPageSize)
+            consentList = pageAll ? matches : matches.slice(pageIndexInt * pageSizeInt, (pageIndexInt + 1) * pageSizeInt)
+            if (!exportCsv) return
+
+            // the CSV export: every match, with descriptions, dates as ISO time stamps in UTC
+            const enumText = (enumId) => enumId ? (ec.entity.find('moqui.basic.Enumeration').condition('enumId', enumId).useCache(true).one()?.description ?? enumId) : ''
+            const statusText = (id) => id ? (ec.entity.find('moqui.basic.StatusItem').condition('statusId', id).useCache(true).one()?.description ?? id) : ''
+            const dateText = (value) => { const millis = toMillis(value); return millis == null ? '' : new Date(millis).toISOString() }
+            const quote = (value) => {
+                const textValue = value == null ? '' : String(value)
+                return /[",\r\n]/.test(textValue) ? `"${textValue.replace(/"/g, '""')}"` : textValue
+            }
+            const header = ['Party ID', 'Name', 'Email', 'Email Allow Solicitation', 'Phone', 'Phone Allow Solicitation', 'Lists',
+                'Purposes Granted', 'Purposes Withdrawn', 'Last Change', 'Last Change Status', 'Last Change Purpose', 'Last Change Source']
+            const lines = [header.map(quote).join(',')]
+            for (const row of matches) {
+                lines.push([row.partyId, row.partyName, row.emailAddress, row.emailAllowSolicitation, row.phoneNumber, row.phoneAllowSolicitation,
+                    row.listList.map((list) => `${list.contactListName}: ${statusText(list.statusId)}`).join('; '),
+                    row.grantedPurposeEnumIds.map(enumText).join('; '), row.withdrawnPurposeEnumIds.map(enumText).join('; '),
+                    dateText(row.lastChangeDate), statusText(row.lastStatusId), enumText(row.lastPurposeEnumId), enumText(row.lastSourceEnumId)]
+                    .map(quote).join(','))
+            }
+            csvText = lines.join('\r\n') + '\r\n'
+            fileName = 'consents.csv'
+            contentType = 'text/csv'
+        ]]></script></actions>
+    </service>
+
+    <service verb="set" noun="ContactListPartySubscription">
+        <description>
+            Internal: subscribes a party to a consent list or unsubscribes it, for subscribe#ContactListParty,
+            unsubscribe#ContactListParty and apply#UnsubscribePreferences, which check who may. Subscribing sets the
+            party's latest current row to CLPT_ACCEPTED (a new row when it has none) and records a grant for the list
+            unless its last list consent is one, and a grant of the address's marketing purpose when that is withdrawn.
+            Unsubscribing sets every current row to CLPT_UNSUBSCRIBED, or CLPT_UNSUBS_PENDING with a new optInVerifyCode
+            when the list requires confirmation (a current CONT_UNSUB_VER ContactListEmail) and the change is not
+            confirmed (confirmed, or a verifyCode that matches a pending row's), a CLPT_UNSUBSCRIBED row for a party not on
+            the list (a suppression), and records a withdrawal for the list unless its last list consent is one. A change
+            to CLPT_UNSUBS_PENDING sends the verification email (send#UnsubscribeVerifyEmail, in a transaction of its own:
+            one that is not sent is logged and the unsubscribe stays pending). comments (a reason the visitor gave) go on
+            the consent rows. Nothing changes when the party is already in the state asked for.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyId" required="true"/>
+            <parameter name="subscribe" type="Boolean" required="true"/>
+            <parameter name="contactMechId"/>
+            <parameter name="sourceEnumId"/>
+            <parameter name="evidenceText"/>
+            <parameter name="comments"/>
+            <parameter name="confirmed" type="Boolean" default="false"/>
+            <parameter name="verifyCode"/>
+            <parameter name="baseUrl"><description>The site's root for the verification email's link</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="statusId"/>
+            <parameter name="previousStatusId"/>
+            <parameter name="changed" type="Boolean"/>
+            <parameter name="consentRecorded" type="Boolean"/>
+            <parameter name="verifyEmailSent" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const CLP = 'mantle.marketing.contact.ContactListParty'
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            const idOrder = (a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)
+            const newestFirst = (a, b) => ((toMillis(b.consentDate) ?? 0) - (toMillis(a.consentDate) ?? 0)) ||
+                    idOrder(String(b.partyConsentId), String(a.partyConsentId))
+            statusId = null; previousStatusId = null; changed = false; consentRecorded = false; verifyEmailSent = false
+            const now = ec.user.nowTimestamp
+            const nowMillis = toMillis(now)
+            const currentDate = cf.makeConditionDate('fromDate', 'thruDate', null)
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', contactListId).one()
+            if (list == null) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            const listName = list.contactListName || contactListId
+            if (list.contactListTypeEnumId === 'MAILBOX' && ec.entity.find(CLP).condition('contactListId', contactListId)
+                    .condition('preferredContactMechId', 'is-not-null', null).condition(currentDate).count() === 0) {
+                ec.message.addError(`${listName} is a mailbox: its members join and leave it`); return }
+            const purposeEnumId = list.contactMechTypeEnumId === 'CmtTelecomNumber' ? 'PcpSms' : 'PcpMarketingEmail'
+            const rows = Array.from(ec.entity.find(CLP).condition('contactListId', contactListId).condition('partyId', partyId)
+                    .condition(currentDate).orderBy('-fromDate').list())
+            const latest = rows[0] || null
+            previousStatusId = latest?.statusId ?? null
+            if (!contactMechId) contactMechId = latest?.preferredContactMechId || null
+            // an address that is not the party's is left off the consent row
+            if (contactMechId && ec.entity.find('mantle.party.contact.PartyContactMech').condition({partyId: partyId, contactMechId: contactMechId}).count() === 0) {
+                ec.logger.warn(`Consent for party ${partyId} on list ${contactListId}: contact information ${contactMechId} is not the party's, left off`)
+                contactMechId = null
+            }
+            const consents = Array.from(ec.entity.find('mantle.party.PartyConsent').condition('partyId', partyId).list())
+            consents.sort(newestFirst)
+            const lastListConsent = consents.find((row) => row.contactListId === contactListId) || null
+            const record = (consentStatusId, extraEvidence, forList) => {
+                ec.service.sync().name('mantle.party.ConsentServices.store#PartyConsent').parameters({partyId: partyId,
+                    contactMechId: contactMechId, purposeEnumId: purposeEnumId, statusId: consentStatusId, sourceEnumId: sourceEnumId,
+                    evidenceText: [evidenceText, extraEvidence].filter((part) => part).join('; ') || null,
+                    comments: comments ? String(comments).trim().slice(0, 255) || null : null,
+                    contactListId: forList ? contactListId : null}).call()
+            }
+
+            if (subscribe) {
+                if (list.archivedDate != null && toMillis(list.archivedDate) <= nowMillis) { ec.message.addError(`${listName} is archived`); return }
+                if (latest && ['CLPT_ACCEPTED', 'CLPT_IN_USE'].includes(latest.statusId)) {
+                    statusId = latest.statusId
+                } else if (latest) {
+                    latest.set('statusId', 'CLPT_ACCEPTED')
+                    latest.set('optInVerifyCode', null)
+                    if (contactMechId && !latest.preferredContactMechId) latest.set('preferredContactMechId', contactMechId)
+                    latest.update()
+                    statusId = 'CLPT_ACCEPTED'
+                    changed = true
+                } else {
+                    ec.service.sync().name('create#mantle.marketing.contact.ContactListParty').parameters({contactListId: contactListId,
+                        partyId: partyId, fromDate: now, statusId: 'CLPT_ACCEPTED', preferredContactMechId: contactMechId}).call()
+                    if (ec.message.hasError()) return
+                    statusId = 'CLPT_ACCEPTED'
+                    changed = true
+                }
+                if (lastListConsent?.statusId !== 'PconGranted') {
+                    record('PconGranted', null, true)
+                    if (ec.message.hasError()) return
+                    consentRecorded = true
+                }
+                // a list subscription brings back the address's marketing consent when it was withdrawn
+                if (contactMechId) {
+                    const addressState = consents.find((row) => !row.contactListId && row.contactMechId === contactMechId && row.purposeEnumId === purposeEnumId)
+                    if (addressState?.statusId === 'PconWithdrawn') {
+                        record('PconGranted', `Subscribed to ${listName}`, false)
+                        if (ec.message.hasError()) return
+                    }
+                }
+                return
+            }
+
+            let isConfirmed = !!confirmed
+            if (verifyCode) {
+                const pendingRow = rows.find((row) => row.statusId === 'CLPT_UNSUBS_PENDING' && row.optInVerifyCode && row.optInVerifyCode === String(verifyCode))
+                if (pendingRow == null) { ec.message.addError('The confirmation code does not match'); return }
+                isConfirmed = true
+            }
+            const needsConfirm = !isConfirmed && ec.entity.find('mantle.marketing.contact.ContactListEmail').condition('contactListId', contactListId)
+                    .condition('emailTypeEnumId', 'CONT_UNSUB_VER').condition(currentDate).count() > 0
+            const target = needsConfirm ? 'CLPT_UNSUBS_PENDING' : 'CLPT_UNSUBSCRIBED'
+            // one new code for the rows going to pending, the one the verification email carries
+            let newVerifyCode = null
+            if (rows.length === 0) {
+                ec.service.sync().name('create#mantle.marketing.contact.ContactListParty').parameters({contactListId: contactListId,
+                    partyId: partyId, fromDate: now, statusId: 'CLPT_UNSUBSCRIBED', preferredContactMechId: contactMechId}).call()
+                if (ec.message.hasError()) return
+                statusId = 'CLPT_UNSUBSCRIBED'
+                changed = true
+            } else {
+                for (const row of rows) {
+                    if (row.statusId === 'CLPT_UNSUBSCRIBED' || row.statusId === target) continue
+                    row.set('statusId', target)
+                    if (target === 'CLPT_UNSUBS_PENDING') {
+                        if (!newVerifyCode) newVerifyCode = ec.user.randomString(20)
+                        row.set('optInVerifyCode', newVerifyCode)
+                    }
+                    row.update()
+                    changed = true
+                }
+                statusId = rows.some((row) => row.statusId === 'CLPT_UNSUBSCRIBED') && !rows.some((row) => row.statusId !== 'CLPT_UNSUBSCRIBED')
+                        ? 'CLPT_UNSUBSCRIBED' : rows[0].statusId
+            }
+            if (lastListConsent?.statusId !== 'PconWithdrawn') {
+                record('PconWithdrawn', statusId === 'CLPT_UNSUBS_PENDING' ? 'pending confirmation' : null, true)
+                if (ec.message.hasError()) return
+                consentRecorded = true
+            }
+
+            // the verification email of an unsubscribe that waits for its confirmation, a probe: one not sent is logged
+            if (newVerifyCode) {
+                ec.message.pushErrors()
+                try {
+                    const out = ec.service.sync().name('mantle.party.ConsentServices.send#UnsubscribeVerifyEmail').parameters({contactListId: contactListId,
+                        partyId: partyId, contactMechId: contactMechId || latest?.preferredContactMechId || null, verifyCode: newVerifyCode,
+                        baseUrl: baseUrl || null}).requireNewTransaction(true).call()
+                    if (ec.message.hasError()) ec.logger.error(`Unsubscribe verification email to party ${partyId} for list ${contactListId} not sent: ${ec.message.getErrorsString()}`)
+                    else verifyEmailSent = !!out?.sent
+                } catch (err) {
+                    ec.logger.error(`Unsubscribe verification email to party ${partyId} for list ${contactListId} not sent: ${String(err && err.message ? err.message : err).trim()}`)
+                } finally {
+                    ec.message.clearErrors()
+                    ec.message.popErrors()
+                }
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="send" noun="UnsubscribeVerifyEmail">
+        <description>
+            Internal, for set#ContactListPartySubscription: the email that asks a party to confirm its unsubscribe from a
+            list that requires it, to the address (contactMechId when it is an email address, else the party's primary
+            one). The template is the emailTemplateId of the list's current CONT_UNSUB_VER ContactListEmail, else, when the
+            list has a verifyEmailFrom, MANTLE_UNSUBSCRIBE_VERIFY (from verifyEmailFrom, the subject verifyEmailSubject or
+            "Confirm your unsubscribe from" the list). Its bodyParameters are verifyUrl (the unsubscribe page with a new
+            token for the party on the list, valid 14 days, and the code: baseUrl/u/token?verifyCode=code), verifyCode,
+            contactListId, contactListName, organizationName, partyId, fromAddress, fromName and subject; a template with
+            no body screen gets a short body with the link. With no template or no address nothing is sent (sent false,
+            logged); a template that cannot send is an error.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyId" required="true"/>
+            <parameter name="contactMechId"/>
+            <parameter name="verifyCode" required="true"/>
+            <parameter name="baseUrl"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="sent" type="Boolean"/>
+            <parameter name="emailMessageId"/>
+            <parameter name="verifyUrl"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            sent = false
+            const currentDate = cf.makeConditionDate('fromDate', 'thruDate', null)
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', contactListId).one()
+            if (list == null) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            const listEmail = Array.from(ec.entity.find('mantle.marketing.contact.ContactListEmail').condition('contactListId', contactListId)
+                    .condition('emailTypeEnumId', 'CONT_UNSUB_VER').condition(currentDate).orderBy('-fromDate').list()).find((row) => row.emailTemplateId)
+            const templateId = listEmail?.emailTemplateId || (list.verifyEmailFrom ? 'MANTLE_UNSUBSCRIBE_VERIFY' : null)
+            if (!templateId) { ec.logger.warn(`List ${contactListId} requires unsubscribe confirmation but has no Unsubscribe Verify template or verifyEmailFrom; none sent to party ${partyId}`); return }
+            const template = ec.entity.find('moqui.basic.email.EmailTemplate').condition('emailTemplateId', templateId).one()
+            if (template == null) { ec.message.addError(`Email template ${templateId} not found`); return }
+            // the address: the given one when it is an email address of the party, else its primary email
+            const emailOf = (id) => {
+                if (!id) return null
+                const info = Array.from(ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition('partyId', partyId).condition('contactMechId', id)
+                        .condition('contactMechTypeEnumId', 'CmtEmailAddress').condition(currentDate).list())[0]
+                return info?.infoString ? info : null
+            }
+            let address = emailOf(contactMechId)
+            if (address == null) {
+                const infos = Array.from(ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition('partyId', partyId)
+                        .condition('contactMechTypeEnumId', 'CmtEmailAddress').condition(currentDate).orderBy('fromDate').list()).filter((info) => info.infoString)
+                address = infos.find((info) => info.contactMechPurposeId === 'EmailPrimary') || infos[0] || null
+            }
+            if (address == null) { ec.logger.warn(`Unsubscribe verification for party ${partyId} on list ${contactListId}: no email address, none sent`); return }
+            let root = String(baseUrl || '').trim()
+            if (!root && template.webHostName) root = `https://${template.webHostName}`
+            if (!root && template.emailServerId) root = String(ec.entity.find('moqui.basic.email.EmailServer')
+                    .condition('emailServerId', template.emailServerId).useCache(true).one()?.webBaseUrl || '').trim()
+            const link = ec.service.sync().name('mantle.party.ConsentServices.create#UnsubscribeToken').parameters({contactListId: contactListId,
+                partyId: partyId, contactMechId: address.contactMechId, baseUrl: root || null, validDays: 14}).call()
+            if (ec.message.hasError()) return
+            verifyUrl = `${link.unsubscribeUrl}?verifyCode=${encodeURIComponent(verifyCode)}`
+            let organizationName = null
+            if (list.ownerPartyId) {
+                const owner = ec.entity.find('mantle.party.PartyDetail').condition('partyId', list.ownerPartyId).one()
+                organizationName = owner == null ? null : (owner.organizationName || ec.resource.expand('PartyFullNameTemplate', '', owner).trim() || null)
+            }
+            const listName = list.contactListName || contactListId
+            const encode = (text) => String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+            const params = {verifyUrl: verifyUrl, verifyCode: verifyCode, contactListId: contactListId, contactListName: listName,
+                organizationName: organizationName, partyId: partyId, fromAddress: list.verifyEmailFrom || null, fromName: organizationName,
+                subject: list.verifyEmailSubject || `Confirm your unsubscribe from ${listName}`}
+            // a template without a body screen: a short body with the link
+            const own = !template.bodyScreenLocation
+            const out = ec.service.sync().name('org.moqui.impl.EmailServices.send#EmailTemplate').parameters({emailTemplateId: template.emailTemplateId,
+                toAddresses: address.infoString, createEmailMessage: true, bodyParameters: params,
+                body: own ? `<p>Please confirm that you want to stop getting ${encode(listName)}${organizationName ? ' from ' + encode(organizationName) : ''}.</p>`
+                    + `<p><a href="${encode(verifyUrl)}">Confirm unsubscribe</a></p><p>If you did not ask for this, ignore this email and you stay subscribed.</p>` : null,
+                bodyText: own ? `Please confirm that you want to stop getting ${listName}${organizationName ? ' from ' + organizationName : ''}.\n\n`
+                    + `Confirm unsubscribe: ${verifyUrl}\n\nIf you did not ask for this, ignore this email and you stay subscribed.\n` : null}).call()
+            if (ec.message.hasError()) return
+            emailMessageId = out?.emailMessageId ?? null
+            // a server with no SMTP host keeps the message unsent, with no Message-ID
+            sent = !!out?.messageId
+            if (!sent) ec.logger.warn(`Unsubscribe verification email ${emailMessageId} to party ${partyId} for list ${contactListId} was not sent by the mail server`)
+        ]]></script></actions>
+    </service>
+
+    <service verb="subscribe" noun="ContactListParty">
+        <description>
+            Subscribes a party (the current user's by default) to a consent list again, or for the first time: the party's
+            row goes to CLPT_ACCEPTED (from unsubscribed, pending or an unsubscribe waiting for its confirmation) with a
+            consent grant for the list, and the address's marketing consent is granted again when it was withdrawn
+            (allowSolicitation back to Y). The source defaults to PcsStaff for another party, PcsForm for the user's own.
+            Already subscribed changes nothing. A mailbox is joined with ContactListServices.join#ContactList instead.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyId"/>
+            <parameter name="contactMechId"><description>The address to send to; defaults to the row's preferredContactMechId</description></parameter>
+            <parameter name="sourceEnumId"/>
+            <parameter name="evidenceText"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="statusId"/>
+            <parameter name="previousStatusId"/>
+            <parameter name="changed" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const userId = ec.user.userId || null
+            const userPartyId = ec.user.userAccount?.partyId || null
+            if (!userId) { ec.message.addError('Subscribing needs a signed-in user; the unsubscribe page uses apply#UnsubscribePreferences'); return }
+            if (!partyId) partyId = userPartyId
+            if (!partyId) { ec.message.addError('No party to subscribe'); return }
+            const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+            if (party == null || (party.privateOwnerUserId && party.privateOwnerUserId !== userId)) { ec.message.addError(`Party ${partyId} not found`); return }
+            if (!sourceEnumId) sourceEnumId = partyId === userPartyId ? 'PcsForm' : 'PcsStaff'
+            const out = ec.service.sync().name('mantle.party.ConsentServices.set#ContactListPartySubscription').parameters({contactListId: contactListId,
+                partyId: partyId, subscribe: true, contactMechId: contactMechId, sourceEnumId: sourceEnumId, evidenceText: evidenceText}).call()
+            if (ec.message.hasError()) return
+            statusId = out.statusId; previousStatusId = out.previousStatusId; changed = out.changed
+        ]]></script></actions>
+    </service>
+
+    <service verb="unsubscribe" noun="ContactListParty" authenticate="anonymous-all" allow-remote="false">
+        <description>
+            Unsubscribes a party from one consent list, or with allMarketing from all marketing email: every consent list
+            of email it is on (of the token list's organization, for a token) and a withdrawal of PcpMarketingEmail for the
+            address (the token's or contactMechId, else each current email address of the party, else the party), which
+            sets the address's allowSolicitation to N. Each list goes to CLPT_UNSUBSCRIBED, or CLPT_UNSUBS_PENDING when it
+            requires confirmation (see set#ContactListPartySubscription), with a PartyConsent withdrawal for the list.
+            Calling it again changes nothing.
+
+            By token (the unsubscribe page, and the RFC 8058 one-click POST with listUnsubscribe=One-Click): runs for an
+            anonymous visitor; the token is checked first, and only the token's party is changed, on the token's list or
+            another of that organization's lists the party is on (contactListId). The source is PcsEmailLink. A one-click
+            call is confirmed (CLPT_UNSUBSCRIBED at once); otherwise only a verifyCode matching the pending row confirms.
+            Without a token: a signed-in user, with contactListId (unless allMarketing) and partyId; source PcsStaff by
+            default, and confirmed=true skips the confirmation. reasonText (why, as the visitor or staff gave it) goes on
+            the consent rows as their comments; an unsubscribe that waits for confirmation sends the verification email,
+            its link under baseUrl (verifyEmailSent).
+        </description>
+        <in-parameters>
+            <parameter name="token"/>
+            <parameter name="contactListId"/>
+            <parameter name="partyId"/>
+            <parameter name="contactMechId"/>
+            <parameter name="allMarketing" type="Boolean" default="false"/>
+            <parameter name="listUnsubscribe"><description>One-Click for the RFC 8058 POST, whose form field
+                List-Unsubscribe=One-Click the route passes here; Mailto for the email to the List-Unsubscribe mailto
+                (process#UnsubscribeEmail, which gives the sender as evidenceText)</description></parameter>
+            <parameter name="sourceEnumId"/>
+            <parameter name="evidenceText"/>
+            <parameter name="confirmed" type="Boolean" default="false"/>
+            <parameter name="verifyCode"/>
+            <parameter name="reasonText"/>
+            <parameter name="baseUrl"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="statusId"><description>The list's status after, for one list</description></parameter>
+            <parameter name="unsubscribePending" type="Boolean"/>
+            <parameter name="verifyEmailSent" type="Boolean"/>
+            <parameter name="changedList" type="List"><parameter name="changed" type="Map">
+                <parameter name="contactListId"/><parameter name="statusId"/><parameter name="previousStatusId"/></parameter></parameter>
+            <parameter name="unchangedContactListIds" type="List"/>
+            <parameter name="failedContactListIds" type="List"/>
+            <parameter name="marketingWithdrawn" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const CLP = 'mantle.marketing.contact.ContactListParty'
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            const idOrder = (a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)
+            const newestFirst = (a, b) => ((toMillis(b.consentDate) ?? 0) - (toMillis(a.consentDate) ?? 0)) ||
+                    idOrder(String(b.partyConsentId), String(a.partyConsentId))
+            statusId = null; unsubscribePending = false; changedList = []; unchangedContactListIds = []; failedContactListIds = []
+            marketingWithdrawn = false; verifyEmailSent = false
+            const now = ec.user.nowTimestamp
+            const reason = reasonText ? String(reasonText).trim().slice(0, 255) || null : null
+
+            // the token first, before anything else is read
+            const invalid = 'This unsubscribe link is not valid or has expired'
+            const tokenText = token == null ? '' : String(token).trim()
+            let tokenRow = null
+            if (tokenText) {
+                if (!/^[A-Za-z0-9_-]{16,128}$/.test(tokenText)) { ec.message.addError(invalid); return }
+                tokenRow = ec.entity.find('mantle.marketing.contact.ContactListToken').condition('tokenHash', ec.user.singleUseCodeHash(tokenText)).one()
+                if (tokenRow == null || (tokenRow.thruDate != null && toMillis(tokenRow.thruDate) <= toMillis(now))) { ec.message.addError(invalid); return }
+                if (partyId && partyId !== tokenRow.partyId) { ec.message.addError(invalid); return }
+            }
+            const oneClick = String(listUnsubscribe || '').trim().toLowerCase() === 'one-click'
+            // the List-Unsubscribe mailto: an email whose subject carries the token (process#UnsubscribeEmail)
+            const byMail = String(listUnsubscribe || '').trim().toLowerCase() === 'mailto'
+            if ((oneClick || byMail) && tokenRow == null) { ec.message.addError('A one-click unsubscribe needs the link token'); return }
+
+            let tokenList = null
+            if (tokenRow != null) {
+                partyId = tokenRow.partyId
+                if (!contactMechId) contactMechId = tokenRow.contactMechId || null
+                else if (contactMechId !== tokenRow.contactMechId) { ec.message.addError(invalid); return }
+                // an anonymous visitor's change is the email link's, with the link as its evidence
+                if (!sourceEnumId || !ec.user.userId) sourceEnumId = 'PcsEmailLink'
+                // the link's own confirmation: only a one-click POST or the mailto's email, or a verifyCode below
+                confirmed = oneClick || byMail
+                // a Message-ID without its angle brackets, which the evidence parameters take as markup
+                const ofMessage = tokenRow.messageId ? ` of message ${String(tokenRow.messageId).replace(/[<>]/g, '')}`
+                        : tokenRow.communicationEventId ? ` of communication ${tokenRow.communicationEventId}` : ''
+                const mailFrom = byMail && evidenceText ? ` from ${String(evidenceText).replace(/[<>]/g, '').trim().slice(0, 200)}` : ''
+                evidenceText = oneClick ? `One-click unsubscribe (RFC 8058)${ofMessage}`
+                        : byMail ? `Unsubscribe by email (List-Unsubscribe mailto)${mailFrom}${ofMessage}` : `Unsubscribe link${ofMessage}`
+                tokenList = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', tokenRow.contactListId).one()
+                if (tokenList == null) { ec.message.addError(invalid); return }
+            } else {
+                const userId = ec.user.userId || null
+                if (!userId) { ec.message.addError('Unsubscribing without a link token needs a signed-in user'); return }
+                if (!partyId) { ec.message.addError('Unsubscribing needs a partyId'); return }
+                const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+                if (party == null || (party.privateOwnerUserId && party.privateOwnerUserId !== userId)) { ec.message.addError(`Party ${partyId} not found`); return }
+                if (!sourceEnumId) sourceEnumId = 'PcsStaff'
+            }
+            const sameOwner = (list) => tokenList == null || (list.ownerPartyId ?? null) === (tokenList.ownerPartyId ?? null)
+
+            // the lists
+            let listIds = []
+            if (allMarketing) {
+                const memberIds = Array.from(new Set(Array.from(ec.entity.find(CLP).condition('partyId', partyId)
+                        .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).selectField('contactListId').distinct(true).list())
+                        .map((row) => row.contactListId)))
+                const lists = memberIds.length ? Array.from(ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', 'in', memberIds)
+                        .orderBy('contactListName').list()) : []
+                listIds = lists.filter((list) => list.contactListTypeEnumId !== 'MAILBOX' && list.contactMechTypeEnumId !== 'CmtTelecomNumber' && sameOwner(list))
+                        .map((list) => list.contactListId)
+            } else {
+                const targetId = contactListId || tokenRow?.contactListId
+                if (!targetId) { ec.message.addError('Unsubscribing needs a contactListId'); return }
+                if (tokenRow != null && targetId !== tokenRow.contactListId) {
+                    // another of the party's lists of the token list's organization, as the preferences page offers
+                    const other = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', targetId).one()
+                    if (other == null || !sameOwner(other) || ec.entity.find(CLP).condition('contactListId', targetId).condition('partyId', partyId).count() === 0) {
+                        ec.message.addError(invalid); return }
+                }
+                listIds = [targetId]
+            }
+
+            const change = (id, separately) => {
+                let call = ec.service.sync().name('mantle.party.ConsentServices.set#ContactListPartySubscription').parameters({contactListId: id,
+                    partyId: partyId, subscribe: false, contactMechId: contactMechId, sourceEnumId: sourceEnumId, evidenceText: evidenceText,
+                    comments: reason, confirmed: confirmed, verifyCode: allMarketing ? null : verifyCode, baseUrl: baseUrl || null})
+                if (separately) call = call.requireNewTransaction(true)
+                return call.call()
+            }
+            if (!allMarketing) {
+                const out = change(listIds[0], false)
+                if (ec.message.hasError()) return
+                statusId = out.statusId
+                unsubscribePending = statusId === 'CLPT_UNSUBS_PENDING'
+                verifyEmailSent = !!out.verifyEmailSent
+                if (out.changed) changedList.push({contactListId: listIds[0], statusId: out.statusId, previousStatusId: out.previousStatusId})
+                else unchangedContactListIds.push(listIds[0])
+            } else {
+                // each list on its own, so one that fails does not keep the others subscribed
+                for (const id of listIds) {
+                    try {
+                        const out = change(id, true)
+                        if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                        if (out.changed) changedList.push({contactListId: id, statusId: out.statusId, previousStatusId: out.previousStatusId})
+                        else unchangedContactListIds.push(id)
+                        if (out.statusId === 'CLPT_UNSUBS_PENDING') unsubscribePending = true
+                        if (out.verifyEmailSent) verifyEmailSent = true
+                    } catch (err) {
+                        ec.message.clearErrors()
+                        ec.logger.error(`Unsubscribe of party ${partyId} from contact list ${id} failed: ${String(err && err.message ? err.message : err).trim()}`)
+                        failedContactListIds.push(id)
+                    }
+                }
+                // and the address, or each email address of the party, withdrawn from marketing email
+                let mechIds = contactMechId ? [contactMechId] : Array.from(new Set(Array.from(ec.entity.find('mantle.party.contact.PartyContactMechInfo')
+                        .condition('partyId', partyId).condition('contactMechTypeEnumId', 'CmtEmailAddress')
+                        .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list()).map((info) => info.contactMechId)))
+                if (mechIds.length === 0) mechIds = [null]
+                const consents = Array.from(ec.entity.find('mantle.party.PartyConsent').condition('partyId', partyId)
+                        .condition('purposeEnumId', 'PcpMarketingEmail').condition('contactListId', null).list())
+                consents.sort(newestFirst)
+                for (const mechId of mechIds) {
+                    const state = consents.find((row) => (row.contactMechId || null) === mechId)
+                    if (state?.statusId === 'PconWithdrawn') continue
+                    ec.service.sync().name('mantle.party.ConsentServices.store#PartyConsent').parameters({partyId: partyId, contactMechId: mechId,
+                        purposeEnumId: 'PcpMarketingEmail', statusId: 'PconWithdrawn', sourceEnumId: sourceEnumId,
+                        evidenceText: [evidenceText, 'all marketing email'].filter((part) => part).join('; '), comments: reason}).call()
+                    if (ec.message.hasError()) return
+                    marketingWithdrawn = true
+                }
+            }
+            if (tokenRow != null) {
+                tokenRow.set('usedDate', now)
+                tokenRow.update()
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="process" noun="UnsubscribeEmail" authenticate="anonymous-all" allow-remote="false">
+        <implements service="org.moqui.EmailServices.process#EmailEca"/>
+        <description>
+            The List-Unsubscribe mailto of a list email (create#UnsubscribeToken with mailtoAddress): a received email whose
+            subject is "unsubscribe" and a token unsubscribes the token's party from the token's list at once, as the
+            one-click POST does (unsubscribe#ContactListParty with listUnsubscribe Mailto, the sender as evidence). The
+            email ECA rule of MantleConsent.emecas.xml calls it for each such email an email server brings in: polled
+            (poll#EmailServer), or new in the Inbox of a mail account the deployment syncs (sync#EmailAccount runs the email
+            ECAs once on each new Inbox message it stores), so the address only needs to be an email server the deployment
+            polls or a mail account it syncs. A token that is unknown,
+            ended or refused is logged and the email is taken as handled, so the poll does not keep it; unsubscribed
+            tells whether it unsubscribed.
+        </description>
+        <out-parameters><parameter name="unsubscribed" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            unsubscribed = false
+            const subjectText = String(fields?.subject || '').trim()
+            const found = /^unsubscribe\s+([A-Za-z0-9_-]{16,128})$/i.exec(subjectText)
+            if (!found) return
+            const sender = String(fields?.from || '').replace(/[<>]/g, ' ').replace(/\s+/g, ' ').trim()
+            ec.message.pushErrors()
+            try {
+                const out = ec.service.sync().name('mantle.party.ConsentServices.unsubscribe#ContactListParty').parameters({token: found[1],
+                    listUnsubscribe: 'Mailto', evidenceText: sender || null}).requireNewTransaction(true).call()
+                if (ec.message.hasError()) ec.logger.warn(`Unsubscribe email from ${sender || 'an unknown sender'} not applied: ${ec.message.getErrorsString()}`)
+                else unsubscribed = !!out
+            } catch (err) {
+                ec.logger.warn(`Unsubscribe email from ${sender || 'an unknown sender'} not applied: ${String(err && err.message ? err.message : err).trim()}`)
+            } finally {
+                ec.message.clearErrors()
+                ec.message.popErrors()
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="unsubscribe" noun="ContactListParties">
+        <description>
+            The Consent screen's bulk action: unsubscribes each of partyIdList from a list (unsubscribe#ContactListParty,
+            each in its own transaction). A party that fails is logged, listed in failedPartyIdList, and the rest go on.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyIdList" type="List" required="true"><parameter name="partyId"/></parameter>
+            <parameter name="sourceEnumId" default-value="PcsStaff"/>
+            <parameter name="evidenceText"/>
+            <parameter name="confirmed" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="unsubscribedCount" type="Integer"/>
+            <parameter name="pendingCount" type="Integer"/>
+            <parameter name="unchangedCount" type="Integer"/>
+            <parameter name="failedPartyIdList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            unsubscribedCount = 0; pendingCount = 0; unchangedCount = 0; failedPartyIdList = []
+            for (const id of Array.from(new Set(Array.from(partyIdList || []).map((value) => String(value).trim()).filter((value) => value)))) {
+                try {
+                    const out = ec.service.sync().name('mantle.party.ConsentServices.unsubscribe#ContactListParty').parameters({contactListId: contactListId,
+                        partyId: id, sourceEnumId: sourceEnumId, evidenceText: evidenceText, confirmed: confirmed}).requireNewTransaction(true).call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    if (!out.changedList?.length) unchangedCount++
+                    else if (out.unsubscribePending) pendingCount++
+                    else unsubscribedCount++
+                } catch (err) {
+                    ec.message.clearErrors()
+                    ec.logger.error(`Unsubscribe of party ${id} from contact list ${contactListId} failed: ${String(err && err.message ? err.message : err).trim()}`)
+                    failedPartyIdList.push(id)
+                }
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="create" noun="UnsubscribeToken">
+        <description>
+            A new unsubscribe link token for a party on a contact list, usually one per message sent: the token (given only
+            here; the row keeps its hash), the page's URL (baseUrl + /u/ + token), the one-click URL (the page's URL itself,
+            RFC 8058: the route's post-transition runs the screen's one-click transition for a POST there; the page's URL +
+            /oneClick, the List-Unsubscribe of the messages sent before, takes the POST too) and the List-Unsubscribe and
+            List-Unsubscribe-Post header values for the message: List-Unsubscribe is the page's URL, then with
+            mailtoAddress a mailto (RFC 2369) whose subject is "unsubscribe" and the token. A messageId of a
+            ContactListCommStatus fills the list, party, address and communication event. The address defaults to the
+            party's preferredContactMechId on the list, the purpose to PcpSms for a list of phone numbers, else
+            PcpMarketingEmail. baseUrl defaults to the web request's root URL when there is one. thruDate (or validDays)
+            ends it; with neither it does not expire.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId"/>
+            <parameter name="partyId"/>
+            <parameter name="contactMechId"/>
+            <parameter name="communicationEventId"/>
+            <parameter name="messageId" allow-html="any"><description>A Message-ID, with its angle brackets</description></parameter>
+            <parameter name="purposeEnumId"/>
+            <parameter name="thruDate" type="Timestamp"/>
+            <parameter name="validDays" type="Integer"/>
+            <parameter name="baseUrl"><description>The site's https root, such as https://example.com</description></parameter>
+            <parameter name="mailtoAddress"><description>An address that takes unsubscribe requests by mail, for the
+                List-Unsubscribe mailto; empty leaves it out</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="token"/>
+            <parameter name="contactListTokenId"/>
+            <parameter name="unsubscribeUrl"/>
+            <parameter name="oneClickUrl"/>
+            <parameter name="listUnsubscribeHeaders" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            token = null
+            if (messageId) {
+                const sent = ec.entity.find('mantle.marketing.contact.ContactListCommStatus').condition('messageId', messageId).one()
+                if (sent != null) {
+                    if (!contactListId) contactListId = sent.contactListId
+                    if (!partyId) partyId = sent.partyId
+                    if (!contactMechId) contactMechId = sent.contactMechId
+                    if (!communicationEventId) communicationEventId = sent.communicationEventId
+                }
+            }
+            if (!contactListId || !partyId) { ec.message.addError('An unsubscribe token needs a contactListId and a partyId'); return }
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', contactListId).one()
+            if (list == null) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            if (ec.entity.find('mantle.party.Party').condition('partyId', partyId).one() == null) { ec.message.addError(`Party ${partyId} not found`); return }
+            if (!contactMechId) contactMechId = Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', contactListId)
+                    .condition('partyId', partyId).condition(cf.makeConditionDate('fromDate', 'thruDate', null)).orderBy('-fromDate').list())
+                    .map((row) => row.preferredContactMechId).find((id) => id) || null
+            if (contactMechId && ec.entity.find('mantle.party.contact.PartyContactMech').condition({partyId: partyId, contactMechId: contactMechId}).count() === 0) {
+                ec.message.addError(`Contact information ${contactMechId} is not party ${partyId}'s`); return }
+            if (!purposeEnumId) purposeEnumId = list.contactMechTypeEnumId === 'CmtTelecomNumber' ? 'PcpSms' : 'PcpMarketingEmail'
+            if (!thruDate && validDays) thruDate = new Date(toMillis(ec.user.nowTimestamp) + Number(validDays) * 86400000)
+            token = ec.user.randomString(32)
+            contactListTokenId = ec.service.sync().name('create#mantle.marketing.contact.ContactListToken').parameters({
+                tokenHash: ec.user.singleUseCodeHash(token), contactListId: contactListId, partyId: partyId, contactMechId: contactMechId,
+                communicationEventId: communicationEventId || null, messageId: messageId || null, purposeEnumId: purposeEnumId,
+                createdDate: ec.user.nowTimestamp, thruDate: thruDate || null}).call()?.contactListTokenId ?? null
+            if (ec.message.hasError()) { token = null; return }
+            let root = String(baseUrl || '').trim()
+            if (!root) { try { root = ec.web ? String(ec.web.getWebappRootUrl(true, null) || '') : '' } catch (err) { root = '' } }
+            unsubscribeUrl = `${root.replace(/\/+$/, '')}/u/${token}`
+            // RFC 8058: the one-click POST goes to the List-Unsubscribe URL, the page a person opens to choose
+            oneClickUrl = unsubscribeUrl
+            const uris = [`<${oneClickUrl}>`]
+            const mailto = String(mailtoAddress || '').trim()
+            // one plain address: no display name, brackets, spaces or a query of its own
+            if (mailto && /^[^\s<>@?,;"]+@[^\s<>@?,;"]+$/.test(mailto)) uris.push(`<mailto:${mailto}?subject=${encodeURIComponent('unsubscribe ' + token)}>`)
+            else if (mailto) ec.logger.warn(`Unsubscribe token for party ${partyId} on list ${contactListId}: mailto address ${mailto} is not one plain address, left out`)
+            listUnsubscribeHeaders = {'List-Unsubscribe': uris.join(', '), 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'}
+        ]]></script></actions>
+    </service>
+
+    <service verb="check" noun="UnsubscribeToken" authenticate="anonymous-view" allow-remote="false">
+        <description>
+            The token check of the public unsubscribe page's token-route (/u/&lt;token&gt;; the framework calls it with token
+            and routeName before anything of the page runs). An unknown or malformed token is not valid, so the route
+            answers its "link expired or not found" page. A known one is valid: routeContext {expired: false,
+            organizationName, contactListName} while it is current, and {expired: true} with nothing else once it has ended
+            (revoked or expired), so the page can say so in its own words. Read only; the page's calls check the token
+            again.
+        </description>
+        <in-parameters>
+            <parameter name="token" required="true"/>
+            <parameter name="routeName"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="valid" type="Boolean"/>
+            <parameter name="routeContext" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            valid = false
+            routeContext = null
+            const tokenText = token == null ? '' : String(token).trim()
+            if (!/^[A-Za-z0-9_-]{16,128}$/.test(tokenText)) return
+            const tokenRow = ec.entity.find('mantle.marketing.contact.ContactListToken').condition('tokenHash', ec.user.singleUseCodeHash(tokenText)).one()
+            if (tokenRow == null) return
+            valid = true
+            if (tokenRow.thruDate != null && toMillis(tokenRow.thruDate) <= toMillis(ec.user.nowTimestamp)) { routeContext = {expired: true}; return }
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', tokenRow.contactListId).one()
+            if (list == null) { routeContext = {expired: true}; return }
+            let organizationName = null
+            if (list.ownerPartyId) {
+                const owner = ec.entity.find('mantle.party.PartyDetail').condition('partyId', list.ownerPartyId).one()
+                organizationName = owner == null ? null : (owner.organizationName || ec.resource.expand('PartyFullNameTemplate', '', owner).trim() || null)
+            }
+            routeContext = {expired: false, organizationName: organizationName, contactListName: list.contactListName ?? null}
+        ]]></script></actions>
+    </service>
+
+    <service verb="resolve" noun="UnsubscribeToken" authenticate="anonymous-view" allow-remote="false">
+        <description>
+            For the public unsubscribe page /u/&lt;token&gt;, an anonymous visitor's: the organization's name, the token's
+            list and the party's status on it, the address masked (j***@example.com, or the last digits of a phone
+            number), whether its marketing email is withdrawn, and the party's other current lists of that organization
+            (consent lists, not archived) with their status for the preferences. Nothing about the party beyond that. Read
+            only, so a mail scanner that fetches the link changes nothing. The token is checked first; an unknown, revoked
+            or expired one gets an error and no data.
+        </description>
+        <in-parameters><parameter name="token" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="organizationName"/>
+            <parameter name="contactListId"/>
+            <parameter name="contactListName"/>
+            <parameter name="listDescription"/>
+            <parameter name="statusId"/>
+            <parameter name="subscribed" type="Boolean"/>
+            <parameter name="unsubscribePending" type="Boolean"/>
+            <parameter name="maskedAddress"/>
+            <parameter name="marketingWithdrawn" type="Boolean"/>
+            <parameter name="listList" type="List"><parameter name="list" type="Map">
+                <parameter name="contactListId"/><parameter name="contactListName"/><parameter name="description"/>
+                <parameter name="statusId"/><parameter name="subscribed" type="Boolean"/><parameter name="unsubscribePending" type="Boolean"/>
+                <parameter name="isTokenList" type="Boolean"/></parameter></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            listList = []
+            // the token first, before anything else is read
+            const invalid = 'This unsubscribe link is not valid or has expired'
+            const tokenText = token == null ? '' : String(token).trim()
+            if (!/^[A-Za-z0-9_-]{16,128}$/.test(tokenText)) { ec.message.addError(invalid); return }
+            const tokenRow = ec.entity.find('mantle.marketing.contact.ContactListToken').condition('tokenHash', ec.user.singleUseCodeHash(tokenText)).one()
+            if (tokenRow == null || (tokenRow.thruDate != null && toMillis(tokenRow.thruDate) <= toMillis(ec.user.nowTimestamp))) { ec.message.addError(invalid); return }
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', tokenRow.contactListId).one()
+            if (list == null) { ec.message.addError(invalid); return }
+
+            if (list.ownerPartyId) {
+                const owner = ec.entity.find('mantle.party.PartyDetail').condition('partyId', list.ownerPartyId).one()
+                organizationName = owner == null ? null : (owner.organizationName || ec.resource.expand('PartyFullNameTemplate', '', owner).trim() || null)
+            }
+            contactListId = list.contactListId
+            contactListName = list.contactListName ?? null
+            listDescription = list.description ?? null
+            const state = ec.service.sync().name('mantle.party.ConsentServices.get#PartyConsentState').parameters({partyId: tokenRow.partyId,
+                sameOwnerAsListId: list.contactListId, includeArchived: false}).call()
+            if (ec.message.hasError()) { ec.message.clearErrors(); ec.message.addError(invalid); return }
+            const tokenEntry = (state.listList || []).find((entry) => entry.contactListId === list.contactListId) || null
+            statusId = tokenEntry?.statusId ?? null
+            subscribed = !!tokenEntry?.subscribed
+            unsubscribePending = !!tokenEntry?.unsubscribePending
+            const mechId = tokenRow.contactMechId || tokenEntry?.preferredContactMechId || null
+            marketingWithdrawn = (state.consentList || []).some((consent) => (consent.contactMechId || null) === mechId &&
+                    consent.purposeEnumId === 'PcpMarketingEmail' && consent.statusId === 'PconWithdrawn')
+            if (mechId) {
+                const mech = ec.entity.find('mantle.party.contact.ContactMech').condition('contactMechId', mechId).one()
+                if (mech?.contactMechTypeEnumId === 'CmtTelecomNumber') {
+                    const tn = ec.entity.find('mantle.party.contact.TelecomNumber').condition('contactMechId', mechId).one()
+                    const digits = String(tn?.contactNumber ?? '').replace(/[^0-9]/g, '')
+                    maskedAddress = digits ? `***${digits.slice(-Math.min(4, digits.length))}` : null
+                } else if (mech?.infoString) {
+                    const [local, domain] = String(mech.infoString).split('@')
+                    maskedAddress = domain ? `${local.slice(0, 1)}***@${domain}` : `${String(mech.infoString).slice(0, 1)}***`
+                }
+            }
+            listList = (state.listList || []).filter((entry) => entry.isCurrent && !entry.isArchived).map((entry) => ({contactListId: entry.contactListId,
+                contactListName: entry.contactListName, description: entry.description, statusId: entry.statusId, subscribed: entry.subscribed,
+                unsubscribePending: entry.unsubscribePending, isTokenList: entry.contactListId === list.contactListId}))
+            listList.sort((a, b) => (b.isTokenList ? 1 : 0) - (a.isTokenList ? 1 : 0))
+        ]]></script></actions>
+    </service>
+
+    <service verb="apply" noun="UnsubscribePreferences" authenticate="anonymous-all" allow-remote="false">
+        <description>
+            The unsubscribe page's Update preferences, an anonymous visitor's: listChoices, a list of {contactListId,
+            subscribed} (or a map of contactListId to subscribed), subscribes or unsubscribes the token's party on each of
+            the lists resolve#UnsubscribeToken offers (others are skipped and listed in failedContactListIds), each in its
+            own transaction, with source PcsEmailLink; with unsubscribeAll, all marketing email instead
+            (unsubscribe#ContactListParty allMarketing). The token is checked first. reasonText goes on the consent rows of
+            the lists unsubscribed (their comments). A list that requires confirmation waits for it (CLPT_UNSUBS_PENDING,
+            the verification email with its link under baseUrl). Subscribing again here is the page's undo.
+        </description>
+        <in-parameters>
+            <parameter name="token" required="true"/>
+            <parameter name="listChoices" type="Object"/>
+            <parameter name="unsubscribeAll" type="Boolean" default="false"/>
+            <parameter name="reasonText"/>
+            <parameter name="baseUrl"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="changedList" type="List"><parameter name="changed" type="Map">
+                <parameter name="contactListId"/><parameter name="statusId"/><parameter name="previousStatusId"/></parameter></parameter>
+            <parameter name="failedContactListIds" type="List"/>
+            <parameter name="marketingWithdrawn" type="Boolean"/>
+            <parameter name="unsubscribePending" type="Boolean"/>
+            <parameter name="verifyEmailSent" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            changedList = []; failedContactListIds = []; marketingWithdrawn = false; unsubscribePending = false; verifyEmailSent = false
+            // the token first, before anything else is read
+            const invalid = 'This unsubscribe link is not valid or has expired'
+            const tokenText = token == null ? '' : String(token).trim()
+            if (!/^[A-Za-z0-9_-]{16,128}$/.test(tokenText)) { ec.message.addError(invalid); return }
+            const tokenRow = ec.entity.find('mantle.marketing.contact.ContactListToken').condition('tokenHash', ec.user.singleUseCodeHash(tokenText)).one()
+            if (tokenRow == null || (tokenRow.thruDate != null && toMillis(tokenRow.thruDate) <= toMillis(ec.user.nowTimestamp))) { ec.message.addError(invalid); return }
+
+            if (unsubscribeAll) {
+                const out = ec.service.sync().name('mantle.party.ConsentServices.unsubscribe#ContactListParty')
+                        .parameters({token: tokenText, allMarketing: true, reasonText: reasonText || null, baseUrl: baseUrl || null}).call()
+                if (ec.message.hasError()) return
+                changedList = out.changedList || []
+                failedContactListIds = out.failedContactListIds || []
+                marketingWithdrawn = !!out.marketingWithdrawn
+                unsubscribePending = !!out.unsubscribePending
+                verifyEmailSent = !!out.verifyEmailSent
+                return
+            }
+
+            const truthy = (value) => value === true || ['true', 'y', 'yes', '1', 'on'].includes(String(value ?? '').trim().toLowerCase())
+            let choices = []
+            if (Array.isArray(listChoices) || (listChoices != null && typeof listChoices.length === 'number' && typeof listChoices !== 'string')) {
+                choices = Array.from(listChoices).map((choice) => ({contactListId: choice?.contactListId, subscribed: truthy(choice?.subscribed)}))
+            } else if (listChoices != null && typeof listChoices === 'object') {
+                choices = Object.entries(listChoices).map(([id, value]) => ({contactListId: id, subscribed: truthy(value)}))
+            }
+            const state = ec.service.sync().name('mantle.party.ConsentServices.get#PartyConsentState').parameters({partyId: tokenRow.partyId,
+                sameOwnerAsListId: tokenRow.contactListId, includeArchived: false}).call()
+            if (ec.message.hasError()) { ec.message.clearErrors(); ec.message.addError(invalid); return }
+            const offered = new Map((state.listList || []).filter((entry) => entry.isCurrent && !entry.isArchived).map((entry) => [entry.contactListId, entry]))
+            // a Message-ID without its angle brackets, which the evidence parameters take as markup
+            const evidence = 'Unsubscribe page preferences' + (tokenRow.messageId ? ` of message ${String(tokenRow.messageId).replace(/[<>]/g, '')}` : '')
+            for (const choice of choices) {
+                const id = choice.contactListId ? String(choice.contactListId) : ''
+                const entry = offered.get(id)
+                if (entry == null) {
+                    ec.logger.warn(`Unsubscribe preferences: contact list ${id} is not one offered for token ${tokenRow.contactListTokenId}, skipped`)
+                    failedContactListIds.push(id)
+                    continue
+                }
+                if (choice.subscribed ? entry.subscribed : ['CLPT_UNSUBSCRIBED', 'CLPT_UNSUBS_PENDING'].includes(entry.statusId)) continue
+                try {
+                    const out = ec.service.sync().name('mantle.party.ConsentServices.set#ContactListPartySubscription').parameters({contactListId: id,
+                        partyId: tokenRow.partyId, subscribe: choice.subscribed, contactMechId: tokenRow.contactMechId || null,
+                        sourceEnumId: 'PcsEmailLink', evidenceText: evidence, comments: choice.subscribed ? null : (reasonText || null),
+                        baseUrl: baseUrl || null}).requireNewTransaction(true).call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    if (out.statusId === 'CLPT_UNSUBS_PENDING') unsubscribePending = true
+                    if (out.verifyEmailSent) verifyEmailSent = true
+                    if (out.changed) changedList.push({contactListId: id, statusId: out.statusId, previousStatusId: out.previousStatusId})
+                } catch (err) {
+                    ec.message.clearErrors()
+                    ec.logger.error(`Unsubscribe preferences: contact list ${id} for token ${tokenRow.contactListTokenId} failed: ${String(err && err.message ? err.message : err).trim()}`)
+                    failedContactListIds.push(id)
+                }
+            }
+            tokenRow.set('usedDate', ec.user.nowTimestamp)
+            tokenRow.update()
+        ]]></script></actions>
+    </service>
+</services>

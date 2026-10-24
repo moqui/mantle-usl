@@ -1,0 +1,681 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- Contact import and export (IronStone Commons ContactImport): parse a file and map its columns, preview what an
+        import would do, import into a contact book with a duplicate policy, and export as CSV (the Google Contacts column
+        set) or vCard 4.0. CSV is read here, with Google Contacts and Outlook presets and a generic match by header words;
+        vCard files are read by the framework's VCard tool (ec.factory.getTool('VCard'), its parse(text)), and until that
+        tool is there a .vcf file gets the error "vCard import is not available yet". The file comes as an upload
+        (contactFile), as text (fileText) or as a resource location (fileLocation), so a large import can run later as a
+        job on a stored file. -->
+
+    <service verb="read" noun="ContactFileText">
+        <description>
+            A contact file's text, from an upload (contactFile) or a resource location (fileLocation), in its character set:
+            characterSet (UTF-8 by default; WINDOWS-1252, ISO-8859-1 or any other Java or WHATWG name, read by the
+            framework's FileItem.getString and stream getText), except that a file that starts with a UTF-16 byte order
+            mark is read as UTF-16 whatever was chosen, and UTF-16 chosen for a file without one is read little-endian, as
+            Windows writes it. The byte order mark is not in text. characterSetUsed is the set the file was read in. text is
+            null for a location with no file. read#ContactRows reads its file so, and an app that keeps the file's text
+            (IronStone BOSS's import draft) reads it with this service.
+        </description>
+        <in-parameters>
+            <parameter name="contactFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileLocation"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="text" allow-html="any"/>
+            <parameter name="characterSetUsed"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            text = null
+            characterSetUsed = null
+            const chosen = String(characterSet || 'UTF-8').trim().toUpperCase()
+            const decode = (bytes, read) => {
+                const bom16 = bytes.length >= 2 && ((bytes[0] === 0xFF && bytes[1] === 0xFE) || (bytes[0] === 0xFE && bytes[1] === 0xFF))
+                characterSetUsed = bom16 ? 'UTF-16' : (chosen === 'UTF-16' || chosen === 'UTF16' ? 'UTF-16LE' : chosen)
+                let out = read(characterSetUsed)
+                if (out != null && String(out).charCodeAt(0) === 0xFEFF) out = String(out).substring(1)
+                return out
+            }
+            try {
+                if (contactFile != null) {
+                    text = decode(contactFile.getInputStream().readAllBytes(), (charset) => contactFile.getString(charset))
+                } else if (fileLocation) {
+                    const stream = ec.resource.getLocationReference(fileLocation).openStream()
+                    if (stream == null) return
+                    try { text = decode(stream.readAllBytes(), (charset) => stream.getText(charset)) } finally { stream.close() }
+                }
+            } catch (err) {
+                ec.message.addError(`The contact file could not be read in ${characterSetUsed || chosen}: ${err && err.message ? err.message : err}`)
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="read" noun="ContactRows" type="script"
+            location="component://mantle-usl/service/mantle/party/ContactImportServices/readContactRows.js">
+        <description>
+            The file's columns and its rows, each mapped to a contact (the map ContactBookServices.store#ContactParty
+            takes, with groupNames and isFavorite) with its problems. A column maps to a target field (targetFieldList):
+            firstName, lastName, fullName, organizationName, jobTitle, birthday, notes, groups and the like, or a numbered
+            email, phone, address or website slot with a part and an optional fixed purpose (email1, email1.label,
+            address2.city, phone3:PhoneMobile). presetId (google, outlook, generic; found from the headers when empty)
+            maps the columns, and columnMapping overrides it per column (an empty target or 'ignore' leaves a column out).
+            An upload or a location is read in characterSet by read#ContactFileText.
+        </description>
+        <in-parameters>
+            <parameter name="contactFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"><description>The file's text, parsed by the framework tool, never shown as HTML; real vCard and ICS files hold &lt; (Apple labels, HTML descriptions)</description></parameter>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="presetId"/>
+            <parameter name="columnMapping" type="Map"><description>Column name to target field</description></parameter>
+            <parameter name="defaultCountryGeoId"><description>The country of addresses without one</description></parameter>
+            <parameter name="maxRows" type="Integer"><description>Map only this many rows (rowCount counts them all)</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fileKind"><description>csv or vcard</description></parameter>
+            <parameter name="presetId"/>
+            <parameter name="columnList" type="List"><parameter name="column" type="Map"><description>columnIndex, columnName,
+                targetField, sampleValues</description></parameter></parameter>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="contactList" type="List"><parameter name="row" type="Map"><description>rowNumber (from 1), values
+                (column to text), contact, problems, empty</description></parameter></parameter>
+            <parameter name="targetFieldList" type="List"><parameter name="targetField" type="Map"><description>fieldName,
+                description</description></parameter></parameter>
+        </out-parameters>
+    </service>
+
+    <service verb="parse" noun="ContactFile">
+        <description>The import's first step: the file's kind, the preset found (or given), its columns each with the target
+            field it maps to and sample values, the first rows, and the row count.</description>
+        <in-parameters>
+            <parameter name="contactFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"><description>The file's text, parsed by the framework tool, never shown as HTML; real vCard and ICS files hold &lt; (Apple labels, HTML descriptions)</description></parameter>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="presetId"/>
+            <parameter name="sampleSize" type="Integer" default="5"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fileKind"/>
+            <parameter name="presetId"/>
+            <parameter name="columnList" type="List"><parameter name="column" type="Map"/></parameter>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="sampleRowList" type="List"><parameter name="row" type="Map"/></parameter>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="targetFieldList" type="List"><parameter name="targetField" type="Map"/></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const read = ec.service.sync().name('mantle.party.ContactImportServices.read#ContactRows').parameters({contactFile: contactFile,
+                fileText: fileText, fileLocation: fileLocation, fileName: fileName, characterSet: characterSet, presetId: presetId,
+                maxRows: sampleSize}).call()
+            if (ec.message.hasError()) return
+            fileKind = read.fileKind
+            presetId = read.presetId
+            columnList = read.columnList
+            columnMapping = read.columnMapping
+            rowCount = read.rowCount
+            targetFieldList = read.targetFieldList
+            sampleRowList = (read.contactList || []).map((row) => row.values)
+        ]]></script></actions>
+    </service>
+
+    <service verb="match" noun="Contact">
+        <description>
+            The existing party a contact matches, among those the user may see (the entity filters, not disabled, and a
+            personal contact only its owner's): by a current email address (ignoring case), else by a phone number (the
+            last ten digits, at least seven) of a party whose first or last name, or organization name, is the contact's
+            too (a shared office number is not a match), else by name (a person's first and last name, an organization's
+            name) when exactly one party has it.
+        </description>
+        <in-parameters><parameter name="contact" type="Map" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="matchedPartyId"/>
+            <parameter name="matchedPseudoId"><description>The matched party's pseudoId, the id to show</description></parameter>
+            <parameter name="matchReason"><description>email, phone or name</description></parameter>
+            <parameter name="matchedName"><description>The matched party's name alone (PartyNameOnlyTemplate), without an id</description></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const userId = ec.user.userId || null
+            const current = cf.makeConditionDate('fromDate', 'thruDate', null)
+            const visible = (id) => {
+                const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', id).one()
+                if (party == null || party.disabled === 'Y' || (party.privateOwnerUserId && party.privateOwnerUserId !== userId)) return null
+                return party
+            }
+            const found = (party, reason) => {
+                matchedPartyId = party.partyId
+                matchedPseudoId = party.pseudoId || party.partyId
+                matchReason = reason
+                matchedName = (ec.resource.expand('PartyNameOnlyTemplate', '', party) || '').trim() || matchedPseudoId
+            }
+            for (const email of contact.emails || []) {
+                if (!email.emailAddress) continue
+                const rows = ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition('contactMechTypeEnumId', 'CmtEmailAddress')
+                        .condition(cf.makeCondition('infoString', 'equals', String(email.emailAddress).trim(), false, true)).condition(current)
+                        .orderBy('partyId').limit(20).list()
+                for (const row of rows) { const party = visible(row.partyId); if (party != null) { found(party, 'email'); return } }
+            }
+            const lastDigits = (text) => String(text || '').replace(/\D/g, '').slice(-10)
+            for (const phone of contact.phones || []) {
+                const digits = lastDigits(`${phone.areaCode || ''}${phone.contactNumber || ''}`)
+                if (digits.length < 7) continue
+                const rows = ec.entity.find('mantle.party.contact.PartyContactMechTelecomNumber').condition(current)
+                        .condition(cf.makeCondition('contactNumber', 'like', `%${digits.slice(-4)}`)).orderBy('partyId').limit(200).list()
+                for (const row of rows) {
+                    const have = lastDigits(`${row.areaCode || ''}${row.contactNumber || ''}`)
+                    const length = Math.min(have.length, digits.length)
+                    if (length < 7 || have.slice(-length) !== digits.slice(-length)) continue
+                    const party = visible(row.partyId)
+                    if (party == null) continue
+                    const same = (a, b) => a && b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase()
+                    const hasName = contact.firstName || contact.lastName || contact.organizationName
+                    if (!hasName || same(party.firstName, contact.firstName) || same(party.lastName, contact.lastName)
+                            || same(party.organizationName, contact.organizationName)) { found(party, 'phone'); return }
+                }
+            }
+            let byName = []
+            if (contact.partyTypeEnumId === 'PtyOrganization') {
+                if (contact.organizationName) byName = ec.entity.find('mantle.party.PartyDetail').condition('partyTypeEnumId', 'PtyOrganization')
+                        .condition(cf.makeCondition('organizationName', 'equals', String(contact.organizationName).trim(), false, true)).limit(10).list()
+            } else if (contact.firstName && contact.lastName) {
+                byName = ec.entity.find('mantle.party.PartyDetail').condition('partyTypeEnumId', 'PtyPerson')
+                        .condition(cf.makeCondition('firstName', 'equals', String(contact.firstName).trim(), false, true))
+                        .condition(cf.makeCondition('lastName', 'equals', String(contact.lastName).trim(), false, true)).limit(10).list()
+            }
+            const named = Array.from(byName).map((party) => visible(party.partyId)).filter((party) => party != null)
+            if (named.length === 1) found(named[0], 'name')
+        ]]></script></actions>
+    </service>
+
+    <service verb="preview" noun="Contacts">
+        <description>
+            What import#Contacts would do with each row, without writing: action create, update or skip (by the duplicate
+            policy for a row that matches an existing party, or an earlier row of the file by email), the matched party,
+            and the row's problems. A row with nothing to import is skipped.
+        </description>
+        <in-parameters>
+            <parameter name="contactFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"><description>The file's text, parsed by the framework tool, never shown as HTML; real vCard and ICS files hold &lt; (Apple labels, HTML descriptions)</description></parameter>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="presetId"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="defaultCountryGeoId"/>
+            <parameter name="duplicatePolicy" default-value="skip"><description>skip, update or create</description></parameter>
+            <parameter name="maxRows" type="Integer"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="rowList" type="List"><parameter name="row" type="Map"><description>rowNumber, action, matchedPartyId,
+                matchedPseudoId, matchedName (the name alone), matchReason, matchedRowNumber, name, contact, problems</description></parameter></parameter>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="createCount" type="Integer"/>
+            <parameter name="updateCount" type="Integer"/>
+            <parameter name="skipCount" type="Integer"/>
+            <parameter name="problemCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            rowList = []
+            createCount = 0; updateCount = 0; skipCount = 0; problemCount = 0
+            if (!['skip', 'update', 'create'].includes(duplicatePolicy)) { ec.message.addError(`Unknown duplicate policy ${duplicatePolicy}`); return }
+            const read = ec.service.sync().name('mantle.party.ContactImportServices.read#ContactRows').parameters({contactFile: contactFile,
+                fileText: fileText, fileLocation: fileLocation, fileName: fileName, characterSet: characterSet, presetId: presetId,
+                columnMapping: columnMapping, defaultCountryGeoId: defaultCountryGeoId, maxRows: maxRows}).call()
+            if (ec.message.hasError()) return
+            rowCount = read.rowCount
+            const seenEmails = new Map()
+            for (const row of read.contactList || []) {
+                const contact = row.contact
+                const out = {rowNumber: row.rowNumber, action: 'create', matchedPartyId: null, matchedPseudoId: null, matchedName: null, matchReason: null,
+                    matchedRowNumber: null, name: contact.partyTypeEnumId === 'PtyOrganization' ? contact.organizationName
+                        : [contact.firstName, contact.lastName].filter((part) => part).join(' '), contact: contact, problems: row.problems || []}
+                if (row.empty) {
+                    out.action = 'skip'
+                } else {
+                    const match = ec.service.sync().name('mantle.party.ContactImportServices.match#Contact').parameters({contact: contact}).call()
+                    if (ec.message.hasError()) return
+                    let matched = false
+                    if (match.matchedPartyId) {
+                        Object.assign(out, {matchedPartyId: match.matchedPartyId, matchedPseudoId: match.matchedPseudoId, matchedName: match.matchedName,
+                            matchReason: match.matchReason})
+                        matched = true
+                    } else {
+                        // an earlier row of the file with the same email is matched when that row is imported
+                        const earlier = (contact.emails || []).map((email) => seenEmails.get(String(email.emailAddress).toLowerCase())).find((number) => number)
+                        if (earlier) { Object.assign(out, {matchReason: 'file', matchedRowNumber: earlier}); matched = true }
+                    }
+                    if (matched && duplicatePolicy !== 'create') out.action = duplicatePolicy
+                    for (const email of contact.emails || []) {
+                        const key = String(email.emailAddress).toLowerCase()
+                        if (!seenEmails.has(key)) seenEmails.set(key, row.rowNumber)
+                    }
+                }
+                if (out.action === 'create') createCount++
+                else if (out.action === 'update') updateCount++
+                else skipCount++
+                if (out.problems.length) problemCount++
+                rowList.push(out)
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="import" noun="Contacts" transaction-timeout="3600">
+        <description>
+            Imports the rows of a contact file as personal contacts (asPersonal, the default: seen only by the user, into
+            one of the user's personal books, the default book when contactBookId is empty) or as directory parties (with
+            roleTypeId, into contactBookId when given). A row matching an existing party (match#Contact, which also finds
+            the parties earlier rows created) is skipped, updated (empty fields filled, new emails, phones and addresses
+            added; the data of a directory party changes only in a directory import) or created anyway, by
+            duplicatePolicy. Each row is imported in its own transaction: a row that fails is reported in failureList and
+            the rest are imported. The file's groups (labels, categories) and groupNames become groups of the book.
+
+            With progressUserId, how far it is goes to that user as a NotificationMessage on the topic
+            contactImportProgress (not persisted unless the topic says so), every 25 rows and once at the end:
+            {progressKey, done, total, createdCount, updatedCount, skippedCount, failedCount, finished}. A message that
+            cannot be sent is logged and the import goes on.
+        </description>
+        <in-parameters>
+            <parameter name="contactFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"><description>The file's text, parsed by the framework tool, never shown as HTML; real vCard and ICS files hold &lt; (Apple labels, HTML descriptions)</description></parameter>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="presetId"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="defaultCountryGeoId"/>
+            <parameter name="duplicatePolicy" default-value="skip"><description>skip, update or create</description></parameter>
+            <parameter name="asPersonal" type="Boolean" default="true"/>
+            <parameter name="roleTypeId"><description>The role of new directory parties</description></parameter>
+            <parameter name="contactBookId"/>
+            <parameter name="contactBookGroupIdList" type="List"><parameter name="contactBookGroupId"/></parameter>
+            <parameter name="groupNames"><description>Comma-separated groups every imported contact gets, created in the book
+                when missing</description></parameter>
+            <parameter name="useFileGroups" type="Boolean" default="true"/>
+            <parameter name="progressUserId"><description>The user who gets the progress messages</description></parameter>
+            <parameter name="progressKey"><description>Names this import in the progress messages, such as the caller's import id</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="contactBookId"/>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="createdCount" type="Integer"/>
+            <parameter name="updatedCount" type="Integer"/>
+            <parameter name="skippedCount" type="Integer"/>
+            <parameter name="failedCount" type="Integer"/>
+            <parameter name="failureList" type="List"><parameter name="failure" type="Map"><description>rowNumber, values,
+                error</description></parameter></parameter>
+            <parameter name="resultList" type="List"><parameter name="result" type="Map"><description>rowNumber, action,
+                partyId, matchedPartyId</description></parameter></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            createdCount = 0; updatedCount = 0; skippedCount = 0; failedCount = 0
+            failureList = []
+            resultList = []
+            if (!ec.user.userId) { ec.message.addError('A contact import needs a user'); return }
+            if (!['skip', 'update', 'create'].includes(duplicatePolicy)) { ec.message.addError(`Unknown duplicate policy ${duplicatePolicy}`); return }
+            // writes before the rows go in transactions of their own, so a row's transaction does not wait on this one
+            const separately = (name, parameters) => ec.service.sync().name(name).parameters(parameters || {}).requireNewTransaction(true).call()
+            if (asPersonal && !contactBookId) {
+                contactBookId = separately('mantle.party.ContactBookServices.ensure#UserDefaultContactBook')?.contactBookId
+                if (ec.message.hasError()) return
+            }
+            let access = null
+            if (contactBookId) {
+                access = ec.service.sync().name('mantle.party.ContactBookServices.check#ContactBookAccess')
+                        .parameters({contactBookId: contactBookId, permissionEnumId: 'CbpEdit'}).call()
+                if (ec.message.hasError()) return
+                if (asPersonal && !access.isOwner) {
+                    ec.message.addError('Personal contacts go in one of your personal books; import directory contacts into a shared book'); return }
+            }
+            const read = ec.service.sync().name('mantle.party.ContactImportServices.read#ContactRows').parameters({contactFile: contactFile,
+                fileText: fileText, fileLocation: fileLocation, fileName: fileName, characterSet: characterSet, presetId: presetId,
+                columnMapping: columnMapping, defaultCountryGeoId: defaultCountryGeoId}).call()
+            if (ec.message.hasError()) return
+            rowCount = read.rowCount
+
+            // the book's groups by name: the options' groups, groupNames and the file's groups, created when missing
+            const groupIdByName = {}
+            const optionGroupIds = Array.from(contactBookGroupIdList || [])
+            for (const groupId of optionGroupIds) {
+                const group = ec.entity.find('mantle.party.contact.ContactBookGroup').condition('contactBookGroupId', groupId).one()
+                if (group == null || group.contactBookId !== contactBookId) { ec.message.addError(`Group ${groupId} is not in contact book ${contactBookId}`); return }
+            }
+            if (contactBookId) {
+                const names = String(groupNames || '').split(',').map((group) => group.trim()).filter((group) => group)
+                if (useFileGroups) for (const row of read.contactList || []) for (const group of row.contact.groupNames || []) names.push(group)
+                for (const group of names) {
+                    const key = group.toLowerCase()
+                    if (groupIdByName[key]) continue
+                    const out = separately('mantle.party.ContactBookServices.create#ContactBookGroup', {contactBookId: contactBookId, groupName: group})
+                    if (ec.message.hasError()) {
+                        ec.logger.error(`Contact import into ${contactBookId}: group ${group} not created: ${ec.message.getErrorsString()}`)
+                        ec.message.clearErrors()
+                        continue
+                    }
+                    groupIdByName[key] = out.contactBookGroupId
+                }
+                for (const group of String(groupNames || '').split(',').map((name) => name.trim().toLowerCase()).filter((name) => name)) {
+                    if (groupIdByName[group]) optionGroupIds.push(groupIdByName[group])
+                }
+            } else if (optionGroupIds.length || groupNames) {
+                ec.message.addError('Groups need a contact book'); return
+            }
+
+            // how far it is, for the user watching (a failed send is logged; the rows go on)
+            const rows = Array.from(read.contactList || [])
+            const progress = (done, finished) => {
+                if (!progressUserId) return
+                try {
+                    ec.makeNotificationMessage().topic('contactImportProgress').userId(progressUserId).message({progressKey: progressKey || null,
+                        done: done, total: rows.length, createdCount, updatedCount, skippedCount, failedCount, finished: finished}).send()
+                } catch (err) { ec.logger.warn(`Contact import progress for ${progressUserId} not sent: ${err}`) }
+            }
+            let rowsDone = 0
+            for (const row of rows) {
+                if (rowsDone > 0 && rowsDone % 25 === 0) progress(rowsDone, false)
+                rowsDone++
+                if (row.empty) {
+                    skippedCount++
+                    resultList.push({rowNumber: row.rowNumber, action: 'skip', partyId: null, matchedPartyId: null})
+                    continue
+                }
+                const rowGroupIds = useFileGroups ? (row.contact.groupNames || []).map((group) => groupIdByName[group.toLowerCase()]).filter((id) => id) : []
+                try {
+                    const out = ec.service.sync().name('mantle.party.ContactImportServices.import#ContactRow').parameters({contact: row.contact,
+                        duplicatePolicy: duplicatePolicy, asPersonal: asPersonal, roleTypeId: roleTypeId, contactBookId: contactBookId,
+                        contactBookGroupIdList: Array.from(new Set(optionGroupIds.concat(rowGroupIds)))}).requireNewTransaction(true).call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    if (out.action === 'create') createdCount++
+                    else if (out.action === 'update') updatedCount++
+                    else skippedCount++
+                    resultList.push({rowNumber: row.rowNumber, action: out.action, partyId: out.partyId ?? null, matchedPartyId: out.matchedPartyId ?? null})
+                } catch (err) {
+                    const error = String(err && err.message ? err.message : err).trim()
+                    ec.message.clearErrors()
+                    ec.logger.warn(`Contact import row ${row.rowNumber} failed: ${error}`)
+                    failedCount++
+                    failureList.push({rowNumber: row.rowNumber, values: row.values, error: error})
+                    resultList.push({rowNumber: row.rowNumber, action: 'fail', partyId: null, matchedPartyId: null})
+                }
+            }
+            progress(rowsDone, true)
+        ]]></script></actions>
+    </service>
+    <service verb="import" noun="ContactRow">
+        <description>One row of import#Contacts, which runs it in its own transaction: match, then skip, update or create by
+            the duplicate policy, then add the party to the book and groups.</description>
+        <in-parameters>
+            <parameter name="contact" type="Map" required="true"/>
+            <parameter name="duplicatePolicy" default-value="skip"/>
+            <parameter name="asPersonal" type="Boolean" default="true"/>
+            <parameter name="roleTypeId"/>
+            <parameter name="contactBookId"/>
+            <parameter name="contactBookGroupIdList" type="List"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="action"><description>create, update or skip</description></parameter>
+            <parameter name="partyId"/>
+            <parameter name="matchedPartyId"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const userId = ec.user.userId
+            const match = ec.service.sync().name('mantle.party.ContactImportServices.match#Contact').parameters({contact: contact}).call()
+            if (ec.message.hasError()) return
+            matchedPartyId = match.matchedPartyId || null
+            if (matchedPartyId && duplicatePolicy === 'skip') { action = 'skip'; partyId = matchedPartyId; return }
+            if (matchedPartyId && duplicatePolicy === 'update') {
+                const party = ec.entity.find('mantle.party.Party').condition('partyId', matchedPartyId).one()
+                // a personal import does not change a directory party's data, it only adds the party to the book
+                const updateData = party.privateOwnerUserId === userId || !asPersonal
+                ec.service.sync().name('mantle.party.ContactBookServices.store#ContactParty').parameters({contact: contact,
+                    partyId: matchedPartyId, updateData: updateData}).call()
+                if (ec.message.hasError()) return
+                action = 'update'
+                partyId = matchedPartyId
+            } else {
+                partyId = ec.service.sync().name('mantle.party.ContactBookServices.store#ContactParty').parameters({contact: contact,
+                    privateOwnerUserId: asPersonal ? userId : null, roleTypeId: asPersonal ? null : roleTypeId}).call()?.partyId
+                if (ec.message.hasError()) return
+                action = 'create'
+            }
+            if (contactBookId) {
+                const out = ec.service.sync().name('mantle.party.ContactBookServices.add#ContactBookParties').parameters({contactBookId: contactBookId,
+                    partyIdList: [partyId], contactBookGroupIdList: contactBookGroupIdList, isFavorite: contact.isFavorite ? 'Y' : null}).call()
+                if (ec.message.hasError()) return
+                if (out?.failedPartyIdList?.length) ec.message.addError(`Party ${partyId} could not be added to contact book ${contactBookId}`)
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="export" noun="Contacts">
+        <description>
+            The parties of a contact book (needs view permission; a group of it, or its favorites, with contactBookGroupId
+            or favoritesOnly) or of partyIdList, those the user may see, as CSV in the Google Contacts column set (format
+            csv, the default) or as vCard 4.0 (format vcard): the framework's VCard tool writes the cards when it is there
+            (its write(contacts, version), with the maps this service builds), else a writer here does.
+        </description>
+        <in-parameters>
+            <parameter name="contactBookId"/>
+            <parameter name="contactBookGroupId"/>
+            <parameter name="favoritesOnly" type="Boolean" default="false"/>
+            <parameter name="partyIdList" type="List"><parameter name="partyId"/></parameter>
+            <parameter name="format" default-value="csv"><description>csv or vcard</description></parameter>
+            <parameter name="vcardVersion" default-value="4.0"><description>4.0, or 3.0 (what phones read best; the CardDAV adapter's)</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fileText" allow-html="any"><description>The file's text, parsed by the framework tool, never shown as HTML; real vCard and ICS files hold &lt; (Apple labels, HTML descriptions)</description></parameter>
+            <parameter name="fileName"/>
+            <parameter name="contentType"/>
+            <parameter name="exportedCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            exportedCount = 0
+            if (format !== 'csv' && format !== 'vcard') { ec.message.addError(`Unknown contact export format ${format}`); return }
+            const cf = ec.entity.conditionFactory
+            const userId = ec.user.userId || null
+            const current = cf.makeConditionDate('fromDate', 'thruDate', null)
+            let ids = []
+            const favorites = new Set()
+            const groupsByParty = new Map()
+            let bookName = 'contacts'
+            if (contactBookId) {
+                const found = ec.service.sync().name('mantle.party.ContactBookServices.find#ContactBookParties').parameters({contactBookId: contactBookId,
+                    contactBookGroupId: contactBookGroupId, favoritesOnly: favoritesOnly, pageNoLimit: true}).call()
+                if (ec.message.hasError()) return
+                for (const contact of found.contactList || []) {
+                    ids.push(contact.partyId)
+                    if (contact.isFavorite) favorites.add(contact.partyId)
+                    groupsByParty.set(contact.partyId, (contact.groupList || []).map((group) => group.groupName))
+                }
+                const book = ec.entity.find('mantle.party.contact.ContactBook').condition('contactBookId', contactBookId).one()
+                if (book?.contactBookName) bookName = book.contactBookName
+            } else {
+                ids = Array.from(new Set(Array.from(partyIdList || []).map((id) => String(id).trim()).filter((id) => id)))
+            }
+
+            // a date reaches the script as epoch millis text; the date is its UTC day, as yyyy-MM-dd
+            const dayOf = (value) => {
+                if (value == null || value === '') return null
+                const textValue = String(value)
+                return /^-?\d+$/.test(textValue) ? new Date(Number(textValue)).toISOString().substring(0, 10) : textValue.substring(0, 10)
+            }
+            // each party as the user may see it, with its current contact information
+            const contacts = []
+            for (const id of ids) {
+                const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', id).one()
+                if (party == null || (party.privateOwnerUserId && party.privateOwnerUserId !== userId)) {
+                    ec.logger.warn(`Contact export: party ${id} not found, left out`)
+                    continue
+                }
+                const isOrg = party.partyTypeEnumId === 'PtyOrganization'
+                const infos = Array.from(ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition('partyId', id).condition(current)
+                        .orderBy('fromDate').list())
+                const emails = infos.filter((info) => info.contactMechTypeEnumId === 'CmtEmailAddress' && info.infoString)
+                        .sort((a, b) => (a.contactMechPurposeId === 'EmailPrimary' ? 0 : 1) - (b.contactMechPurposeId === 'EmailPrimary' ? 0 : 1))
+                        .map((info) => ({emailAddress: info.infoString, contactMechPurposeId: info.contactMechPurposeId}))
+                const websites = infos.filter((info) => info.contactMechTypeEnumId === 'CmtWebAddress' && info.infoString)
+                        .map((info) => ({webAddress: info.infoString, contactMechPurposeId: info.contactMechPurposeId}))
+                const phoneRank = ['PhonePrimary', 'PhoneMobile']
+                const rank = (purposeId) => { const index = phoneRank.indexOf(purposeId); return index < 0 ? phoneRank.length : index }
+                const phones = Array.from(ec.entity.find('mantle.party.contact.PartyContactMechTelecomNumber').condition('partyId', id)
+                        .condition(current).orderBy('fromDate').list()).map((tn) => tn.getMap())
+                        .sort((a, b) => rank(a.contactMechPurposeId) - rank(b.contactMechPurposeId))
+                const seenAddresses = new Set()
+                const addresses = Array.from(ec.entity.find('mantle.party.contact.PartyContactMechPostalAddress').condition('partyId', id)
+                        .condition(current).orderBy('fromDate').list()).map((pa) => pa.getMap())
+                        .filter((pa) => !seenAddresses.has(pa.contactMechId) && seenAddresses.add(pa.contactMechId))
+                for (const address of addresses) {
+                    const country = address.countryGeoId ? ec.entity.find('moqui.basic.Geo').condition('geoId', address.countryGeoId).useCache(true).one() : null
+                    address.countryName = country?.geoName ?? null
+                    address.countryCode2 = country?.geoCodeAlpha2 ?? null
+                }
+                let organizationName = isOrg ? party.organizationName : null
+                let jobTitle = null
+                if (!isOrg) {
+                    const rel = Array.from(ec.entity.find('mantle.party.PartyRelationship').condition('fromPartyId', id)
+                            .condition(cf.makeCondition('relationshipTypeEnumId', 'in', ['PrtContact', 'PrtEmployee'])).condition(current)
+                            .orderBy('-fromDate').list()).find((candidate) => {
+                                const org = ec.entity.find('mantle.party.PartyDetail').condition('partyId', candidate.toPartyId).one()
+                                return org != null && (!org.privateOwnerUserId || org.privateOwnerUserId === userId)
+                            })
+                    if (rel != null) {
+                        organizationName = ec.entity.find('mantle.party.Organization').condition('partyId', rel.toPartyId).one()?.organizationName ?? null
+                        jobTitle = rel.relationshipName ?? null
+                    }
+                }
+                contacts.push({partyId: id, isOrganization: isOrg, firstName: party.firstName ?? null, middleName: party.middleName ?? null,
+                    lastName: party.lastName ?? null, personalTitle: party.personalTitle ?? null, suffix: party.suffix ?? null,
+                    nickname: party.nickname ?? null, organizationName: organizationName, jobTitle: jobTitle,
+                    birthDate: dayOf(party.birthDate), comments: party.comments ?? null,
+                    name: ec.resource.expand('PartyFullNameTemplate', '', party).trim(), emails: emails, phones: phones,
+                    addresses: addresses, websites: websites, groupNames: groupsByParty.get(id) || [], isFavorite: favorites.has(id)})
+            }
+            exportedCount = contacts.length
+            const baseName = String(bookName).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'contacts'
+            const phoneText = (tn) => [tn.countryCode ? '+' + tn.countryCode : null, tn.areaCode, tn.contactNumber].filter((part) => part).join(' ')
+            const emailLabels = {EmailPrimary: 'Home', EmailOther: 'Other'}
+            const phoneLabels = {PhoneMobile: 'Mobile', PhoneHome: 'Home', PhoneWork: 'Work', PhoneFax: 'Work Fax', PhonePrimary: 'Main',
+                PhoneAssistant: 'Other', Other: 'Other'}
+            const postalLabels = {PostalHome: 'Home', PostalWork: 'Work', PostalPrimary: 'Home'}
+
+            if (format === 'csv') {
+                // the Google Contacts columns, with as many E-mail, Phone, Address and Website slots as the contacts need
+                const slots = (kind) => Math.max(1, ...contacts.map((contact) => contact[kind].length))
+                const header = ['First Name', 'Middle Name', 'Last Name', 'Name Prefix', 'Name Suffix', 'Nickname', 'Organization Name',
+                    'Organization Title', 'Birthday', 'Notes', 'Labels']
+                for (let n = 1; n <= slots('emails'); n++) header.push(`E-mail ${n} - Label`, `E-mail ${n} - Value`)
+                for (let n = 1; n <= slots('phones'); n++) header.push(`Phone ${n} - Label`, `Phone ${n} - Value`)
+                for (let n = 1; n <= slots('addresses'); n++) header.push(`Address ${n} - Label`, `Address ${n} - Formatted`, `Address ${n} - Street`,
+                    `Address ${n} - City`, `Address ${n} - PO Box`, `Address ${n} - Region`, `Address ${n} - Postal Code`,
+                    `Address ${n} - Country`, `Address ${n} - Extended Address`)
+                for (let n = 1; n <= slots('websites'); n++) header.push(`Website ${n} - Label`, `Website ${n} - Value`)
+                const quote = (value) => {
+                    const textValue = value == null ? '' : String(value)
+                    return /[",\r\n]/.test(textValue) ? `"${textValue.replace(/"/g, '""')}"` : textValue
+                }
+                const lines = [header.map(quote).join(',')]
+                for (const contact of contacts) {
+                    const labels = ['* myContacts'].concat(contact.isFavorite ? ['* starred'] : [], contact.groupNames)
+                    const cells = contact.isOrganization ? ['', '', '', '', '', '', contact.organizationName, '', '', contact.comments, labels.join(' ::: ')]
+                        : [contact.firstName, contact.middleName, contact.lastName, contact.personalTitle, contact.suffix, contact.nickname,
+                            contact.organizationName, contact.jobTitle, contact.birthDate, contact.comments, labels.join(' ::: ')]
+                    for (let n = 0; n < slots('emails'); n++) {
+                        const email = contact.emails[n]
+                        cells.push(email ? (n === 0 ? '* ' : '') + (emailLabels[email.contactMechPurposeId] || 'Work') : '', email ? email.emailAddress : '')
+                    }
+                    for (let n = 0; n < slots('phones'); n++) {
+                        const phone = contact.phones[n]
+                        cells.push(phone ? (n === 0 ? '* ' : '') + (phoneLabels[phone.contactMechPurposeId] || 'Other') : '', phone ? phoneText(phone) : '')
+                    }
+                    for (let n = 0; n < slots('addresses'); n++) {
+                        const pa = contact.addresses[n]
+                        if (!pa) { cells.push('', '', '', '', '', '', '', '', ''); continue }
+                        const region = pa.stateGeoCodeAlpha2 || pa.stateGeoName || ''
+                        const formatted = [pa.address1, pa.address2, [pa.city, [region, pa.postalCode].filter((part) => part).join(' ')]
+                            .filter((part) => part).join(', '), pa.countryName].filter((part) => part).join('\n')
+                        cells.push(postalLabels[pa.contactMechPurposeId] || 'Other', formatted, pa.address1, pa.city, '', region, pa.postalCode,
+                            pa.countryName, pa.address2)
+                    }
+                    for (let n = 0; n < slots('websites'); n++) {
+                        const website = contact.websites[n]
+                        cells.push(website ? 'Profile' : '', website ? website.webAddress : '')
+                    }
+                    lines.push(cells.map(quote).join(','))
+                }
+                fileText = lines.join('\r\n') + '\r\n'
+                fileName = `${baseName}.csv`
+                contentType = 'text/csv'
+                return
+            }
+
+            fileName = `${baseName}.vcf`
+            contentType = 'text/vcard'
+            if (ec.factory.getToolFactory('VCard') != null) {
+                fileText = ec.factory.getTool('VCard').write(contacts, vcardVersion === '3.0' ? '3.0' : '4.0')
+                return
+            }
+            // vCard 4.0 (RFC 6350): text values escaped, lines folded at 75 octets, CRLF line ends
+            const escape = (value) => String(value == null ? '' : value).replace(/\\/g, '\\\\').replace(/,/g, '\\,').replace(/;/g, '\\;')
+                    .replace(/\r?\n/g, '\\n')
+            const fold = (line) => {
+                const out = []
+                let chunk = ''
+                let size = 0
+                for (const ch of line) {
+                    const bytes = ch.charCodeAt(0) < 0x80 ? 1 : (ch.charCodeAt(0) < 0x800 ? 2 : (ch.length > 1 ? 4 : 3))
+                    if (size + bytes > (out.length ? 74 : 75)) { out.push(chunk); chunk = ''; size = 0 }
+                    chunk += ch
+                    size += bytes
+                }
+                out.push(chunk)
+                return out.join('\r\n ')
+            }
+            const emailTypes = {EmailPrimary: 'home', EmailOther: 'other'}
+            const phoneTypes = {PhoneMobile: 'cell', PhoneHome: 'home', PhoneWork: 'work', PhoneFax: 'fax', PhonePrimary: 'voice'}
+            const postalTypes = {PostalHome: 'home', PostalWork: 'work', PostalPrimary: 'home'}
+            const cards = []
+            for (const contact of contacts) {
+                const lines = ['BEGIN:VCARD', 'VERSION:4.0', `UID:urn:moqui:mantle.party.Party:${escape(contact.partyId)}`]
+                if (contact.isOrganization) lines.push('KIND:org')
+                lines.push(`FN:${escape(contact.name || contact.organizationName || contact.partyId)}`)
+                if (!contact.isOrganization) lines.push(`N:${[contact.lastName, contact.firstName, contact.middleName, contact.personalTitle,
+                    contact.suffix].map(escape).join(';')}`)
+                if (contact.nickname) lines.push(`NICKNAME:${escape(contact.nickname)}`)
+                if (contact.organizationName) lines.push(`ORG:${escape(contact.organizationName)}`)
+                if (contact.jobTitle) lines.push(`TITLE:${escape(contact.jobTitle)}`)
+                if (contact.birthDate) lines.push(`BDAY:${contact.birthDate.replace(/-/g, '')}`)
+                contact.emails.forEach((email, index) => lines.push(`EMAIL;TYPE=${emailTypes[email.contactMechPurposeId] || 'work'}${index === 0 ? ';PREF=1' : ''}:${escape(email.emailAddress)}`))
+                contact.phones.forEach((phone, index) => lines.push(`TEL;TYPE=${phoneTypes[phone.contactMechPurposeId] || 'voice'}${index === 0 ? ';PREF=1' : ''}:${escape(phoneText(phone))}`))
+                for (const pa of contact.addresses) {
+                    lines.push(`ADR;TYPE=${postalTypes[pa.contactMechPurposeId] || 'work'}:${['', pa.address2, pa.address1, pa.city,
+                        pa.stateGeoCodeAlpha2 || pa.stateGeoName, pa.postalCode, pa.countryName].map(escape).join(';')}`)
+                }
+                for (const website of contact.websites) lines.push(`URL:${escape(website.webAddress)}`)
+                if (contact.groupNames.length) lines.push(`CATEGORIES:${contact.groupNames.map(escape).join(',')}`)
+                if (contact.comments) lines.push(`NOTE:${escape(contact.comments)}`)
+                lines.push('END:VCARD')
+                cards.push(lines.map(fold).join('\r\n'))
+            }
+            fileText = cards.length ? cards.join('\r\n') + '\r\n' : ''
+        ]]></script></actions>
+    </service>
+</services>

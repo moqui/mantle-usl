@@ -1,0 +1,1211 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<!-- People's capacity and their allocations to projects (IronStone Projects, design-projects.md §9 and §15 Capacity and
+    Allocations; impl-projects.md P7).
+
+    Capacity: a person's working hours by day (base) are their WetAvailable work efforts (the weekly working hours Commons'
+    calendar settings write, expanded by mantle.work.EventServices.get#FullCalendarData), or with none the timesheet policy's
+    hours of a working day on its working days (TimesheetServices.get#TimesheetPolicy dh and wd); a holiday of the policy's
+    organization (a WorkEffort of purpose WepHoliday owned by it, on its allDayStart) takes the whole day, leave (WetTimeOff
+    events the person is on, an all-day one the whole day) its hours. People's working-schedule record, when it exists,
+    replaces the WetAvailable source in get#PartyCapacity and nothing else changes. Days are the session's time zone's; weeks
+    start on weekStart (ISO, 1 Monday).
+
+    Allocations (WorkEffortAllocation): hours a week, or a percent of the person's capacity, of a person or of a placeholder (a
+    project role and skill with no person yet) on a project, from one day to another. An allocation's hours fall on the
+    person's working days in proportion to each day's working hours (a placeholder's on the policy's days), so a part week
+    gets its part. Leave and holidays do not lower an allocation: a week whose allocations (or assigned work) pass its
+    capacity is overbooked.
+
+    Who: a project's managers (ProjectManager or Manager) request allocations on it; the holders of ALLOCATION_APPROVE (and
+    ADMIN) approve, reject and change them, staff placeholders, and allocate at once. An allocation is seen by those who see its
+    project (ProjectServices.get#VisibleProjectInfo); hours on projects the user does not see still count in a person's load,
+    as Other projects. The topics: AllocationRequest (to the approvers when requested; its approve and refuse services decide
+    it from the tray) and AllocationDecision (to the requester and the person). -->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- ========== Capacity ========== -->
+
+    <service verb="get" noun="PartyCapacity">
+        <description>The capacity of people from fromDate to thruDate (days, inclusive; at most 400 days), each {partyId, source
+            (available: their WetAvailable working hours; policy: the timesheet policy's), organizationPartyId, dayList [{day, isoDay,
+            weekStart, base (the working hours before holidays and leave), holiday (its name or null), leave (hours), capacity}],
+            weekList [{weekStart, base, holidayHours, leaveHours, capacity, workDays}], base, capacity}. With no partyId and no
+            partyIdList, one entry with partyId null: the standard week of the user's (or organizationPartyId's) policy, as a
+            placeholder is planned. policy with organizationPartyId (as get#WeekDays passes them) apply to every party with no
+            working hours of their own. A person whose working hours or leave do not read is logged and planned by the policy.</description>
+        <in-parameters>
+            <parameter name="partyId"/>
+            <parameter name="partyIdList" type="List"/>
+            <parameter name="fromDate" required="true"><description>A day, yyyy-MM-dd</description></parameter>
+            <parameter name="thruDate" required="true"><description>The last day, yyyy-MM-dd</description></parameter>
+            <parameter name="weekStart" type="Integer" default="1"/>
+            <parameter name="policy" type="Map"/>
+            <parameter name="organizationPartyId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="capacityList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const dayOf = (value) => { if (value == null || value === '') return ''; const text = String(value); return /^-?\d+$/.test(text) ? new Date(Number(text)).toISOString().slice(0, 10) : text.slice(0, 10) }
+capacityList = []
+            const dayNum = (text) => Math.floor(Date.parse(String(text).slice(0, 10) + 'T00:00:00Z') / 86400000)
+            const dayText = (num) => new Date(num * 86400000).toISOString().slice(0, 10)
+            const isoDayOf = (text) => { const js = new Date(String(text).slice(0, 10) + 'T12:00:00Z').getUTCDay(); return js === 0 ? 7 : js }
+            const first = Number(weekStart) >= 1 && Number(weekStart) <= 7 ? Number(weekStart) : 1
+            const weekOf = (text) => dayText(dayNum(text) - ((isoDayOf(text) - first + 7) % 7))
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                const text = String(value)
+                if (/^-?\d+$/.test(text)) return Number(text)
+                const parsed = Date.parse(text)
+                return Number.isNaN(parsed) ? null : parsed
+            }
+            const dayStartMs = (text) => toMillis(ec.l10n.parseTimestamp(text + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'))
+            const round = (value) => Math.round(value * 100) / 100
+            const fromText = dayOf(fromDate || '')
+            const thruText = dayOf(thruDate || '')
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(fromText) || !/^\d{4}-\d{2}-\d{2}$/.test(thruText)) { ec.message.addError(ec.l10n.localize('Capacity needs days as yyyy-MM-dd')); return }
+            if (dayNum(thruText) < dayNum(fromText)) { ec.message.addError(ec.l10n.localize('Capacity needs the last day on or after the first')); return }
+            if (dayNum(thruText) - dayNum(fromText) > 400) { ec.message.addError(ec.l10n.localize('Capacity covers at most 400 days')); return }
+            const days = []
+            for (let num = dayNum(fromText); num <= dayNum(thruText); num++) days.push(dayText(num))
+            const starts = days.map(dayStartMs)
+            const endMs = dayStartMs(dayText(dayNum(thruText) + 1))
+            const dayIndexOf = (millis) => {
+                // the day a moment is in: the last day start at or before it
+                let low = 0, high = starts.length - 1, found = -1
+                while (low <= high) { const mid = (low + high) >> 1; if (starts[mid] <= millis) { found = mid; low = mid + 1 } else high = mid - 1 }
+                return found
+            }
+            // the hours of each day an interval covers
+            const spread = (startMs, stopMs, into) => {
+                if (stopMs <= starts[0] || startMs >= endMs) return
+                for (let i = Math.max(0, dayIndexOf(startMs)); i < days.length; i++) {
+                    const dayStart = starts[i]
+                    const dayEnd = i + 1 < starts.length ? starts[i + 1] : endMs
+                    if (dayStart >= stopMs) break
+                    const overlap = Math.min(stopMs, dayEnd) - Math.max(startMs, dayStart)
+                    if (overlap > 0) into[i] += overlap / 3600000
+                }
+            }
+            const parties = Array.from(new Set((partyIdList != null ? Array.from(partyIdList) : []).concat(partyId ? [partyId] : []).filter((id) => id)))
+            const policies = {}
+            const holidaysByOrg = {}
+            const policyOf = (person) => {
+                if (policy != null && organizationPartyId) return {policy: policy, organizationPartyId: organizationPartyId}
+                const key = person || '_'
+                if (!policies[key]) {
+                    const out = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').parameters(person ? {partyId: person}
+                            : (organizationPartyId ? {organizationPartyId: organizationPartyId} : {})).call() || {}
+                    policies[key] = {policy: policy || out.policy || {dayHours: 8, workDays: [1, 2, 3, 4, 5]}, organizationPartyId: organizationPartyId || out.organizationPartyId || null}
+                }
+                return policies[key]
+            }
+            const holidaysOf = (orgId) => {
+                if (!orgId) return {}
+                if (!holidaysByOrg[orgId]) {
+                    holidaysByOrg[orgId] = {}
+                    try {
+                        for (const row of ec.entity.find('mantle.work.effort.WorkEffort').condition('purposeEnumId', 'WepHoliday').condition('ownerPartyId', orgId)
+                                .condition('allDayStart', 'in', days).disableAuthz().list())
+                            holidaysByOrg[orgId][dayOf(row.allDayStart)] = row.workEffortName || ec.l10n.localize('Holiday')
+                    } catch (err) { ec.logger.error(`Capacity: the holidays of ${orgId} were not read, none marked: ${err}`) }
+                }
+                return holidaysByOrg[orgId]
+            }
+            const calendar = (person, typeId) => {
+                const out = ec.service.sync().name('mantle.work.EventServices.get#FullCalendarData').parameters({partyId: person, start: fromText,
+                    end: dayText(dayNum(thruText) + 1), includeAllUsers: false, excludeCancelled: true, workEffortTypeEnumIds: [typeId], titleGString: '-'}).call()
+                if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                return Array.from(out?.eventList || [])
+            }
+            const entryOf = (person) => {
+                const {policy: thePolicy, organizationPartyId: orgId} = policyOf(person)
+                const workDays = Array.from(thePolicy.workDays || [1, 2, 3, 4, 5]).map(Number)
+                const dayHours = Number(thePolicy.dayHours || 8)
+                let base = days.map((day) => workDays.includes(isoDayOf(day)) ? dayHours : 0)
+                let source = 'policy'
+                const leave = days.map(() => 0)
+                if (person) {
+                    ec.message.pushErrors()
+                    try {
+                        const cf = ec.entity.conditionFactory
+                        const hasAvailable = ec.entity.find('mantle.work.effort.WorkEffortAndParty').condition('workEffortTypeEnumId', 'WetAvailable')
+                                .condition('partyId', person).condition(cf.makeConditionDate('fromDate', 'thruDate', null)).count() > 0
+                                || ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortTypeEnumId', 'WetAvailable').condition('ownerPartyId', person).count() > 0
+                        if (hasAvailable) {
+                            const hours = days.map(() => 0)
+                            for (const event of calendar(person, 'WetAvailable')) {
+                                const startMs = toMillis(event.startMillis)
+                                const stopMs = event.endMillis != null ? toMillis(event.endMillis) : startMs + 3600000
+                                if (startMs != null && stopMs > startMs) spread(startMs, stopMs, hours)
+                            }
+                            base = hours.map((value) => Math.min(24, round(value)))
+                            source = 'available'
+                        }
+                    } catch (err) {
+                        ec.logger.error(`Capacity of ${person}: the working hours were not read, the policy's apply: ${err && err.message ? err.message : err}`)
+                    } finally { ec.message.clearErrors(); ec.message.popErrors() }
+                    ec.message.pushErrors()
+                    try {
+                        for (const event of calendar(person, 'WetTimeOff')) {
+                            if (event.allDay) {
+                                const lastNum = event.end ? dayNum(event.end) - 1 : dayNum(event.start)
+                                for (let num = dayNum(event.start); num <= lastNum; num++) {
+                                    const index = num - dayNum(fromText)
+                                    if (index >= 0 && index < days.length) leave[index] = 24
+                                }
+                            } else {
+                                const startMs = toMillis(event.startMillis)
+                                const stopMs = event.endMillis != null ? toMillis(event.endMillis) : startMs + 3600000
+                                if (startMs != null && stopMs > startMs) spread(startMs, stopMs, leave)
+                            }
+                        }
+                    } catch (err) {
+                        ec.logger.error(`Capacity of ${person}: the leave was not read, none taken off: ${err && err.message ? err.message : err}`)
+                    } finally { ec.message.clearErrors(); ec.message.popErrors() }
+                }
+                const holidays = holidaysOf(orgId)
+                const dayList = days.map((day, i) => {
+                    const holiday = holidays[day] || null
+                    const off = holiday ? base[i] : Math.min(base[i], round(leave[i]))
+                    return {day: day, isoDay: isoDayOf(day), weekStart: weekOf(day), base: base[i], holiday: holiday, leave: holiday ? 0 : off,
+                        capacity: round(Math.max(0, base[i] - off))}
+                })
+                const weeks = new Map()
+                for (const entry of dayList) {
+                    let week = weeks.get(entry.weekStart)
+                    if (!week) { week = {weekStart: entry.weekStart, base: 0, holidayHours: 0, leaveHours: 0, capacity: 0, workDays: 0}; weeks.set(entry.weekStart, week) }
+                    week.base += entry.base
+                    if (entry.holiday) week.holidayHours += entry.base
+                    week.leaveHours += entry.leave
+                    week.capacity += entry.capacity
+                    if (entry.capacity > 0) week.workDays += 1
+                }
+                const weekList = Array.from(weeks.values()).map((week) => Object.assign(week, {base: round(week.base), holidayHours: round(week.holidayHours),
+                    leaveHours: round(week.leaveHours), capacity: round(week.capacity)}))
+                return {partyId: person || null, source: source, organizationPartyId: orgId, dayList: dayList, weekList: weekList,
+                    base: round(dayList.reduce((sum, entry) => sum + entry.base, 0)), capacity: round(dayList.reduce((sum, entry) => sum + entry.capacity, 0))}
+            }
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                if (!parties.length) { capacityList.push(entryOf(null)); return }
+                for (const person of parties) {
+                    try { capacityList.push(entryOf(person)) } catch (err) {
+                        ec.logger.error(`Capacity of ${person} not computed: ${err && err.message ? err.message : err}`)
+                    }
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="AllocationWeeks" allow-remote="false">
+        <description>The hours an allocation puts on each week of a capacity entry (get#PartyCapacity): hoursPerWeek spread over the
+            week's working days in proportion to each day's working hours (base), or allocationPercent of each day's working hours,
+            on the days from the allocation's fromDate to its thruDate. weekHours: {weekStart: hours}; total.</description>
+        <in-parameters>
+            <parameter name="allocation" type="Map" required="true"/>
+            <parameter name="capacity" type="Map" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="weekHours" type="Map"/>
+            <parameter name="total" type="BigDecimal"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const dayOf = (value) => { if (value == null || value === '') return ''; const text = String(value); return /^-?\d+$/.test(text) ? new Date(Number(text)).toISOString().slice(0, 10) : text.slice(0, 10) }
+weekHours = {}
+            let sum = 0
+            const from = dayOf(allocation.fromDate || '')
+            const thru = dayOf(allocation.thruDate || '')
+            const perWeek = allocation.hoursPerWeek != null && allocation.hoursPerWeek !== '' ? Number(String(allocation.hoursPerWeek)) : null
+            const percent = allocation.allocationPercent != null && allocation.allocationPercent !== '' ? Number(String(allocation.allocationPercent)) : null
+            const baseOfWeek = {}
+            for (const day of Array.from(capacity.dayList || [])) baseOfWeek[day.weekStart] = (baseOfWeek[day.weekStart] || 0) + Number(day.base || 0)
+            for (const day of Array.from(capacity.dayList || [])) {
+                if (!(weekHours[day.weekStart] >= 0)) weekHours[day.weekStart] = 0
+                if ((from && day.day < from) || (thru && day.day > thru)) continue
+                const base = Number(day.base || 0)
+                if (!(base > 0)) continue
+                let hours = 0
+                if (percent != null) hours = base * percent / 100
+                else if (perWeek != null && baseOfWeek[day.weekStart] > 0) hours = perWeek * base / baseOfWeek[day.weekStart]
+                weekHours[day.weekStart] += hours
+                sum += hours
+            }
+            for (const key of Object.keys(weekHours)) weekHours[key] = Math.round(weekHours[key] * 100) / 100
+            total = Math.round(sum * 100) / 100
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Access ========== -->
+
+    <service verb="get" noun="AllocationAccess" allow-remote="false">
+        <description>What the user may do with an allocation (workEffortAllocationId), or on a project (rootWorkEffortId): canView
+            (sees the project), canRequest (a manager of the project, or an approver who sees it), canApprove (ADMIN or
+            ALLOCATION_APPROVE, and sees it), canChange (an approver; the requester of one still requested), canCancel (as change,
+            while requested or allocated). isApprover: the user approves allocations at all. A need (view, request, approve, change)
+            not met is an error, except need none.</description>
+        <in-parameters>
+            <parameter name="workEffortAllocationId"/>
+            <parameter name="rootWorkEffortId"/>
+            <parameter name="need" default-value="none"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="allocation" type="Map"/>
+            <parameter name="project" type="Map"/>
+            <parameter name="canView" type="Boolean"/>
+            <parameter name="canRequest" type="Boolean"/>
+            <parameter name="canApprove" type="Boolean"/>
+            <parameter name="canChange" type="Boolean"/>
+            <parameter name="canCancel" type="Boolean"/>
+            <parameter name="isApprover" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            canView = false; canRequest = false; canApprove = false; canChange = false; canCancel = false; allocation = null; project = null
+            const L = (text) => ec.l10n.localize(text)
+            isApprover = !!ec.user.userId && (ec.user.isInGroup('ADMIN') || ec.user.hasPermission('ALLOCATION_APPROVE'))
+            let row = null
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                if (workEffortAllocationId) {
+                    row = ec.entity.find('mantle.work.effort.WorkEffortAllocation').condition('workEffortAllocationId', workEffortAllocationId).one()
+                    if (row) rootWorkEffortId = row.rootWorkEffortId
+                }
+                const projectRow = rootWorkEffortId ? ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', rootWorkEffortId).one() : null
+                if (projectRow && projectRow.workEffortTypeEnumId === 'WetProject' && (!workEffortAllocationId || row)) {
+                    const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+                    const all = !!vis.allProjects
+                    canView = all || Array.from(vis.visibleProjectIds || []).includes(rootWorkEffortId)
+                    if (canView) {
+                        project = projectRow.getMap()
+                        const manages = all || Array.from(vis.managedProjectIds || []).includes(rootWorkEffortId)
+                        canApprove = isApprover
+                        canRequest = manages || isApprover
+                        if (row) {
+                            allocation = row.getMap()
+                            const open = row.statusId === 'WealRequested' || row.statusId === 'WealAllocated'
+                            const mine = row.requestedByUserId === ec.user.userId
+                            canChange = open && (isApprover || (row.statusId === 'WealRequested' && mine && canRequest))
+                            canCancel = canChange
+                        }
+                    }
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            if (need === 'none') return
+            if (!canView) { ec.message.addError(workEffortAllocationId ? ec.resource.expand('Allocation ${workEffortAllocationId} is not available', '', {workEffortAllocationId})
+                    : ec.resource.expand('Project ${rootWorkEffortId} is not available', '', {rootWorkEffortId: rootWorkEffortId || ''})); return }
+            if (need === 'request' && !canRequest) ec.message.addError(L('Only the managers of the project request allocations on it'))
+            else if (need === 'approve' && !canApprove) ec.message.addError(L('Only those who approve allocations decide them'))
+            else if (need === 'change' && !canChange) ec.message.addError(L('You may not change this allocation'))
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Changes ========== -->
+
+    <service verb="create" noun="Allocation">
+        <description>An allocation of a person (partyId) or a placeholder (no partyId: roleTypeId or skillTypeEnumId to staff) on a
+            project or a work item of it (workEffortId), from fromDate to thruDate (days), at hoursPerWeek (above 0, at most 168) or
+            allocationPercent (above 0, at most 100). By a manager of the project it is Requested, and the approvers get
+            AllocationRequest; by an approver it is Allocated at once unless request is true. A person allocated is added to the
+            project in roleTypeId when not on it (each on its own: a failure is logged).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="partyId"/>
+            <parameter name="roleTypeId"/>
+            <parameter name="emplPositionClassId"/>
+            <parameter name="skillTypeEnumId"/>
+            <parameter name="fromDate" required="true"/>
+            <parameter name="thruDate" required="true"/>
+            <parameter name="hoursPerWeek" type="BigDecimal"/>
+            <parameter name="allocationPercent" type="BigDecimal"/>
+            <parameter name="comments"/>
+            <parameter name="request" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="workEffortAllocationId"/>
+            <parameter name="statusId"/>
+            <parameter name="message"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const target = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).disableAuthz().one()
+            if (!target) { ec.message.addError(ec.resource.expand('Project ${workEffortId} is not available', '', {workEffortId})); return }
+            const root = target.workEffortTypeEnumId === 'WetProject' ? target.workEffortId : target.rootWorkEffortId
+            if (!root) { ec.message.addError(L('An allocation is on a project or a work item of one')); return }
+            const access = ec.service.sync().name('mantle.work.ResourceServices.get#AllocationAccess').parameters({rootWorkEffortId: root, need: 'request'}).call() || {}
+            if (ec.message.hasError()) return
+            const checked = ec.service.sync().name('mantle.work.ResourceServices.check#AllocationFields').parameters({partyId: partyId || null,
+                roleTypeId: roleTypeId || null, skillTypeEnumId: skillTypeEnumId || null, fromDate: fromDate, thruDate: thruDate,
+                hoursPerWeek: hoursPerWeek, allocationPercent: allocationPercent}).call() || {}
+            if (ec.message.hasError()) return
+            statusId = access.canApprove && !request ? 'WealAllocated' : 'WealRequested'
+            const now = ec.user.nowTimestamp
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                workEffortAllocationId = ec.service.sync().name('create#mantle.work.effort.WorkEffortAllocation').parameters({workEffortId: workEffortId,
+                    rootWorkEffortId: root, partyId: partyId || null, roleTypeId: roleTypeId || null, emplPositionClassId: emplPositionClassId || null,
+                    skillTypeEnumId: skillTypeEnumId || null, fromDate: checked.fromDay, thruDate: checked.thruDay,
+                    hoursPerWeek: checked.allocationPercent != null ? null : checked.hoursPerWeek, allocationPercent: checked.allocationPercent,
+                    statusId: statusId, requestedByUserId: ec.user.userId, requestedDate: now, reviewedByUserId: statusId === 'WealAllocated' ? ec.user.userId : null,
+                    reviewedDate: statusId === 'WealAllocated' ? now : null, comments: comments || null}).call()?.workEffortAllocationId
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            if (ec.message.hasError() || !workEffortAllocationId) return
+            if (partyId) ec.service.sync().name('mantle.work.ResourceServices.add#AllocationMember').parameters({workEffortAllocationId: workEffortAllocationId}).call()
+            if (statusId === 'WealRequested') ec.service.sync().name('mantle.work.ResourceServices.notify#Allocation').parameters({workEffortAllocationId: workEffortAllocationId,
+                change: 'requested'}).call()
+            message = statusId === 'WealAllocated' ? L('Allocated') : L('Allocation requested')
+        ]]></script></actions>
+    </service>
+
+    <service verb="check" noun="AllocationFields" allow-remote="false">
+        <description>The fields of an allocation, checked: a person, or a role or skill for a placeholder; days yyyy-MM-dd (or time
+            stamps, taken as their days) with the last on or after the first and at most two years; hours a week above 0 and at most
+            168, or a percent above 0 and at most 100. Errors name what is wrong.</description>
+        <in-parameters>
+            <parameter name="partyId"/>
+            <parameter name="roleTypeId"/>
+            <parameter name="skillTypeEnumId"/>
+            <parameter name="fromDate"/>
+            <parameter name="thruDate"/>
+            <parameter name="hoursPerWeek" type="BigDecimal"/>
+            <parameter name="allocationPercent" type="BigDecimal"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fromDay"/>
+            <parameter name="thruDay"/>
+            <parameter name="hoursPerWeek" type="BigDecimal"/>
+            <parameter name="allocationPercent" type="BigDecimal"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const dayOf = (value) => {
+                if (value == null || value === '') return null
+                const text = String(value)
+                if (/^\d{4}-\d{2}-\d{2}/.test(text) && !/^\d+$/.test(text)) return text.slice(0, 10)
+                const millis = /^-?\d+$/.test(text) ? Number(text) : Date.parse(text)
+                if (Number.isNaN(millis)) return null
+                // a date field reaches a script as the epoch millis of its UTC midnight; a time stamp is taken as its day here
+                return millis % 86400000 === 0 ? new Date(millis).toISOString().slice(0, 10) : ec.l10n.format(new Date(millis), 'yyyy-MM-dd')
+            }
+            if (!partyId && !roleTypeId && !skillTypeEnumId) { ec.message.addError(L('Name a person, or the role or skill of a placeholder to staff')); return }
+            if (partyId && !ec.entity.find('mantle.party.Person').condition('partyId', partyId).disableAuthz().one()) {
+                ec.message.addError(ec.resource.expand('${partyId} is not a person', '', {partyId})); return }
+            if (roleTypeId && !ec.entity.find('mantle.party.RoleType').condition('roleTypeId', roleTypeId).useCache(true).disableAuthz().one()) {
+                ec.message.addError(ec.resource.expand('${roleTypeId} is not a role', '', {roleTypeId})); return }
+            if (skillTypeEnumId && !ec.entity.find('moqui.basic.Enumeration').condition('enumId', skillTypeEnumId).condition('enumTypeId', 'SkillType').useCache(true).disableAuthz().one()) {
+                ec.message.addError(ec.resource.expand('${skillTypeEnumId} is not a skill', '', {skillTypeEnumId})); return }
+            fromDay = dayOf(fromDate)
+            thruDay = dayOf(thruDate)
+            if (!fromDay || !thruDay) { ec.message.addError(L('An allocation needs its first and last days')); return }
+            if (thruDay < fromDay) { ec.message.addError(L('The last day is on or after the first')); return }
+            if ((Date.parse(thruDay + 'T00:00:00Z') - Date.parse(fromDay + 'T00:00:00Z')) / 86400000 > 731) { ec.message.addError(L('An allocation is at most two years long')); return }
+            const percent = allocationPercent == null ? null : Number(String(allocationPercent))
+            const hours = hoursPerWeek == null ? null : Number(String(hoursPerWeek))
+            if (percent != null) {
+                if (!(percent > 0 && percent <= 100)) { ec.message.addError(L('A percent of capacity is above 0 and at most 100')); return }
+                allocationPercent = percent; hoursPerWeek = null
+            } else {
+                if (!(hours > 0 && hours <= 168)) { ec.message.addError(L('Hours a week are above 0 and at most 168')); return }
+                hoursPerWeek = hours; allocationPercent = null
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="add" noun="AllocationMember" allow-remote="false">
+        <description>The allocation's person on its project in its role (Assignee when it has none) when they hold no current role
+            there (mantle.work.WorkEffortServices.add#WorkEffortParty); a failure is logged and the allocation stays.</description>
+        <in-parameters><parameter name="workEffortAllocationId" required="true"/></in-parameters>
+        <out-parameters><parameter name="added" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            added = false
+            ec.message.pushErrors()
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const row = ec.entity.find('mantle.work.effort.WorkEffortAllocation').condition('workEffortAllocationId', workEffortAllocationId).one()
+                if (!row || !row.partyId || !row.rootWorkEffortId) return
+                const current = ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', row.rootWorkEffortId).condition('partyId', row.partyId)
+                        .conditionDate('fromDate', 'thruDate', null).count()
+                if (current > 0) return
+                const inGroup = row.roleTypeId ? ec.entity.find('mantle.party.RoleGroupMember').condition('roleGroupEnumId', 'RgpProject')
+                        .condition('roleTypeId', row.roleTypeId).useCache(true).one() : null
+                ec.service.sync().name('mantle.work.WorkEffortServices.add#WorkEffortParty').parameters({workEffortId: row.rootWorkEffortId, partyId: row.partyId,
+                    roleTypeId: inGroup ? row.roleTypeId : 'Assignee', statusId: 'WeptAssigned'}).call()
+                if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                added = true
+            } catch (err) {
+                ec.logger.error(`Allocation ${workEffortAllocationId}: the person was not added to the project: ${err && err.message ? err.message : err}`)
+            } finally {
+                if (!wasDisabled) ec.artifactExecution.enableAuthz()
+                ec.message.clearErrors(); ec.message.popErrors()
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="update" noun="Allocation">
+        <description>Changes an allocation's days, hours a week or percent, role, skill and comments (a value not given is kept;
+            hoursPerWeek replaces a percent and allocationPercent hours). By an approver, or by its requester while it is
+            requested. A drag on the team planner calls it.</description>
+        <in-parameters>
+            <parameter name="workEffortAllocationId" required="true"/>
+            <parameter name="fromDate"/>
+            <parameter name="thruDate"/>
+            <parameter name="hoursPerWeek" type="BigDecimal"/>
+            <parameter name="allocationPercent" type="BigDecimal"/>
+            <parameter name="roleTypeId"/>
+            <parameter name="skillTypeEnumId"/>
+            <parameter name="comments"/>
+        </in-parameters>
+        <out-parameters><parameter name="message"/></out-parameters>
+        <actions><script><![CDATA[
+            const access = ec.service.sync().name('mantle.work.ResourceServices.get#AllocationAccess').parameters({workEffortAllocationId: workEffortAllocationId,
+                need: 'change'}).call() || {}
+            if (ec.message.hasError()) return
+            const current = access.allocation
+            const usePercent = allocationPercent != null || (hoursPerWeek == null && current.allocationPercent != null)
+            const checked = ec.service.sync().name('mantle.work.ResourceServices.check#AllocationFields').parameters({partyId: current.partyId || null,
+                roleTypeId: roleTypeId != null ? (roleTypeId || null) : current.roleTypeId, skillTypeEnumId: skillTypeEnumId != null ? (skillTypeEnumId || null) : current.skillTypeEnumId,
+                fromDate: fromDate || current.fromDate, thruDate: thruDate || current.thruDate,
+                hoursPerWeek: usePercent ? null : (hoursPerWeek != null ? hoursPerWeek : current.hoursPerWeek),
+                allocationPercent: usePercent ? (allocationPercent != null ? allocationPercent : current.allocationPercent) : null}).call() || {}
+            if (ec.message.hasError()) return
+            const fields = {workEffortAllocationId: workEffortAllocationId, fromDate: checked.fromDay, thruDate: checked.thruDay,
+                hoursPerWeek: checked.hoursPerWeek, allocationPercent: checked.allocationPercent}
+            if (roleTypeId != null) fields.roleTypeId = roleTypeId || null
+            if (skillTypeEnumId != null) fields.skillTypeEnumId = skillTypeEnumId || null
+            if (comments != null) fields.comments = comments || null
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try { ec.service.sync().name('update#mantle.work.effort.WorkEffortAllocation').parameters(fields).call() }
+            finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            if (!ec.message.hasError()) message = ec.l10n.localize('Allocation changed')
+        ]]></script></actions>
+    </service>
+
+    <service verb="staff" noun="Allocation">
+        <description>Names the person of a placeholder (or another person for an allocation still requested): by an approver, who
+            allocates it too unless approve is false; by the requester of one still requested, who leaves it requested for the
+            approvers. The person is added to the project in the allocation's role when not on it.</description>
+        <in-parameters>
+            <parameter name="workEffortAllocationId" required="true"/>
+            <parameter name="partyId" required="true"/>
+            <parameter name="approve" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="statusId"/><parameter name="message"/></out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const access = ec.service.sync().name('mantle.work.ResourceServices.get#AllocationAccess').parameters({workEffortAllocationId: workEffortAllocationId,
+                need: 'change'}).call() || {}
+            if (ec.message.hasError()) return
+            const current = access.allocation
+            if (current.partyId && current.statusId !== 'WealRequested') { ec.message.addError(L('An allocated person is changed by cancelling the allocation and making another')); return }
+            if (!ec.entity.find('mantle.party.Person').condition('partyId', partyId).disableAuthz().one()) {
+                ec.message.addError(ec.resource.expand('${partyId} is not a person', '', {partyId})); return }
+            statusId = current.statusId
+            const fields = {workEffortAllocationId: workEffortAllocationId, partyId: partyId}
+            if (access.canApprove && approve && current.statusId === 'WealRequested') {
+                statusId = 'WealAllocated'
+                Object.assign(fields, {statusId: statusId, reviewedByUserId: ec.user.userId, reviewedDate: ec.user.nowTimestamp})
+            }
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try { ec.service.sync().name('update#mantle.work.effort.WorkEffortAllocation').parameters(fields).call() }
+            finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            if (ec.message.hasError()) return
+            ec.service.sync().name('mantle.work.ResourceServices.add#AllocationMember').parameters({workEffortAllocationId: workEffortAllocationId}).call()
+            if (statusId === 'WealAllocated' && current.statusId === 'WealRequested') ec.service.sync().name('mantle.work.ResourceServices.notify#Allocation')
+                    .parameters({workEffortAllocationId: workEffortAllocationId, change: 'approved'}).call()
+            const person = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).disableAuthz().one()
+            const name = person ? [person.firstName, person.lastName].filter((part) => part).join(' ') || partyId : partyId
+            message = statusId === 'WealAllocated' && current.statusId === 'WealRequested' ? ec.resource.expand('${name} staffed and allocated', '', {name})
+                    : ec.resource.expand('${name} staffed', '', {name})
+        ]]></script></actions>
+    </service>
+
+    <service verb="approve" noun="Allocation">
+        <description>Allocates a requested allocation (an approver); its requester and person get AllocationDecision, and its
+            approval notices are marked decided.</description>
+        <in-parameters><parameter name="workEffortAllocationId" required="true"/></in-parameters>
+        <out-parameters><parameter name="message"/></out-parameters>
+        <actions><script><![CDATA[
+            const access = ec.service.sync().name('mantle.work.ResourceServices.get#AllocationAccess').parameters({workEffortAllocationId: workEffortAllocationId,
+                need: 'approve'}).call() || {}
+            if (ec.message.hasError()) return
+            if (access.allocation.statusId !== 'WealRequested') { ec.message.addError(ec.l10n.localize('Only a requested allocation is approved')); return }
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                ec.service.sync().name('update#mantle.work.effort.WorkEffortAllocation').parameters({workEffortAllocationId: workEffortAllocationId,
+                    statusId: 'WealAllocated', reviewedByUserId: ec.user.userId, reviewedDate: ec.user.nowTimestamp}).call()
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            if (ec.message.hasError()) return
+            ec.service.sync().name('mantle.work.ResourceServices.add#AllocationMember').parameters({workEffortAllocationId: workEffortAllocationId}).call()
+            ec.service.sync().name('mantle.work.ResourceServices.notify#Allocation').parameters({workEffortAllocationId: workEffortAllocationId, change: 'approved'}).call()
+            message = ec.l10n.localize('Allocation approved')
+        ]]></script></actions>
+    </service>
+    <service verb="reject" noun="Allocation">
+        <description>Rejects a requested allocation with a reason (an approver); the requester and the person get AllocationDecision
+            with the reason.</description>
+        <in-parameters>
+            <parameter name="workEffortAllocationId" required="true"/>
+            <parameter name="reason"/>
+        </in-parameters>
+        <out-parameters><parameter name="message"/></out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const text = String(reason || '').trim()
+            if (!text) { ec.message.addError(L('Say why the allocation is rejected')); return }
+            const access = ec.service.sync().name('mantle.work.ResourceServices.get#AllocationAccess').parameters({workEffortAllocationId: workEffortAllocationId,
+                need: 'approve'}).call() || {}
+            if (ec.message.hasError()) return
+            if (access.allocation.statusId !== 'WealRequested') { ec.message.addError(L('Only a requested allocation is rejected')); return }
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                ec.service.sync().name('update#mantle.work.effort.WorkEffortAllocation').parameters({workEffortAllocationId: workEffortAllocationId,
+                    statusId: 'WealRejected', reviewedByUserId: ec.user.userId, reviewedDate: ec.user.nowTimestamp, reviewComments: text}).call()
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            if (ec.message.hasError()) return
+            ec.service.sync().name('mantle.work.ResourceServices.notify#Allocation').parameters({workEffortAllocationId: workEffortAllocationId, change: 'rejected',
+                reason: text}).call()
+            message = L('Allocation rejected')
+        ]]></script></actions>
+    </service>
+    <service verb="cancel" noun="Allocation">
+        <description>Cancels an allocation, requested or allocated (one who may change it); the history stays.</description>
+        <in-parameters><parameter name="workEffortAllocationId" required="true"/></in-parameters>
+        <out-parameters><parameter name="message"/></out-parameters>
+        <actions><script><![CDATA[
+            ec.service.sync().name('mantle.work.ResourceServices.get#AllocationAccess').parameters({workEffortAllocationId: workEffortAllocationId,
+                need: 'change'}).call()
+            if (ec.message.hasError()) return
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                ec.service.sync().name('update#mantle.work.effort.WorkEffortAllocation').parameters({workEffortAllocationId: workEffortAllocationId,
+                    statusId: 'WealCancelled'}).call()
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            if (ec.message.hasError()) return
+            ec.service.sync().name('mantle.work.ResourceServices.notify#Allocation').parameters({workEffortAllocationId: workEffortAllocationId, change: 'cancelled'}).call()
+            message = ec.l10n.localize('Allocation cancelled')
+        ]]></script></actions>
+    </service>
+
+    <!-- the decision services of the AllocationRequest topic (org.moqui.impl.NotificationServices approve# and refuse#NotificationMessage) -->
+    <service verb="approve" noun="AllocationNotice">
+        <in-parameters>
+            <parameter name="recordEntityName"/><parameter name="recordId" required="true"/>
+            <parameter name="message" type="Map"/><parameter name="notificationMessageId"/>
+        </in-parameters>
+        <out-parameters><parameter name="decision"/></out-parameters>
+        <actions>
+            <service-call name="mantle.work.ResourceServices.approve#Allocation" in-map="{workEffortAllocationId:recordId}"/>
+            <set field="decision" value="approved"/>
+        </actions>
+    </service>
+    <service verb="reject" noun="AllocationNotice">
+        <in-parameters>
+            <parameter name="recordEntityName"/><parameter name="recordId" required="true"/>
+            <parameter name="message" type="Map"/><parameter name="notificationMessageId"/><parameter name="reason"/>
+        </in-parameters>
+        <out-parameters><parameter name="decision"/></out-parameters>
+        <actions>
+            <service-call name="mantle.work.ResourceServices.reject#Allocation" in-map="{workEffortAllocationId:recordId, reason:reason}"/>
+            <set field="decision" value="rejected"/>
+        </actions>
+    </service>
+
+    <service verb="notify" noun="Allocation" allow-remote="false">
+        <description>The notices of a change (requested: AllocationRequest to the users who hold ALLOCATION_APPROVE, not the
+            requester; approved, rejected and cancelled: AllocationDecision to the requester and the person, not the one deciding),
+            with whoText, projectName, hoursText, periodText, requesterName, actorName, decision and reasonSuffix; a decision marks
+            the open approval notices of the allocation decided. A failure is logged and the change stays.</description>
+        <in-parameters>
+            <parameter name="workEffortAllocationId" required="true"/>
+            <parameter name="change" required="true"/>
+            <parameter name="reason"/>
+        </in-parameters>
+        <out-parameters><parameter name="userIdList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            const dayOf = (value) => { if (value == null || value === '') return ''; const text = String(value); return /^-?\d+$/.test(text) ? new Date(Number(text)).toISOString().slice(0, 10) : text.slice(0, 10) }
+userIdList = []
+            const L = (text) => ec.l10n.localize(text)
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const row = ec.entity.find('mantle.work.effort.WorkEffortAllocation').condition('workEffortAllocationId', workEffortAllocationId).one()
+                if (!row) return
+                if (change !== 'requested') {
+                    const messageIds = Array.from(ec.entity.find('moqui.security.user.NotificationMessage').condition('topic', 'AllocationRequest')
+                            .condition('recordEntityName', 'mantle.work.effort.WorkEffortAllocation').condition('recordId', workEffortAllocationId)
+                            .selectField('notificationMessageId').list()).map((one) => one.notificationMessageId)
+                    if (messageIds.length) for (const user of ec.entity.find('moqui.security.user.NotificationMessageUser').condition('notificationMessageId', 'in', messageIds)
+                            .condition('viewedDate', 'is-null', null).list()) { user.viewedDate = ec.user.nowTimestamp; user.update() }
+                }
+                const nameOf = (partyId) => {
+                    const party = partyId ? ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one() : null
+                    return party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || partyId) : (partyId || '')
+                }
+                const roleText = row.roleTypeId ? (ec.entity.find('mantle.party.RoleType').condition('roleTypeId', row.roleTypeId).useCache(true).one()?.description || row.roleTypeId) : ''
+                const skillText = row.skillTypeEnumId ? (ec.entity.find('moqui.basic.Enumeration').condition('enumId', row.skillTypeEnumId).useCache(true).one()?.description || row.skillTypeEnumId) : ''
+                const whoText = row.partyId ? nameOf(row.partyId) : ec.resource.expand('a ${role} to staff', '', {role: [roleText, skillText ? '(' + skillText + ')' : ''].filter((part) => part).join(' ') || L('person')})
+                const project = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', row.rootWorkEffortId).one()
+                const day = (value) => value ? ec.l10n.format(ec.l10n.parseTimestamp(dayOf(value) + ' 12:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'), 'MMM d, yyyy') : ''
+                const requester = row.requestedByUserId ? ec.entity.find('moqui.security.UserAccount').condition('userId', row.requestedByUserId).one() : null
+                const message = {workEffortAllocationId: workEffortAllocationId, rootWorkEffortId: row.rootWorkEffortId, projectName: project?.workEffortName || row.rootWorkEffortId,
+                    partyId: row.partyId || null, whoText: whoText, hoursText: row.allocationPercent != null ? ec.l10n.format(row.allocationPercent, '#,##0.#') + ' %'
+                        : ec.l10n.format(row.hoursPerWeek, '#,##0.##') + ' h', periodText: day(row.fromDate) + ' – ' + day(row.thruDate),
+                    requesterName: requester?.userFullName || requester?.username || '', actorName: ec.user.userAccount?.userFullName || ec.user.username || '',
+                    decision: {approved: L('allocated'), rejected: L('rejected'), cancelled: L('cancelled'), requested: L('requested')}[change] || change,
+                    reason: reason || '', reasonSuffix: reason ? ': ' + reason : ''}
+                let topic, userIds = []
+                if (change === 'requested') {
+                    topic = 'AllocationRequest'
+                    const groupIds = Array.from(ec.entity.find('moqui.security.UserGroupPermission').condition('userPermissionId', 'ALLOCATION_APPROVE')
+                            .conditionDate('fromDate', 'thruDate', null).list()).map((one) => one.userGroupId)
+                    userIds = groupIds.length ? Array.from(new Set(Array.from(ec.entity.find('moqui.security.UserGroupMember').condition('userGroupId', 'in', groupIds)
+                            .conditionDate('fromDate', 'thruDate', null).list()).map((one) => one.userId))) : []
+                    // only users with an account that is not disabled, and never the requester
+                    // and only those who see the project (impl-projects.md F85): ADMIN, a current party of it, or a user of one of the
+                    // organizations whose All users or General project it is (get#VisibleProjectInfo's rule); never a client contact
+                    const accounts = userIds.length ? Array.from(ec.entity.find('moqui.security.UserAccount').condition('userId', 'in', userIds).limit(200).list())
+                            .filter((account) => account.disabled !== 'Y' && account.userId !== ec.user.userId && account.userId !== row.requestedByUserId) : []
+                    const adminIds = accounts.length ? new Set(Array.from(ec.entity.find('moqui.security.UserGroupMember').condition('userGroupId', 'ADMIN')
+                            .condition('userId', 'in', accounts.map((account) => account.userId)).conditionDate('fromDate', 'thruDate', null).list())
+                            .map((one) => one.userId)) : new Set()
+                    const clientIds = accounts.length ? new Set(Array.from(ec.entity.find('moqui.security.UserPermissionCheck')
+                            .condition('userId', 'in', accounts.map((account) => account.userId)).condition('userPermissionId', 'PROJECT_CLIENT')
+                            .conditionDate('groupFromDate', 'groupThruDate', null).conditionDate('permissionFromDate', 'permissionThruDate', null).list())
+                            .map((one) => one.userId)) : new Set()
+                    const sharedProject = ['WevAllUsers', 'WevGeneral'].includes(project?.visibilityEnumId)
+                    const projectOrgIds = project ? new Set([project.ownerPartyId].concat(Array.from(ec.entity.find('mantle.work.effort.WorkEffortParty')
+                            .condition('workEffortId', project.workEffortId).conditionDate('fromDate', 'thruDate', null).list()).map((one) => one.partyId))
+                            .filter((id) => id)) : new Set()
+                    const seesProject = (account) => {
+                        if (clientIds.has(account.userId)) return false
+                        if (adminIds.has(account.userId)) return true
+                        if (!project || !account.partyId) return false
+                        if (ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', project.workEffortId)
+                                .condition('partyId', account.partyId).conditionDate('fromDate', 'thruDate', null).count() > 0) return true
+                        if (!sharedProject) return false
+                        const orgIds = Array.from(ec.service.sync().name('mantle.party.PartyServices.get#PartyOrganizationInfo')
+                                .parameter('partyId', account.partyId).call()?.filterOrgIds || [])
+                        return orgIds.some((orgId) => projectOrgIds.has(orgId))
+                    }
+                    userIds = accounts.filter(seesProject).map((account) => account.userId)
+                } else {
+                    topic = 'AllocationDecision'
+                    const ids = new Set()
+                    if (row.requestedByUserId) ids.add(row.requestedByUserId)
+                    if (row.partyId) for (const account of ec.entity.find('moqui.security.UserAccount').condition('partyId', row.partyId).list()) ids.add(account.userId)
+                    ids.delete(ec.user.userId)
+                    userIds = Array.from(ids)
+                }
+                if (!userIds.length) return
+                const nm = ec.makeNotificationMessage().topic(topic).userIds(userIds).message(message)
+                nm.record('mantle.work.effort.WorkEffortAllocation', workEffortAllocationId)
+                nm.send()
+                userIdList = userIds
+            } catch (err) {
+                ec.logger.error(`Allocation ${workEffortAllocationId}: the ${change} notice was not sent: ${err && err.message ? err.message : err}`)
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Reading ========== -->
+
+    <service verb="find" noun="Allocations">
+        <description>
+            The allocations the user sees (those of the projects the user sees), for Allocations, ProjectTeam and PersonDetail. list:
+            requested (to decide), unstaffed (placeholders requested or allocated), mine (of the user, or requested by the user),
+            allocated, all (every status); the find: rootWorkEffortId, partyId, statusId, and fromDate with thruDate (days; those
+            overlapping). Ordered by first day then project. A row: the allocation's fields with projectName, personName (null for a
+            placeholder), roleText, skillText, statusLabel, fromDay, thruDay, hoursText, requestedByName, reviewedByName, isPlaceholder,
+            canApprove, canChange (get#AllocationAccess's rules). counts: each list's count (withCounts).
+        </description>
+        <in-parameters>
+            <parameter name="list" default-value="all"/>
+            <parameter name="rootWorkEffortId"/>
+            <parameter name="partyId"/>
+            <parameter name="statusId"/>
+            <parameter name="fromDate"/>
+            <parameter name="thruDate"/>
+            <parameter name="withCounts" type="Boolean" default="true"/>
+            <parameter name="limit" type="Integer" default="500"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="rowList" type="List"/>
+            <parameter name="counts" type="Map"/>
+            <parameter name="isApprover" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const dayOf = (value) => { if (value == null || value === '') return ''; const text = String(value); return /^-?\d+$/.test(text) ? new Date(Number(text)).toISOString().slice(0, 10) : text.slice(0, 10) }
+rowList = []; counts = {}
+            const cf = ec.entity.conditionFactory
+            const me = ec.user.userAccount?.partyId || null
+            isApprover = !!ec.user.userId && (ec.user.isInGroup('ADMIN') || ec.user.hasPermission('ALLOCATION_APPROVE'))
+            const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+            const all = !!vis.allProjects
+            const visible = Array.from(vis.visibleProjectIds || [])
+            const managed = Array.from(vis.managedProjectIds || [])
+            if (!all && !visible.length) { counts = {requested: 0, unstaffed: 0, mine: 0, allocated: 0, all: 0}; return }
+            const base = []
+            if (!all) base.push(cf.makeCondition('rootWorkEffortId', 'in', visible))
+            if (rootWorkEffortId) base.push(cf.makeCondition('rootWorkEffortId', 'equals', rootWorkEffortId))
+            if (partyId) base.push(cf.makeCondition('partyId', 'equals', partyId))
+            if (statusId) base.push(cf.makeCondition('statusId', 'equals', statusId))
+            if (fromDate) base.push(cf.makeCondition('thruDate', 'greater-equals', dayOf(fromDate)))
+            if (thruDate) base.push(cf.makeCondition('fromDate', 'less-equals', dayOf(thruDate)))
+            const open = ['WealRequested', 'WealAllocated']
+            const listConditions = {
+                requested: [cf.makeCondition('statusId', 'equals', 'WealRequested')],
+                unstaffed: [cf.makeCondition('partyId', 'is-null', null), cf.makeCondition('statusId', 'in', open)],
+                mine: [cf.makeCondition([cf.makeCondition('partyId', 'equals', me || '_NA_'), cf.makeCondition('requestedByUserId', 'equals', ec.user.userId || '_NA_')], 'or')],
+                allocated: [cf.makeCondition('statusId', 'equals', 'WealAllocated')],
+                all: []
+            }
+            const theList = listConditions[list] ? list : 'all'
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const find = (more) => {
+                    const conditions = base.concat(more)
+                    const query = ec.entity.find('mantle.work.effort.WorkEffortAllocation')
+                    return conditions.length ? query.condition(cf.makeCondition(conditions, 'and')) : query
+                }
+                if (withCounts) for (const key of Object.keys(listConditions)) counts[key] = find(listConditions[key]).count()
+                const rows = Array.from(find(listConditions[theList]).orderBy('fromDate').orderBy('rootWorkEffortId').limit(Number(limit) || 500).list())
+                const cache = {}
+                const cached = (kind, id, read) => { const key = kind + '|' + id; if (!(key in cache)) cache[key] = id ? read(id) : null; return cache[key] }
+                const nameOf = (id) => cached('party', id, (partyId) => {
+                    const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one()
+                    return party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || partyId) : partyId
+                })
+                const userName = (id) => cached('user', id, (userId) => { const account = ec.entity.find('moqui.security.UserAccount').condition('userId', userId).one(); return account ? (account.userFullName || account.username) : userId })
+                const roleText = (id) => cached('role', id, (roleTypeId) => ec.entity.find('mantle.party.RoleType').condition('roleTypeId', roleTypeId).useCache(true).one()?.description || roleTypeId)
+                const enumText = (id) => cached('enum', id, (enumId) => ec.entity.find('moqui.basic.Enumeration').condition('enumId', enumId).useCache(true).one()?.description || enumId)
+                const statusText = (id) => cached('status', id, (sid) => ec.entity.find('moqui.basic.StatusItem').condition('statusId', sid).useCache(true).one()?.description || sid)
+                const projectOf = (id) => cached('project', id, (workEffortId) => ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one())
+                const dayText = (value) => value ? ec.l10n.format(ec.l10n.parseTimestamp(dayOf(value) + ' 12:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'), 'MMM d, yyyy') : ''
+                for (const row of rows) {
+                    const project = projectOf(row.rootWorkEffortId)
+                    const item = row.workEffortId && row.workEffortId !== row.rootWorkEffortId ? projectOf(row.workEffortId) : null
+                    const isOpen = open.includes(row.statusId)
+                    const manages = all || managed.includes(row.rootWorkEffortId)
+                    const entry = row.getMap()
+                    rowList.push(Object.assign(entry, {fromDay: dayOf(row.fromDate), thruDay: dayOf(row.thruDate),
+                        fromText: dayText(row.fromDate), thruText: dayText(row.thruDate), projectName: project?.workEffortName || row.rootWorkEffortId,
+                        itemName: item ? item.workEffortName : null, personName: row.partyId ? nameOf(row.partyId) : null, isPlaceholder: !row.partyId,
+                        roleText: row.roleTypeId ? roleText(row.roleTypeId) : '', skillText: row.skillTypeEnumId ? enumText(row.skillTypeEnumId) : '',
+                        statusLabel: statusText(row.statusId), hoursPerWeek: row.hoursPerWeek != null ? Number(String(row.hoursPerWeek)) : null,
+                        allocationPercent: row.allocationPercent != null ? Number(String(row.allocationPercent)) : null,
+                        hoursText: row.allocationPercent != null ? ec.l10n.format(row.allocationPercent, '#,##0.#') + ' %' : ec.l10n.format(row.hoursPerWeek, '#,##0.##') + ' h',
+                        requestedByName: row.requestedByUserId ? userName(row.requestedByUserId) : '', reviewedByName: row.reviewedByUserId ? userName(row.reviewedByUserId) : '',
+                        canApprove: isApprover && row.statusId === 'WealRequested',
+                        canChange: isOpen && (isApprover || (row.statusId === 'WealRequested' && row.requestedByUserId === ec.user.userId && manages))}))
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="TeamPlan">
+        <description>
+            The team planner (design-projects.md §9 TeamPlanner) from fromDate (a day; the start of its week, default this week) for
+            weeks weeks (1 to 52, default 12):
+            - weekList [{weekStart, weekEnd, isCurrent}];
+            - personList: the people the user plans, each {partyId, name, userId, roleTypeId and roleText (their most held internal
+              project role), skillList [{skillTypeEnumId, label, rating}], source (of the capacity), weekList [{weekStart, base,
+              capacity, holidayHours, leaveHours, allocated (allocated hours), requested (requested hours), assigned (the remaining
+              hours of their open work items spread over the working days up to each one's due date; an overdue item's in the
+              current week), logged (time entries), load (the larger of allocated and assigned against capacity, a ratio), over
+              (load above 1), utilization (logged against capacity)}], allocationList (the allocations overlapping the range on
+              projects the user sees, each with weekHours; one on a project the user does not see as hidden, Other projects),
+              undatedHours (assigned work with no due date)}; by default the people with a current internal role (not a client's,
+              a vendor's or a team's) on the open projects the user sees, and those allocated on them in the range;
+            - placeholderList: the placeholders (no person) requested or allocated in the range, with weekHours by the standard
+              week;
+            - projectList [{workEffortId, workEffortName}] of the allocations shown; options {roleOptions, skillOptions,
+              teamOptions, projectOptions} for the find; canPlan (an approver) and isApprover.
+            The find: partyIdList, rootWorkEffortId (its members and those allocated on it), roleTypeId (holding the role on a
+            project, or allocated in it), skillTypeEnumId (PartySkill), teamPartyId (current members, PartyRelationship PrtMember, of
+            a team: an organization in the OrgTeam role). Each person is computed on their own: one that fails is logged and left
+            out (failedPartyIds).
+        </description>
+        <in-parameters>
+            <parameter name="fromDate"/>
+            <parameter name="weeks" type="Integer" default="12"/>
+            <parameter name="partyIdList" type="List"/>
+            <parameter name="rootWorkEffortId"/>
+            <parameter name="roleTypeId"/>
+            <parameter name="skillTypeEnumId"/>
+            <parameter name="teamPartyId"/>
+            <parameter name="includePlaceholders" type="Boolean" default="true"/>
+            <parameter name="withOptions" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="plan" type="Map"/></out-parameters>
+        <actions><script><![CDATA[
+            const dayOf = (value) => { if (value == null || value === '') return ''; const text = String(value); return /^-?\d+$/.test(text) ? new Date(Number(text)).toISOString().slice(0, 10) : text.slice(0, 10) }
+const L = (text) => ec.l10n.localize(text)
+            const cf = ec.entity.conditionFactory
+            const dayNum = (text) => Math.floor(Date.parse(String(text).slice(0, 10) + 'T00:00:00Z') / 86400000)
+            const dayText = (num) => new Date(num * 86400000).toISOString().slice(0, 10)
+            const isoDayOf = (text) => { const js = new Date(String(text).slice(0, 10) + 'T12:00:00Z').getUTCDay(); return js === 0 ? 7 : js }
+            const round = (value) => Math.round(value * 100) / 100
+            const today = ec.l10n.format(ec.user.nowTimestamp, 'yyyy-MM-dd')
+            const startText = /^\d{4}-\d{2}-\d{2}/.test(String(fromDate || '')) ? dayOf(fromDate) : today
+            const firstDay = dayText(dayNum(startText) - (isoDayOf(startText) - 1))
+            const weekCount = Math.max(1, Math.min(52, Number(weeks) || 12))
+            const lastDay = dayText(dayNum(firstDay) + weekCount * 7 - 1)
+            const currentWeek = dayText(dayNum(today) - (isoDayOf(today) - 1))
+            const weekList = []
+            for (let i = 0; i < weekCount; i++) {
+                const start = dayText(dayNum(firstDay) + i * 7)
+                weekList.push({weekStart: start, weekEnd: dayText(dayNum(start) + 6), isCurrent: start === currentWeek})
+            }
+            const isApprover = !!ec.user.userId && (ec.user.isInGroup('ADMIN') || ec.user.hasPermission('ALLOCATION_APPROVE'))
+            plan = {fromDate: firstDay, thruDate: lastDay, today: today, weekList: weekList, personList: [], placeholderList: [], projectList: [],
+                options: null, canPlan: isApprover, isApprover: isApprover, failedPartyIds: []}
+            const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+            const all = !!vis.allProjects
+            const visible = new Set(Array.from(vis.visibleProjectIds || []))
+            const sees = (projectId) => all || visible.has(projectId)
+            const outsideRoles = ['Customer', 'CustomerBillTo', 'ClientManager', 'ClientBilling', 'Vendor', 'VendorBillFrom', 'OrgTeam']
+            const openAlloc = ['WealRequested', 'WealAllocated']
+            const nameCache = {}
+            const nameOf = (partyId) => {
+                if (!(partyId in nameCache)) {
+                    const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one()
+                    nameCache[partyId] = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || partyId) : partyId
+                }
+                return nameCache[partyId]
+            }
+            const textCache = {}
+            const cachedText = (entity, field, id, textField) => {
+                const key = entity + '|' + id
+                if (!(key in textCache)) textCache[key] = id ? (ec.entity.find(entity).condition(field, id).useCache(true).one()?.[textField] || id) : ''
+                return textCache[key]
+            }
+            const roleText = (id) => cachedText('mantle.party.RoleType', 'roleTypeId', id, 'description')
+            const enumText = (id) => cachedText('moqui.basic.Enumeration', 'enumId', id, 'description')
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                // the open, non-template projects the user sees
+                const projectRows = Array.from((all ? ec.entity.find('mantle.work.effort.WorkEffort') : ec.entity.find('mantle.work.effort.WorkEffort')
+                        .condition('workEffortId', 'in', visible.size ? Array.from(visible) : ['_NA_'])).condition('workEffortTypeEnumId', 'WetProject')
+                        .condition('statusId', 'not-in', ['WeClosed', 'WeCancelled']).limit(2000).list()).filter((row) => row.isTemplate !== 'Y')
+                const projectNames = {}
+                for (const row of projectRows) projectNames[row.workEffortId] = row.workEffortName || row.workEffortId
+                const projectIds = Object.keys(projectNames)
+                // current internal roles on them
+                const memberRows = projectIds.length ? Array.from(ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', 'in', projectIds)
+                        .condition('roleTypeId', 'not-in', outsideRoles).conditionDate('fromDate', 'thruDate', null).list()) : []
+                // the allocations in the range: every project, so a person's load is whole
+                const allocRows = Array.from(ec.entity.find('mantle.work.effort.WorkEffortAllocation').condition('statusId', 'in', openAlloc)
+                        .condition('fromDate', 'less-equals', lastDay).condition('thruDate', 'greater-equals', firstDay).orderBy('fromDate').list())
+                const roleOfParty = {}
+                for (const row of memberRows) {
+                    const counts = roleOfParty[row.partyId] || (roleOfParty[row.partyId] = {})
+                    counts[row.roleTypeId] = (counts[row.roleTypeId] || 0) + 1
+                }
+                // who: by partyIdList, else members and those allocated on the projects the user sees
+                let people
+                if (partyIdList != null && Array.from(partyIdList).length) people = Array.from(new Set(Array.from(partyIdList)))
+                else {
+                    const set = new Set(memberRows.map((row) => row.partyId))
+                    for (const row of allocRows) if (row.partyId && sees(row.rootWorkEffortId)) set.add(row.partyId)
+                    people = Array.from(set)
+                }
+                const persons = people.length ? new Set(Array.from(ec.entity.find('mantle.party.Person').condition('partyId', 'in', people).selectField('partyId').list())
+                        .map((row) => row.partyId)) : new Set()
+                people = people.filter((id) => persons.has(id))
+                if (rootWorkEffortId) {
+                    const on = new Set(memberRows.filter((row) => row.workEffortId === rootWorkEffortId).map((row) => row.partyId))
+                    for (const row of allocRows) if (row.rootWorkEffortId === rootWorkEffortId && row.partyId) on.add(row.partyId)
+                    people = people.filter((id) => on.has(id))
+                }
+                if (roleTypeId) {
+                    const has = new Set(memberRows.filter((row) => row.roleTypeId === roleTypeId).map((row) => row.partyId))
+                    for (const row of allocRows) if (row.roleTypeId === roleTypeId && row.partyId) has.add(row.partyId)
+                    people = people.filter((id) => has.has(id))
+                }
+                const skillRows = people.length ? Array.from(ec.entity.find('mantle.humanres.ability.PartySkill').condition('partyId', 'in', people).list()) : []
+                if (skillTypeEnumId) {
+                    const has = new Set(skillRows.filter((row) => row.skillTypeEnumId === skillTypeEnumId).map((row) => row.partyId))
+                    people = people.filter((id) => has.has(id))
+                }
+                if (teamPartyId) {
+                    const has = new Set(Array.from(ec.entity.find('mantle.party.PartyRelationship').condition('toPartyId', teamPartyId)
+                            .condition('relationshipTypeEnumId', 'PrtMember').conditionDate('fromDate', 'thruDate', null).list()).map((row) => row.fromPartyId))
+                    people = people.filter((id) => has.has(id))
+                }
+                people.sort((a, b) => nameOf(a).localeCompare(nameOf(b)))
+                if (people.length > 300) { ec.logger.warn(`Team plan: ${people.length} people, the first 300 planned`); people = people.slice(0, 300) }
+
+                // capacity of everyone at once, and the standard week for placeholders
+                const capacities = {}
+                if (people.length) for (const entry of Array.from(ec.service.sync().name('mantle.work.ResourceServices.get#PartyCapacity')
+                        .parameters({partyIdList: people, fromDate: firstDay, thruDate: lastDay}).call()?.capacityList || [])) capacities[entry.partyId] = entry
+                ec.message.clearErrors()
+                const standard = Array.from(ec.service.sync().name('mantle.work.ResourceServices.get#PartyCapacity').parameters({fromDate: firstDay, thruDate: lastDay})
+                        .call()?.capacityList || [])[0] || {dayList: [], weekList: []}
+                ec.message.clearErrors()
+                const weekHoursOf = (row, capacity) => ec.service.sync().name('mantle.work.ResourceServices.get#AllocationWeeks').parameters({allocation: row.getMap ? row.getMap() : row,
+                    capacity: capacity}).call()?.weekHours || {}
+                const usedProjects = new Set()
+                const allocEntry = (row, capacity) => {
+                    const shown = sees(row.rootWorkEffortId)
+                    if (shown) usedProjects.add(row.rootWorkEffortId)
+                    const project = shown && !projectNames[row.rootWorkEffortId] ? ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', row.rootWorkEffortId).one() : null
+                    return shown ? {workEffortAllocationId: row.workEffortAllocationId, workEffortId: row.workEffortId, rootWorkEffortId: row.rootWorkEffortId,
+                        projectName: projectNames[row.rootWorkEffortId] || project?.workEffortName || row.rootWorkEffortId, partyId: row.partyId || null,
+                        personName: row.partyId ? nameOf(row.partyId) : null, roleTypeId: row.roleTypeId || null, roleText: roleText(row.roleTypeId),
+                        skillTypeEnumId: row.skillTypeEnumId || null, skillText: enumText(row.skillTypeEnumId), fromDay: dayOf(row.fromDate),
+                        thruDay: dayOf(row.thruDate), hoursPerWeek: row.hoursPerWeek != null ? Number(String(row.hoursPerWeek)) : null,
+                        allocationPercent: row.allocationPercent != null ? Number(String(row.allocationPercent)) : null, statusId: row.statusId,
+                        requestedByUserId: row.requestedByUserId || null, comments: row.comments || '', weekHours: weekHoursOf(row, capacity), hidden: false}
+                        : {hidden: true, rootWorkEffortId: null, projectName: L('Other projects'), statusId: row.statusId, fromDay: dayOf(row.fromDate),
+                            thruDay: dayOf(row.thruDate), weekHours: weekHoursOf(row, capacity)}
+                }
+                const weekOfDay = (text) => dayText(dayNum(text) - (isoDayOf(text) - 1))
+                const doneStatuses = ['WeComplete', 'WeClosed', 'WeCancelled']
+                for (const person of people) {
+                    ec.message.pushErrors()
+                    try {
+                        const capacity = capacities[person]
+                        if (!capacity) throw new Error('no capacity')
+                        const weeksOut = weekList.map((week) => {
+                            const cap = Array.from(capacity.weekList || []).find((one) => one.weekStart === week.weekStart) || {base: 0, capacity: 0, holidayHours: 0, leaveHours: 0}
+                            return {weekStart: week.weekStart, base: cap.base, capacity: cap.capacity, holidayHours: cap.holidayHours, leaveHours: cap.leaveHours,
+                                allocated: 0, requested: 0, assigned: 0, logged: 0, load: 0, over: false, utilization: null}
+                        })
+                        const byWeek = {}
+                        for (const week of weeksOut) byWeek[week.weekStart] = week
+                        const allocationList = allocRows.filter((row) => row.partyId === person).map((row) => allocEntry(row, capacity))
+                        for (const alloc of allocationList) for (const [weekStart, hours] of Object.entries(alloc.weekHours)) {
+                            const week = byWeek[weekStart]
+                            if (!week) continue
+                            if (alloc.statusId === 'WealAllocated') week.allocated += hours; else week.requested += hours
+                        }
+                        // assigned work: the open items the person is an assignee of, their remaining hours spread over the working days
+                        let undatedHours = 0
+                        const assignedIds = Array.from(new Set(Array.from(ec.entity.find('mantle.work.effort.WorkEffortParty').condition('partyId', person)
+                                .condition('roleTypeId', 'Assignee').conditionDate('fromDate', 'thruDate', null)
+                                .condition(cf.makeCondition('statusId', 'not-in', ['WeptDeclined', 'WeptUnassigned'], true)).selectField('workEffortId').list())
+                                .map((row) => row.workEffortId)))
+                        const workingIso = new Set(Array.from(capacity.dayList || []).filter((day) => day.base > 0).map((day) => day.isoDay))
+                        if (!workingIso.size) [1, 2, 3, 4, 5].forEach((day) => workingIso.add(day))
+                        const capacityOfDay = {}
+                        for (const day of Array.from(capacity.dayList || [])) capacityOfDay[day.day] = day.capacity
+                        if (assignedIds.length) {
+                            const items = Array.from(ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', 'in', assignedIds)
+                                    .condition('workEffortTypeEnumId', 'WetTask').condition('statusId', 'not-in', doneStatuses).list())
+                            for (const item of items) {
+                                const remaining = Number(String(item.remainingWorkTime ?? item.estimatedWorkTime ?? 0))
+                                if (!(remaining > 0)) continue
+                                const assignees = ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', item.workEffortId).condition('roleTypeId', 'Assignee')
+                                        .conditionDate('fromDate', 'thruDate', null).count() || 1
+                                const share = remaining / assignees
+                                if (!item.estimatedCompletionDate) { undatedHours += share; continue }
+                                const due = ec.l10n.format(item.estimatedCompletionDate, 'yyyy-MM-dd')
+                                const startAt = item.estimatedStartDate ? ec.l10n.format(item.estimatedStartDate, 'yyyy-MM-dd') : today
+                                const from = startAt > today ? startAt : today
+                                if (due < today) { if (byWeek[currentWeek]) byWeek[currentWeek].assigned += share; continue }
+                                const days = []
+                                for (let num = dayNum(from); num <= dayNum(due) && days.length < 800; num++) {
+                                    const text = dayText(num)
+                                    const inRange = text in capacityOfDay
+                                    if (inRange ? capacityOfDay[text] > 0 : workingIso.has(isoDayOf(text))) days.push(text)
+                                }
+                                if (!days.length) { const week = byWeek[weekOfDay(due)]; if (week) week.assigned += share; continue }
+                                const perDay = share / days.length
+                                for (const day of days) { const week = byWeek[weekOfDay(day)]; if (week) week.assigned += perDay }
+                            }
+                        }
+                        // logged time by week
+                        const fromStamp = ec.l10n.parseTimestamp(firstDay + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')
+                        const thruStamp = ec.l10n.parseTimestamp(dayText(dayNum(lastDay) + 1) + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')
+                        for (const entry of ec.entity.find('mantle.work.time.TimeEntry').condition('partyId', person).condition('fromDate', 'greater-equals', fromStamp)
+                                .condition('fromDate', 'less-than', thruStamp).selectField('fromDate').selectField('hours').list()) {
+                            const week = byWeek[weekOfDay(ec.l10n.format(entry.fromDate, 'yyyy-MM-dd'))]
+                            if (week) week.logged += Number(String(entry.hours ?? 0))
+                        }
+                        for (const week of weeksOut) {
+                            week.allocated = round(week.allocated); week.requested = round(week.requested); week.assigned = round(week.assigned); week.logged = round(week.logged)
+                            const most = Math.max(week.allocated, week.assigned)
+                            week.load = week.capacity > 0 ? round(most / week.capacity) : (most > 0 ? 9.99 : 0)
+                            week.over = most > week.capacity + 0.01
+                            week.utilization = week.capacity > 0 && week.weekStart <= currentWeek ? round(week.logged / week.capacity) : null
+                        }
+                        const roles = roleOfParty[person] || {}
+                        const mainRole = Object.keys(roles).sort((a, b) => roles[b] - roles[a] || a.localeCompare(b))[0] || null
+                        const account = ec.entity.find('moqui.security.UserAccount').condition('partyId', person).selectField('userId').list()[0]
+                        plan.personList.push({partyId: person, name: nameOf(person), userId: account?.userId || null, roleTypeId: mainRole, roleText: mainRole ? roleText(mainRole) : '',
+                            skillList: skillRows.filter((row) => row.partyId === person).map((row) => ({skillTypeEnumId: row.skillTypeEnumId, label: enumText(row.skillTypeEnumId),
+                                rating: row.rating != null ? Number(String(row.rating)) : (row.skillLevel != null ? Number(String(row.skillLevel)) : null)}))
+                                .sort((a, b) => (b.rating || 0) - (a.rating || 0) || a.label.localeCompare(b.label)),
+                            source: capacity.source, weekList: weeksOut, allocationList: allocationList, undatedHours: round(undatedHours)})
+                    } catch (err) {
+                        plan.failedPartyIds.push(person)
+                        ec.logger.error(`Team plan: ${person} left out: ${err && err.message ? err.message : err}`)
+                    } finally { ec.message.clearErrors(); ec.message.popErrors() }
+                }
+                if (includePlaceholders) {
+                    for (const row of allocRows.filter((one) => !one.partyId && sees(one.rootWorkEffortId))) {
+                        if (rootWorkEffortId && row.rootWorkEffortId !== rootWorkEffortId) continue
+                        if (roleTypeId && row.roleTypeId !== roleTypeId) continue
+                        if (skillTypeEnumId && row.skillTypeEnumId !== skillTypeEnumId) continue
+                        if (teamPartyId) continue
+                        plan.placeholderList.push(allocEntry(row, standard))
+                    }
+                }
+                plan.projectList = Array.from(usedProjects).map((id) => ({workEffortId: id, workEffortName: projectNames[id] || id}))
+                        .sort((a, b) => a.workEffortName.localeCompare(b.workEffortName))
+                if (withOptions) {
+                    const roleIds = Array.from(new Set(memberRows.map((row) => row.roleTypeId)))
+                    const skillTypes = Array.from(ec.entity.find('moqui.basic.Enumeration').condition('enumTypeId', 'SkillType').orderBy('sequenceNum').orderBy('description').useCache(true).list())
+                    const teamIds = Array.from(new Set(Array.from(ec.entity.find('mantle.party.PartyRole').condition('roleTypeId', 'OrgTeam').selectField('partyId').limit(200).list())
+                            .map((row) => row.partyId)))
+                    plan.options = {
+                        roleOptions: roleIds.map((id) => ({value: id, label: roleText(id)})).sort((a, b) => a.label.localeCompare(b.label)),
+                        skillOptions: skillTypes.map((row) => ({value: row.enumId, label: row.description || row.enumId})),
+                        teamOptions: teamIds.map((id) => ({value: id, label: nameOf(id)})).sort((a, b) => a.label.localeCompare(b.label)),
+                        projectOptions: projectRows.map((row) => ({value: row.workEffortId, label: row.workEffortName + ' (' + row.workEffortId + ')'}))
+                            .sort((a, b) => a.label.localeCompare(b.label))
+                    }
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="find" noun="StaffingCandidates">
+        <description>
+            The people who could fill an allocation (workEffortAllocationId, or the fields of one not made yet: fromDate, thruDate,
+            hoursPerWeek or allocationPercent, roleTypeId, skillTypeEnumId), ranked: those with the hours free in every week first,
+            then by the skill (the higher rating first), then holding the role on a project, then the most free hours. The people
+            are those who keep time (TimesheetServices.get#TimeKeepers), those with the skill, and those holding the role on any
+            project. Each {partyId, name, hasSkill, skillRating, hasRole, fits, shortWeeks (the weeks without enough free hours),
+            freeHours (free over the period), needHours, minFreeWeek, currentProjects (the names of the open projects, those the
+            user sees, they are on), costRate and costCurrencyUomId (the person's current vendor rate, RateAmount RaprVendor, only
+            withRates for ADMIN and holders of TIME_ENTRY_RATE)}. The allocation itself is not counted against its own person.
+        </description>
+        <in-parameters>
+            <parameter name="workEffortAllocationId"/>
+            <parameter name="fromDate"/>
+            <parameter name="thruDate"/>
+            <parameter name="hoursPerWeek" type="BigDecimal"/>
+            <parameter name="allocationPercent" type="BigDecimal"/>
+            <parameter name="roleTypeId"/>
+            <parameter name="skillTypeEnumId"/>
+            <parameter name="limit" type="Integer" default="20"/>
+            <parameter name="withRates" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="candidateList" type="List"/>
+            <parameter name="allocation" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const dayOf = (value) => { if (value == null || value === '') return ''; const text = String(value); return /^-?\d+$/.test(text) ? new Date(Number(text)).toISOString().slice(0, 10) : text.slice(0, 10) }
+candidateList = []
+            const round = (value) => Math.round(value * 100) / 100
+            if (workEffortAllocationId) {
+                const access = ec.service.sync().name('mantle.work.ResourceServices.get#AllocationAccess').parameters({workEffortAllocationId: workEffortAllocationId,
+                    need: 'view'}).call() || {}
+                if (ec.message.hasError()) return
+                allocation = access.allocation
+            } else {
+                const checked = ec.service.sync().name('mantle.work.ResourceServices.check#AllocationFields').parameters({roleTypeId: roleTypeId || null,
+                    skillTypeEnumId: skillTypeEnumId || null, fromDate: fromDate, thruDate: thruDate, hoursPerWeek: hoursPerWeek, allocationPercent: allocationPercent}).call() || {}
+                if (ec.message.hasError()) return
+                allocation = {fromDate: checked.fromDay, thruDate: checked.thruDay, hoursPerWeek: checked.hoursPerWeek, allocationPercent: checked.allocationPercent,
+                    roleTypeId: roleTypeId || null, skillTypeEnumId: skillTypeEnumId || null}
+            }
+            const role = allocation.roleTypeId || null
+            const skill = allocation.skillTypeEnumId || null
+            const dayNum = (text) => Math.floor(Date.parse(String(text).slice(0, 10) + 'T00:00:00Z') / 86400000)
+            const dayText = (num) => new Date(num * 86400000).toISOString().slice(0, 10)
+            const isoDayOf = (text) => { const js = new Date(String(text).slice(0, 10) + 'T12:00:00Z').getUTCDay(); return js === 0 ? 7 : js }
+            const fromDay = dayOf(allocation.fromDate)
+            const thruDay = dayOf(allocation.thruDate)
+            const firstDay = dayText(dayNum(fromDay) - (isoDayOf(fromDay) - 1))
+            const lastDay = dayText(dayNum(thruDay) + (7 - isoDayOf(thruDay)))
+            const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+            const all = !!vis.allProjects
+            const visible = new Set(Array.from(vis.visibleProjectIds || []))
+            const showRates = !!withRates && (ec.user.isInGroup('ADMIN') || ec.user.hasPermission('TIME_ENTRY_RATE'))
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const pool = new Set(Array.from(ec.service.sync().name('mantle.work.TimesheetServices.get#TimeKeepers').call()?.partyIdList || []))
+                const skillRows = {}
+                if (skill) for (const row of ec.entity.find('mantle.humanres.ability.PartySkill').condition('skillTypeEnumId', skill).list()) {
+                    pool.add(row.partyId); skillRows[row.partyId] = row }
+                const roleHolders = new Set()
+                if (role) for (const row of ec.entity.find('mantle.work.effort.WorkEffortParty').condition('roleTypeId', role).conditionDate('fromDate', 'thruDate', null)
+                        .selectField('partyId').list()) { roleHolders.add(row.partyId); pool.add(row.partyId) }
+                let people = pool.size ? Array.from(ec.entity.find('mantle.party.Person').condition('partyId', 'in', Array.from(pool)).selectField('partyId').list()).map((row) => row.partyId) : []
+                if (allocation.partyId) people = people.filter((id) => id !== allocation.partyId || allocation.statusId === 'WealRequested')
+                if (!people.length) return
+                if (people.length > 200) people = people.slice(0, 200)
+                const capacities = {}
+                for (const entry of Array.from(ec.service.sync().name('mantle.work.ResourceServices.get#PartyCapacity').parameters({partyIdList: people,
+                        fromDate: firstDay, thruDate: lastDay}).call()?.capacityList || [])) capacities[entry.partyId] = entry
+                ec.message.clearErrors()
+                const allocRows = Array.from(ec.entity.find('mantle.work.effort.WorkEffortAllocation').condition('partyId', 'in', people)
+                        .condition('statusId', 'equals', 'WealAllocated').condition('fromDate', 'less-equals', lastDay).condition('thruDate', 'greater-equals', firstDay).list())
+                        .filter((row) => !allocation.workEffortAllocationId || row.workEffortAllocationId !== allocation.workEffortAllocationId)
+                const weeksOf = (row, capacity) => ec.service.sync().name('mantle.work.ResourceServices.get#AllocationWeeks').parameters({allocation: row, capacity: capacity})
+                        .call()?.weekHours || {}
+                const nameOf = (partyId) => {
+                    const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one()
+                    return party ? ([party.firstName, party.lastName].filter((part) => part).join(' ') || party.organizationName || partyId) : partyId
+                }
+                const nowStamp = ec.user.nowTimestamp
+                for (const person of people) {
+                    try {
+                        const capacity = capacities[person]
+                        if (!capacity) continue
+                        const need = weeksOf(allocation, capacity)
+                        const taken = {}
+                        for (const row of allocRows.filter((one) => one.partyId === person)) for (const [week, hours] of Object.entries(weeksOf(row.getMap(), capacity)))
+                            taken[week] = (taken[week] || 0) + hours
+                        let freeHours = 0, needHours = 0, shortWeeks = 0, minFree = null
+                        for (const week of Array.from(capacity.weekList || [])) {
+                            const needWeek = need[week.weekStart] || 0
+                            if (!(needWeek > 0)) continue
+                            const free = week.capacity - (taken[week.weekStart] || 0)
+                            freeHours += Math.max(0, free)
+                            needHours += needWeek
+                            if (free + 0.01 < needWeek) shortWeeks++
+                            if (minFree == null || free < minFree) minFree = free
+                        }
+                        const projects = Array.from(new Set(Array.from(ec.entity.find('mantle.work.effort.WorkEffortAndParty').condition('partyId', person)
+                                .condition('workEffortTypeEnumId', 'WetProject').condition('statusId', 'not-in', ['WeClosed', 'WeCancelled']).conditionDate('fromDate', 'thruDate', null)
+                                .list()).filter((row) => row.isTemplate !== 'Y' && (all || visible.has(row.workEffortId))).map((row) => row.workEffortName || row.workEffortId))).sort()
+                        const skillRow = skillRows[person]
+                        const rating = skillRow ? Number(String(skillRow.rating ?? skillRow.skillLevel ?? 0)) : null
+                        const entry = {partyId: person, name: nameOf(person), hasSkill: !!skillRow, skillRating: rating, hasRole: roleHolders.has(person),
+                            fits: shortWeeks === 0 && needHours > 0, shortWeeks: shortWeeks, freeHours: round(freeHours), needHours: round(needHours),
+                            minFreeWeek: minFree == null ? null : round(minFree), currentProjects: projects, costRate: null, costCurrencyUomId: null}
+                        if (showRates) {
+                            const rate = Array.from(ec.entity.find('mantle.humanres.rate.RateAmount').condition('partyId', person).condition('ratePurposeEnumId', 'RaprVendor')
+                                    .condition('workEffortId', 'is-null', null).conditionDate('fromDate', 'thruDate', nowStamp).orderBy('-fromDate').limit(1).list())[0]
+                            if (rate) { entry.costRate = Number(String(rate.rateAmount)); entry.costCurrencyUomId = rate.rateCurrencyUomId || null }
+                        }
+                        candidateList.push(entry)
+                    } catch (err) {
+                        ec.logger.error(`Staffing candidates: ${person} left out: ${err && err.message ? err.message : err}`)
+                    }
+                }
+                const scoreOf = (one) => (one.fits ? 1000 : 0) + (one.hasSkill ? 200 + 10 * (one.skillRating || 0) : 0) + (one.hasRole ? 100 : 0)
+                candidateList.sort((a, b) => scoreOf(b) - scoreOf(a) || b.freeHours - a.freeHours || a.name.localeCompare(b.name))
+                candidateList = candidateList.slice(0, Math.max(1, Number(limit) || 20))
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+</services>

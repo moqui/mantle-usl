@@ -54,15 +54,15 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!formatServiceName">
                 <set field="supportedFormats" from="['PmftBankOfAmericaAr', 'PmftCityBankCnb', 'PmftSunTrustCpr',
                         'PmftWachoviaAr', 'PmftWellsFargoArp', 'PmftZionsBankCsv']"/>
-                <if condition="bankAccount.posPayFormatEnumId in supportedFormats">
+                <if condition="supportedFormats.includes(bankAccount.posPayFormatEnumId)">
                     <then><set field="formatServiceName" value="mantle.account.PositivePayServices.generate#${bankAccount.posPayFormatEnumId}"/></then>
                     <else><return error="true" message="Positive Pay File Format ${bankAccount.posPayFormatEnumId} not supported and no format service specified"/></else>
                 </if>
             </if>
 
             <!-- calc entryCount, debitAmountTotal -->
-            <set field="debitAmountTotal" from="0"/>
-            <set field="debitAmountTotalWithCancels" from="0"/>
+            <set field="debitAmountTotal" from="toDecimal(0)"/>
+            <set field="debitAmountTotalWithCancels" from="toDecimal(0)"/>
             <set field="checkNumberSum" from="0"/>
             <set field="paymentList" from="[]"/>
             <iterate list="originalPaymentList" entry="payment">
@@ -73,23 +73,23 @@ along with this software (see the LICENSE.md file). If not, see
 
                 <!-- treat voids as 0; NOTE: cancels also counted as positive number, is a check-sum -->
                 <if condition="payment.statusId != 'PmntVoid'">
-                    <set field="debitAmountTotalWithCancels" from="debitAmountTotalWithCancels + payment.amount"/>
+                    <set field="debitAmountTotalWithCancels" from="debitAmountTotalWithCancels.add(payment.amount)"/>
                     <if condition="payment.statusId != 'PmntCancelled'">
-                        <set field="debitAmountTotal" from="debitAmountTotal + payment.amount"/>
+                        <set field="debitAmountTotal" from="debitAmountTotal.add(payment.amount)"/>
                     </if>
                 </if>
 
-                <set field="checkNumberLong" from="payment.paymentRefNum as Long"/>
+                <set field="checkNumberLong" from="(payment.paymentRefNum == null ? null : Math.trunc(toDecimal(payment.paymentRefNum).toNumber()))"/>
                 <set field="checkNumberSum" from="checkNumberSum + checkNumberLong"/>
 
-                <script>paymentList.add(payment)</script>
+                <script>paymentList.push(payment)</script>
             </iterate>
 
             <!-- no payments? return now with a message -->
-            <if condition="!paymentList">
+            <if condition="!paymentList.length">
                 <return type="warning" message="No pending payments found for payment method ${paymentMethodId}"/></if>
-            <set field="entryCount" from="paymentList.size()"/>
-            <set field="paymentCount" from="paymentList.size()"/>
+            <set field="entryCount" from="paymentList.length"/>
+            <set field="paymentCount" from="paymentList.length"/>
 
             <!-- create a PaymentMethodFile record, get the paymentMethodFileId (used in the file) -->
             <set field="fileTypeEnumId" from="bankAccount.posPayFormatEnumId"/>
@@ -123,11 +123,8 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <if condition="lookBackDays">
-                <script>
-                    Calendar lookBackCal = ec.user.nowCalendar
-                    lookBackCal.add(Calendar.DAY_OF_MONTH, -lookBackDays)
-                    fromDate = new java.sql.Timestamp(lookBackCal.getTimeInMillis())
-                </script>
+                <!-- look back lookBackDays days from now, as epoch millis text (a timestamp in a script) -->
+                <set field="fromDate" from="String(Number(ec.user.nowTimestamp) - lookBackDays * 86400000)"/>
             </if>
             <log message="Generating PositivePay file for payment method ${paymentMethodId} instrument ${paymentInstrumentEnumId} look back days ${lookBackDays} fromDate ${fromDate}"/>
 
@@ -163,342 +160,328 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="generate" noun="PmftBankOfAmericaAr">
         <implements service="mantle.account.PositivePayServices.generate#PositivePayInterface"/>
         <actions>
-            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length() != 3">
+            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length != 3">
                 <return error="true" message="Pos. Pay Bank Number must be set and 3 characters long (for bank account [${bankAccount.paymentMethodId}])"/></if>
 
             <script><![CDATA[
-                import org.moqui.context.ExecutionContext
-                import org.moqui.entity.EntityValue
-                ExecutionContext ec = context.ec
+
+                const centsText = (amount) => toDecimal(amount).multiply(100).setScale(0, 'DOWN').toString()
 
                 // Handy output checking lines, paste below to line up output
                 // 0        10        20        30        40        50        60        70        80
                 // 123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+
 
-                String accountNumber =  bankAccount.accountNumber
-                if (accountNumber.length() > 12) accountNumber = accountNumber.substring(accountNumber.length() - 12, accountNumber.length())
+                let accountNumber = bankAccount.accountNumber
+                if (accountNumber.length > 12) accountNumber = accountNumber.substring(accountNumber.length - 12, accountNumber.length)
 
-                List<StringBuilder> lines = []
+                const lines = []
 
                 // Header
-                StringBuilder fileHeader = new StringBuilder(80)
+                let fileHeader = ''
                 // 01-03: Record Type Code = 'DRS'
-                fileHeader.append('DRS')
+                fileHeader += 'DRS'
                 // 04-06: Bank Number, assigned by bank
-                fileHeader.append(bankAccount.posPayBankNumber)
+                fileHeader += bankAccount.posPayBankNumber
                 // 07-18: Account Number (12 digits, left 0 padded)
-                fileHeader.append(accountNumber.padLeft(12, '0'))
+                fileHeader += accountNumber.padStart(12, '0')
                 // 19-26: Processing date (yyyyMMdd)
-                fileHeader.append(ec.l10n.format(fileDate, 'yyyyMMdd'))
+                fileHeader += ec.l10n.format(fileDate, 'yyyyMMdd')
                 // 27-27: Blank (1 space)
-                fileHeader.append(' ')
+                fileHeader += ' '
                 // 28-35: Certification cutoff date (yyyyMMdd)
-                fileHeader.append(ec.l10n.format(thruDate, 'yyyyMMdd'))
+                fileHeader += ec.l10n.format(thruDate, 'yyyyMMdd')
                 // 36-36: Final Input Indicator (Y for last data through cutoff date, N otherwise; always use N)
-                fileHeader.append('N')
+                fileHeader += 'N'
                 // 37-80: Filler, 44 spaces
-                fileHeader.append(" ".padRight(44, ' '))
-                lines.add(fileHeader)
+                fileHeader += " ".padEnd(44, ' ')
+                lines.push(fileHeader)
 
                 // Account number in detail lines is only 10 chars
-                if (accountNumber.length() > 10) accountNumber = accountNumber.substring(accountNumber.length() - 10, accountNumber.length())
+                if (accountNumber.length > 10) accountNumber = accountNumber.substring(accountNumber.length - 10, accountNumber.length)
 
-                for (Map payment in paymentList) {
+                for (const payment of paymentList) {
                     // Get amount String (10 chars, last 2 are cents)
-                    String amountStr = payment.getBigDecimal("amount").movePointRight(2).longValue() as String
+                    let amountStr = centsText(payment.amount)
 
-                    boolean isVoid = payment.statusId == 'PmntVoid'
-                    boolean isCancel = payment.statusId == 'PmntCancelled'
+                    let isVoid = payment.statusId === 'PmntVoid'
+                    let isCancel = payment.statusId === 'PmntCancelled'
 
-                    String payeeName = ""
-                    EntityValue otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
+                    let payeeName = ""
+                    let otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
                     if (otherParty) {
                         payeeName = otherParty.firstName ? otherParty.firstName + " " + otherParty.lastName : otherParty.organizationName
-                        if (payeeName.length() > 43) payeeName = payeeName.substring(0, 43)
+                        if (payeeName.length > 43) payeeName = payeeName.substring(0, 43)
                     }
 
                     // Detail Line
-                    StringBuilder detailLine = new StringBuilder(80)
+                    let detailLine = ''
                     // 01-10: Check number (10 digits, left 0 padded)
-                    detailLine.append(payment.paymentRefNum.padLeft(10, '0'))
+                    detailLine += payment.paymentRefNum.padStart(10, '0')
                     // 11-20: Check amount (10 digits, last 2 are cents, left 0 padded); for voids enter all 0s
-                    detailLine.append((isVoid ? '0' : amountStr).padLeft(10, '0'))
-                    // 21-30: Account number (same as header, but 10 digits)
-                    detailLine.append(accountNumber.padLeft(10, '0'))
+                    detailLine += (isVoid ? '0' : amountStr).padStart(10, '0')
+                    // 21-30: Account number (matches the header, but 10 digits)
+                    detailLine += accountNumber.padStart(10, '0')
                     // 31-36: Actual date of issue (MMddyy)
-                    detailLine.append(ec.l10n.format(payment.effectiveDate, 'MMddyy'))
+                    detailLine += ec.l10n.format(payment.effectiveDate, 'MMddyy')
                     // 37-37: Blank for issue record, '-' for cancel
-                    detailLine.append((isCancel ? '-' : ' '))
+                    detailLine += (isCancel ? '-' : ' ')
                     // 38-80: Payee information (43 chars; pad right with spaces)
-                    detailLine.append(payeeName.padRight(43, ' '))
-
-                    lines.add(detailLine)
+                    detailLine += payeeName.padEnd(43, ' ')
+                    lines.push(detailLine)
                 }
 
                 // Get amount String (10 chars, last 2 are cents)
-                String debitAmountTotalWithCancelsStr = debitAmountTotalWithCancels.movePointRight(2).longValue() as String
+                let debitAmountTotalWithCancelsStr = centsText(debitAmountTotalWithCancels)
 
                 // Trailer
-                StringBuilder fileTrailer = new StringBuilder(80)
+                let fileTrailer = ''
                 // 01-04: Trailer Constant = '1EOF'
-                fileTrailer.append('1EOF')
+                fileTrailer += '1EOF'
                 // 05-05: Blank
-                fileTrailer.append(' ')
+                fileTrailer += ' '
                 // 06-10: Number of detail records (5 numbers, left 0 pad)
-                fileTrailer.append((entryCount as String).padLeft(5, '0'))
+                fileTrailer += String(entryCount).padStart(5, '0')
                 // 11-30: Blanks (20)
-                fileTrailer.append(' '.padRight(20, ' '))
+                fileTrailer += ' '.padEnd(20, ' ')
                 // 31-40: "Hash total" (simple sum) of all check numbers (10 numbers, left 0 pad)
-                fileTrailer.append((checkNumberSum as String).padLeft(10, '0'))
+                fileTrailer += String(checkNumberSum).padStart(10, '0')
                 // 41-50: Sum of check amounts (issues and cancels; 10 numbers, last 2 are cents, left 0 padded)
-                fileTrailer.append(debitAmountTotalWithCancelsStr.padLeft(10, '0'))
+                fileTrailer += debitAmountTotalWithCancelsStr.padStart(10, '0')
                 // 51-80: Blanks (30)
-                fileTrailer.append(" ".padRight(30, ' '))
-
-                lines.add(fileTrailer)
+                fileTrailer += " ".padEnd(30, ' ')
+                lines.push(fileTrailer)
 
                 // combine the lines
-                StringBuilder ftSb = new StringBuilder(81 * lines.size())
-                for (StringBuilder line in lines) {
-                    if (line.length() != 80) ec.message.addError(ec.resource.expand('Generated line does not have exactly 80 chars: ${line}',''))
-                    ftSb.append(line).append('\n')
+                let ftText = ''
+                for (const line of lines) {
+                    if (line.length !== 80) ec.message.addError(`Generated line does not have exactly 80 chars: ${line}`)
+                    ftText += line + '\n'
                 }
                 // get the String value
-                fileText = ftSb.toString()
+                fileText = ftText
             ]]></script>
         </actions>
     </service>
     <service verb="generate" noun="PmftCityBankCnb">
         <implements service="mantle.account.PositivePayServices.generate#PositivePayInterface"/>
         <actions>
-            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length() != 3">
+            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length != 3">
                 <return error="true" message="Pos. Pay Bank Number must be set and be 3 digits (for bank account [${bankAccount.paymentMethodId}])"/></if>
 
             <script><![CDATA[
-                import org.moqui.context.ExecutionContext
-                import org.moqui.entity.EntityValue
-                ExecutionContext ec = context.ec
+
+                const centsText = (amount) => toDecimal(amount).multiply(100).setScale(0, 'DOWN').toString()
 
                 // Handy output checking lines, paste below to line up output
                 // 0        10        20        30        40        50        60        70        80
                 // 123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+1234567
 
-                String accountNumber =  bankAccount.accountNumber
-                if (accountNumber.length() > 9) accountNumber = accountNumber.substring(accountNumber.length() - 9, accountNumber.length())
+                let accountNumber = bankAccount.accountNumber
+                if (accountNumber.length > 9) accountNumber = accountNumber.substring(accountNumber.length - 9, accountNumber.length)
 
-                List<StringBuilder> lines = []
+                const lines = []
 
                 // NOTE: No Header for City Bank CNB file
 
-                for (Map payment in paymentList) {
+                for (const payment of paymentList) {
                     // Get amount String (10 chars, last 2 are cents)
-                    String amountStr = payment.getBigDecimal("amount").movePointRight(2).longValue() as String
+                    let amountStr = centsText(payment.amount)
 
-                    // NOTE: for City Bank treat void and cancel as "Void"
-                    boolean isVoid = payment.statusId == 'PmntVoid'
-                    boolean isCancel = payment.statusId == 'PmntCancelled'
+                    // NOTE: for City Bank void and cancel are both "Void"
+                    let isVoid = payment.statusId === 'PmntVoid'
+                    let isCancel = payment.statusId === 'PmntCancelled'
 
-                    String payeeName = ""
-                    EntityValue otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
+                    let payeeName = ""
+                    let otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
                     if (otherParty) {
                         payeeName = otherParty.firstName ? otherParty.firstName + " " + otherParty.lastName : otherParty.organizationName
-                        if (payeeName.length() > 50) payeeName = payeeName.substring(0, 50)
+                        if (payeeName.length > 50) payeeName = payeeName.substring(0, 50)
                     }
 
                     // Detail Line
-                    StringBuilder detailLine = new StringBuilder(87)
+                    let detailLine = ''
                     // 01-03: Bank ID, assigned by bank (3 digits)
-                    detailLine.append(bankAccount.posPayBankNumber)
+                    detailLine += bankAccount.posPayBankNumber
                     // 04-12: Account Number (9 digits, left 0 padded)
-                    detailLine.append(accountNumber.padLeft(9, '0'))
+                    detailLine += accountNumber.padStart(9, '0')
                     // 13-20: Check number (8 digits, left 0 padded)
-                    detailLine.append(payment.paymentRefNum.padLeft(8, '0'))
+                    detailLine += payment.paymentRefNum.padStart(8, '0')
                     // 21-30: Check amount (10 digits, last 2 are cents, left 0 padded); for voids enter all 0s
-                    detailLine.append((isVoid ? '0' : amountStr).padLeft(10, '0'))
+                    detailLine += (isVoid ? '0' : amountStr).padStart(10, '0')
                     // 31-36: Date of issue (MMddyy)
-                    detailLine.append(ec.l10n.format(payment.effectiveDate, 'MMddyy'))
+                    detailLine += ec.l10n.format(payment.effectiveDate, 'MMddyy')
                     // 37-86: Additional data; Payee information (50 chars; pad right with spaces)
-                    detailLine.append(payeeName.padRight(50, ' '))
+                    detailLine += payeeName.padEnd(50, ' ')
                     // 87-87: Void indicator Blank for issue record, 'V' for void/cancel, 'I' for issue
-                    detailLine.append((isVoid || isCancel ? 'V' : 'I'))
-
-                    lines.add(detailLine)
+                    detailLine += (isVoid || isCancel ? 'V' : 'I')
+                    lines.push(detailLine)
                 }
 
                 // NOTE: No Trailer for City Bank CNB file
 
                 // combine the lines
-                StringBuilder ftSb = new StringBuilder(81 * lines.size())
-                for (StringBuilder line in lines) {
-                    if (line.length() != 87) ec.message.addError(ec.resource.expand('Generated line does not have exactly 87 chars: ${line}',''))
-                    ftSb.append(line).append('\n')
+                let ftText = ''
+                for (const line of lines) {
+                    if (line.length !== 87) ec.message.addError(`Generated line does not have exactly 87 chars: ${line}`)
+                    ftText += line + '\n'
                 }
                 // get the String value
-                fileText = ftSb.toString()
+                fileText = ftText
             ]]></script>
         </actions>
     </service>
     <service verb="generate" noun="PmftSunTrustCpr">
         <implements service="mantle.account.PositivePayServices.generate#PositivePayInterface"/>
         <actions>
-            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length() != 3">
+            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length != 3">
                 <return error="true" message="Pos. Pay Bank Number must be set and 3 characters long (for bank account [${bankAccount.paymentMethodId}])"/></if>
 
             <script><![CDATA[
-                import org.moqui.context.ExecutionContext
-                import org.moqui.entity.EntityValue
-                ExecutionContext ec = context.ec
+
+                const centsText = (amount) => toDecimal(amount).multiply(100).setScale(0, 'DOWN').toString()
 
                 // Handy output checking lines, paste below to line up output
                 // 0        10        20        30        40        50        60        70        80        90        100       110       120
                 // 123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+
 
-                String accountNumber =  bankAccount.accountNumber
-                if (accountNumber.length() > 10) accountNumber = accountNumber.substring(accountNumber.length() - 10, accountNumber.length())
+                let accountNumber = bankAccount.accountNumber
+                if (accountNumber.length > 10) accountNumber = accountNumber.substring(accountNumber.length - 10, accountNumber.length)
 
-                List<StringBuilder> lines = []
+                const lines = []
 
                 // Account Batch Header Record
-                StringBuilder fileHeader = new StringBuilder(240)
+                let fileHeader = ''
                 // 01-03: Record Type Code = '*00'
-                fileHeader.append('*00')
+                fileHeader += '*00'
                 // 04-13: Account Number (10 digits, left 0 padded)
-                fileHeader.append(accountNumber.padLeft(10, '0'))
+                fileHeader += accountNumber.padStart(10, '0')
                 // 14-23: Serial Number (could use file ID, but seems to want all 0s; 10 digits, left 0 pad)
-                fileHeader.append('0'.padLeft(10, '0'))
+                fileHeader += '0'.padStart(10, '0')
                 // 24-26: Bank Number, assigned by bank (3 digits)
-                fileHeader.append(bankAccount.posPayBankNumber)
+                fileHeader += bankAccount.posPayBankNumber
                 // 27-32: Issue (file) date (MMddyy)
-                fileHeader.append(ec.l10n.format(fileDate, 'MMddyy'))
+                fileHeader += ec.l10n.format(fileDate, 'MMddyy')
                 // 33-240: Filler, 208 spaces
-                fileHeader.append(" ".padRight(208, ' '))
-                lines.add(fileHeader)
+                fileHeader += " ".padEnd(208, ' ')
+                lines.push(fileHeader)
 
-                for (Map payment in paymentList) {
+                for (const payment of paymentList) {
                     // Get amount String (11 chars, last 2 are cents)
-                    String amountStr = payment.getBigDecimal("amount").movePointRight(2).longValue() as String
+                    let amountStr = centsText(payment.amount)
 
-                    boolean isVoid = payment.statusId == 'PmntVoid'
-                    boolean isCancel = payment.statusId == 'PmntCancelled'
+                    let isVoid = payment.statusId === 'PmntVoid'
+                    let isCancel = payment.statusId === 'PmntCancelled'
 
-                    String payeeName = ""
-                    EntityValue otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
+                    let payeeName = ""
+                    let otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
                     if (otherParty) {
                         payeeName = otherParty.firstName ? otherParty.firstName + " " + otherParty.lastName : otherParty.organizationName
-                        if (payeeName.length() > 40) payeeName = payeeName.substring(0, 40)
+                        if (payeeName.length > 40) payeeName = payeeName.substring(0, 40)
                     }
 
                     // FUTURE: Stop Item (*22)
                     if (isVoid || isCancel) {
                         // Detail Line - Cancel/Void Item
-                        StringBuilder detailLine = new StringBuilder(240)
+                        let detailLine = ''
                         // 01-03: Transaction code (for Cancel/Void Item *26)
-                        detailLine.append('*26')
-                        // 04-13: Account number (same as header, 10 digits)
-                        detailLine.append(accountNumber.padLeft(10, '0'))
+                        detailLine += '*26'
+                        // 04-13: Account number (matches the header, 10 digits)
+                        detailLine += accountNumber.padStart(10, '0')
                         // 14-23: Check number (10 digits, left 0 padded)
-                        detailLine.append(payment.paymentRefNum.padLeft(10, '0'))
+                        detailLine += payment.paymentRefNum.padStart(10, '0')
                         // 24-29: Transaction Date (MMddyy)
-                        detailLine.append(ec.l10n.format(payment.effectiveDate, 'MMddyy'))
+                        detailLine += ec.l10n.format(payment.effectiveDate, 'MMddyy')
                         // 30-240: Filler (211 spaces)
-                        detailLine.append("".padRight(211, ' '))
-
-                        lines.add(detailLine)
+                        detailLine += "".padEnd(211, ' ')
+                        lines.push(detailLine)
                     } else {
                         // Detail Line - Issue Item
-                        StringBuilder detailLine = new StringBuilder(240)
+                        let detailLine = ''
                         // 01-03: Transaction code (for Issue Item *10)
-                        detailLine.append('*10')
-                        // 04-13: Account number (same as header, 10 digits)
-                        detailLine.append(accountNumber.padLeft(10, '0'))
+                        detailLine += '*10'
+                        // 04-13: Account number (matches the header, 10 digits)
+                        detailLine += accountNumber.padStart(10, '0')
                         // 14-23: Check number (10 digits, left 0 padded)
-                        detailLine.append(payment.paymentRefNum.padLeft(10, '0'))
+                        detailLine += payment.paymentRefNum.padStart(10, '0')
                         // 24-34: Check amount (11 digits, last 2 are cents, left 0 padded)
-                        detailLine.append(amountStr.padLeft(11, '0'))
+                        detailLine += amountStr.padStart(11, '0')
                         // 35-49: Additional information (15 chars; all spaces)
-                        detailLine.append("".padRight(15, ' '))
+                        detailLine += "".padEnd(15, ' ')
                         // 50-58: Funding source (no separate funding source, so use 9 1s)
-                        detailLine.append("1".padRight(9, '1'))
+                        detailLine += "1".padEnd(9, '1')
                         // 59-80: Filler (22 spaces)
-                        detailLine.append("".padRight(22, ' '))
-
+                        detailLine += "".padEnd(22, ' ')
                         // Chars 81-160 on the detail record for the Payee Name (first)
                         // 81-83: Transaction code (for Payee Name *61)
-                        detailLine.append('*61')
-                        // 84-93: Account number (same as header, 10 digits)
-                        detailLine.append(accountNumber.padLeft(10, '0'))
+                        detailLine += '*61'
+                        // 84-93: Account number (matches the header, 10 digits)
+                        detailLine += accountNumber.padStart(10, '0')
                         // 94-103: Check number (10 digits, left 0 padded)
-                        detailLine.append(payment.paymentRefNum.padLeft(10, '0'))
+                        detailLine += payment.paymentRefNum.padStart(10, '0')
                         // 104-114: Check amount (11 digits, last 2 are cents, left 0 padded); for voids enter all 0s
-                        detailLine.append(amountStr.padLeft(11, '0'))
+                        detailLine += amountStr.padStart(11, '0')
                         // 115-154: Payee information (40 chars; pad right with spaces)
-                        detailLine.append(payeeName.padRight(40, ' '))
+                        detailLine += payeeName.padEnd(40, ' ')
                         // 155-160: Filler (6 spaces)
-                        detailLine.append("".padRight(6, ' '))
-
-                        // Chars 161-240 all blanks as there is no second Payee Name (80 spaces)
-                        detailLine.append("".padRight(80, ' '))
-
-                        lines.add(detailLine)
+                        detailLine += "".padEnd(6, ' ')
+                        // Chars 161-240 all blanks, there is no second Payee Name (80 spaces)
+                        detailLine += "".padEnd(80, ' ')
+                        lines.push(detailLine)
                     }
                 }
 
                 // Get amount String (11 chars, last 2 are cents)
-                String debitAmountTotalStr = debitAmountTotal.movePointRight(2).longValue() as String
+                let debitAmountTotalStr = centsText(debitAmountTotal)
 
                 // Account Batch Trailer
-                StringBuilder batchTrailer = new StringBuilder(240)
+                let batchTrailer = ''
                 // 01-03: Transaction Code = '*98'
-                batchTrailer.append('*98')
+                batchTrailer += '*98'
                 // 04-13: Account Number (10 digits, left 0 padded)
-                batchTrailer.append(accountNumber.padLeft(10, '0'))
+                batchTrailer += accountNumber.padStart(10, '0')
                 // 14-23: Serial Number (seems want constant '9999999998'; 10 digits, left 0 pad)
-                batchTrailer.append('9999999998')
+                batchTrailer += '9999999998'
                 // 24-25: Number Batches (always 01)
-                batchTrailer.append('01')
+                batchTrailer += '01'
                 // 26-34: Number of Items, including lines, batch header/trailer (9 numbers, left 0 pad)
-                batchTrailer.append(((entryCount + 2) as String).padLeft(9, '0'))
+                batchTrailer += String(entryCount + 2).padStart(9, '0')
                 // 35-45: Sum of check amounts (issues only, NOT including cancels; 11 numbers, last 2 are cents, left 0 padded)
-                batchTrailer.append(debitAmountTotalStr.padLeft(11, '0'))
+                batchTrailer += debitAmountTotalStr.padStart(11, '0')
                 // 46-240: Blanks (195)
-                batchTrailer.append(" ".padRight(195, ' '))
-                lines.add(batchTrailer)
+                batchTrailer += " ".padEnd(195, ' ')
+                lines.push(batchTrailer)
 
                 // File Trailer
-                StringBuilder fileTrailer = new StringBuilder(240)
+                let fileTrailer = ''
                 // 01-03: Transaction Code = '*99'
-                fileTrailer.append('*99')
+                fileTrailer += '*99'
                 // 04-13: Account Number (10 digits, left 0 padded)
-                fileTrailer.append(accountNumber.padLeft(10, '0'))
+                fileTrailer += accountNumber.padStart(10, '0')
                 // 14-23: Serial Number (seems to want constant '9999999999'; 10 digits, left 0 pad)
-                fileTrailer.append('9999999999')
+                fileTrailer += '9999999999'
                 // 24-25: Number Batches (always 01)
-                fileTrailer.append('01')
+                fileTrailer += '01'
                 // 26-34: Number of Items, including lines, batch header/trailer, and file trailer (9 numbers, left 0 pad)
-                fileTrailer.append(((entryCount + 3) as String).padLeft(9, '0'))
+                fileTrailer += String(entryCount + 3).padStart(9, '0')
                 // 35-45: Sum of check amounts (issues only, NOT including cancels; 11 numbers, last 2 are cents, left 0 padded)
-                fileTrailer.append(debitAmountTotalStr.padLeft(11, '0'))
+                fileTrailer += debitAmountTotalStr.padStart(11, '0')
                 // 46-240: Blanks (195)
-                fileTrailer.append(" ".padRight(195, ' '))
-                lines.add(fileTrailer)
+                fileTrailer += " ".padEnd(195, ' ')
+                lines.push(fileTrailer)
 
                 // NOTE: this is a really weird block size, but part of the spec
                 // if not a multiple of 113 lines add lines of all spaces until it is
-                while (lines.size() % 113 != 0) {
-                    StringBuilder sb = new StringBuilder(240)
-                    for (int i = 0; i < 240; i++) sb.append(' ')
-                    lines.add(sb)
-                }
+                while (lines.length % 113 !== 0) lines.push(' '.repeat(240))
 
                 // combine the lines
-                StringBuilder ftSb = new StringBuilder(241 * lines.size())
-                for (StringBuilder line in lines) {
-                    if (line.length() != 240) ec.message.addError(ec.resource.expand('Generated line (${line.length()} chars) does not have exactly 240 chars: ${line}',''))
+                let ftText = ''
+                for (const line of lines) {
+                    if (line.length !== 240) ec.message.addError(`Generated line (${line.length} chars) does not have exactly 240 chars: ${line}`)
                     // NOTE: not clear in spec but may not use line endings
-                    ftSb.append(line).append('\n')
+                    ftText += line + '\n'
                 }
                 // get the String value
-                fileText = ftSb.toString()
+                fileText = ftText
             ]]></script>
         </actions>
     </service>
@@ -506,151 +489,146 @@ along with this software (see the LICENSE.md file). If not, see
         <description>Generate Wachovia Account Reconcilement File; note that uses spaces/blanks for filler</description>
         <implements service="mantle.account.PositivePayServices.generate#PositivePayInterface"/>
         <actions>
-            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length() > 4">
+            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length > 4">
                 <return error="true" message="Pos. Pay Bank Number must be set and 4 digits or less (for bank account [${bankAccount.paymentMethodId}])"/></if>
 
             <script><![CDATA[
-                import org.moqui.context.ExecutionContext
-                import org.moqui.entity.EntityValue
-                ExecutionContext ec = context.ec
+
+                const centsText = (amount) => toDecimal(amount).multiply(100).setScale(0, 'DOWN').toString()
 
                 // Handy output checking lines, paste below to line up output
                 // 0        10        20        30        40        50        60        70        80
                 // 123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+
 
-                String accountNumber =  bankAccount.accountNumber
-                if (accountNumber.length() > 13) accountNumber = accountNumber.substring(accountNumber.length() - 13, accountNumber.length())
+                let accountNumber = bankAccount.accountNumber
+                if (accountNumber.length > 13) accountNumber = accountNumber.substring(accountNumber.length - 13, accountNumber.length)
                 // Get amount String (12 chars, last 2 are cents)
-                String debitAmountTotalWithCancelsStr = debitAmountTotalWithCancels.movePointRight(2).longValue() as String
+                let debitAmountTotalWithCancelsStr = centsText(debitAmountTotalWithCancels)
 
-                List<StringBuilder> lines = []
+                const lines = []
 
                 // Header
-                StringBuilder fileHeader = new StringBuilder(80)
+                let fileHeader = ''
                 // 01-20: Constant = 'RECONCILIATIONHEADER'
-                fileHeader.append('RECONCILIATIONHEADER')
+                fileHeader += 'RECONCILIATIONHEADER'
                 // 21-24: Bank ID, assigned by bank (4 digits, left 0 pad)
-                fileHeader.append(bankAccount.posPayBankNumber.padLeft(4, '0'))
+                fileHeader += bankAccount.posPayBankNumber.padStart(4, '0')
                 // 25-37: Account Number (13 digits, left 0 padded)
-                fileHeader.append(accountNumber.padLeft(13, '0'))
+                fileHeader += accountNumber.padStart(13, '0')
                 // 38-49: Sum of check amounts (issues and cancels; 12 digits, last 2 are cents, left 0 padded)
-                fileHeader.append(debitAmountTotalWithCancelsStr.padLeft(12, '0'))
+                fileHeader += debitAmountTotalWithCancelsStr.padStart(12, '0')
                 // 50-54: Number of detail records (5 digits, left 0 pad)
-                fileHeader.append((entryCount as String).padLeft(5, '0'))
+                fileHeader += String(entryCount).padStart(5, '0')
                 // 55-80: Filler (26 spaces)
-                fileHeader.append("".padRight(26, ' '))
-
-                lines.add(fileHeader)
+                fileHeader += "".padEnd(26, ' ')
+                lines.push(fileHeader)
 
                 // Account number in detail lines is only 10 chars
-                if (accountNumber.length() > 10) accountNumber = accountNumber.substring(accountNumber.length() - 10, accountNumber.length())
+                if (accountNumber.length > 10) accountNumber = accountNumber.substring(accountNumber.length - 10, accountNumber.length)
 
-                for (Map payment in paymentList) {
+                for (const payment of paymentList) {
                     // Get amount String (10 chars, last 2 are cents)
-                    String amountStr = payment.getBigDecimal("amount").movePointRight(2).longValue() as String
+                    let amountStr = centsText(payment.amount)
 
-                    // NOTE: for Wachovia treat void and cancel as "Void"
-                    boolean isVoid = payment.statusId == 'PmntVoid'
-                    boolean isCancel = payment.statusId == 'PmntCancelled'
+                    // NOTE: for Wachovia void and cancel are both "Void"
+                    let isVoid = payment.statusId === 'PmntVoid'
+                    let isCancel = payment.statusId === 'PmntCancelled'
 
-                    String payeeName = ""
-                    EntityValue otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
+                    let payeeName = ""
+                    let otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
                     if (otherParty) {
                         payeeName = otherParty.firstName ? otherParty.firstName + " " + otherParty.lastName : otherParty.organizationName
-                        if (payeeName.length() > 30) payeeName = payeeName.substring(0, 30)
+                        if (payeeName.length > 30) payeeName = payeeName.substring(0, 30)
                     }
 
                     // Detail Line
-                    StringBuilder detailLine = new StringBuilder(80)
+                    let detailLine = ''
                     // 01-13: Account Number (13 digits, left 0 padded)
-                    detailLine.append(accountNumber.padLeft(13, '0'))
+                    detailLine += accountNumber.padStart(13, '0')
                     // 14-23: Check number (10 digits, left 0 padded)
-                    detailLine.append(payment.paymentRefNum.padLeft(10, '0'))
+                    detailLine += payment.paymentRefNum.padStart(10, '0')
                     // 24-33: Check amount (10 digits, last 2 are cents, left 0 padded); for voids enter all 0s
-                    detailLine.append((isVoid ? '0' : amountStr).padLeft(10, '0'))
+                    detailLine += (isVoid ? '0' : amountStr).padStart(10, '0')
                     // 34-41: Date of issue (yyyyMMdd)
-                    detailLine.append(ec.l10n.format(payment.effectiveDate, 'yyyyMMdd'))
+                    detailLine += ec.l10n.format(payment.effectiveDate, 'yyyyMMdd')
                     // 42-42: Void indicator Blank for issue record, '-' for cancel
-                    detailLine.append((isVoid || isCancel ? 'V' : ' '))
+                    detailLine += (isVoid || isCancel ? 'V' : ' ')
                     // 43-72: Additional data; Payee information (30 chars; pad right with spaces)
-                    detailLine.append(payeeName.padRight(30, ' '))
+                    detailLine += payeeName.padEnd(30, ' ')
                     // 55-80: Filler (8 spaces)
-                    detailLine.append("".padRight(8, ' '))
-
-                    lines.add(detailLine)
+                    detailLine += "".padEnd(8, ' ')
+                    lines.push(detailLine)
                 }
 
                 // NOTE: No Trailer for Wachovia AR file
 
                 // combine the lines
-                StringBuilder ftSb = new StringBuilder(81 * lines.size())
-                for (StringBuilder line in lines) {
-                    if (line.length() != 80) ec.message.addError(ec.resource.expand('Generated line does not have exactly 80 chars: ${line}',''))
-                    ftSb.append(line).append('\n')
+                let ftText = ''
+                for (const line of lines) {
+                    if (line.length !== 80) ec.message.addError(`Generated line does not have exactly 80 chars: ${line}`)
+                    ftText += line + '\n'
                 }
                 // get the String value
-                fileText = ftSb.toString()
+                fileText = ftText
             ]]></script>
         </actions>
     </service>
     <service verb="generate" noun="PmftWellsFargoArp">
         <implements service="mantle.account.PositivePayServices.generate#PositivePayInterface"/>
         <actions>
-            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length() > 5">
+            <if condition="!bankAccount.posPayBankNumber || bankAccount.posPayBankNumber.length > 5">
                 <return error="true" message="Pos. Pay Bank Number must be set and 5 digits or less (for bank account [${bankAccount.paymentMethodId}])"/></if>
 
             <script><![CDATA[
-                import org.moqui.context.ExecutionContext
-                import org.moqui.entity.EntityValue
-                ExecutionContext ec = context.ec
+
+                const centsText = (amount) => toDecimal(amount).multiply(100).setScale(0, 'DOWN').toString()
 
                 // Handy output checking lines, paste below to line up output
                 // 0        10        20        30        40        50        60        70        80
                 // 123456789+123456789+123456789+123456789+123456789+123456789+123456789+123456789+
 
-                String accountNumber =  bankAccount.accountNumber
-                if (accountNumber.length() > 15) accountNumber = accountNumber.substring(accountNumber.length() - 15, accountNumber.length())
+                let accountNumber = bankAccount.accountNumber
+                if (accountNumber.length > 15) accountNumber = accountNumber.substring(accountNumber.length - 15, accountNumber.length)
 
-                List<StringBuilder> lines = []
+                const lines = []
 
                 // Header
-                StringBuilder fileHeader = new StringBuilder(80)
+                let fileHeader = ''
                 // 01-03: Constant = '*03'
-                fileHeader.append('*03')
+                fileHeader += '*03'
                 // 04-08: Bank ID, assigned by bank (5 digits, left 0 pad)
-                fileHeader.append(bankAccount.posPayBankNumber.padLeft(5, '0'))
+                fileHeader += bankAccount.posPayBankNumber.padStart(5, '0')
                 // 09-23: Account Number (15 digits, left 0 padded)
-                fileHeader.append(accountNumber.padLeft(15, '0'))
+                fileHeader += accountNumber.padStart(15, '0')
                 // 24-24: File status (always 0)
-                fileHeader.append('0')
-
-                lines.add(fileHeader)
+                fileHeader += '0'
+                lines.push(fileHeader)
 
                 // Account number in detail lines is only 10 chars
-                if (accountNumber.length() > 10) accountNumber = accountNumber.substring(accountNumber.length() - 10, accountNumber.length())
+                if (accountNumber.length > 10) accountNumber = accountNumber.substring(accountNumber.length - 10, accountNumber.length)
 
-                for (Map payment in paymentList) {
+                for (const payment of paymentList) {
                     // Get amount String (10 chars, last 2 are cents)
-                    String amountStr = payment.getBigDecimal("amount").movePointRight(2).longValue() as String
+                    let amountStr = centsText(payment.amount)
 
-                    boolean isVoid = payment.statusId == 'PmntVoid'
-                    boolean isCancel = payment.statusId == 'PmntCancelled'
+                    let isVoid = payment.statusId === 'PmntVoid'
+                    let isCancel = payment.statusId === 'PmntCancelled'
 
-                    String payeeName = ""
-                    EntityValue otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
+                    let payeeName = ""
+                    let otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
                     if (otherParty) {
                         payeeName = otherParty.firstName ? otherParty.firstName + " " + otherParty.lastName : otherParty.organizationName
-                        if (payeeName.length() > 40) payeeName = payeeName.substring(0, 40)
+                        if (payeeName.length > 40) payeeName = payeeName.substring(0, 40)
                     }
 
                     // Detail Line
-                    StringBuilder detailLine = new StringBuilder(80)
+                    let detailLine = ''
                     // 01-10: Check number (10 digits, left 0 padded)
-                    detailLine.append(payment.paymentRefNum.padLeft(10, '0'))
+                    detailLine += payment.paymentRefNum.padStart(10, '0')
                     // 11-16: Date of issue (MMddyy)
-                    detailLine.append(ec.l10n.format(payment.effectiveDate, 'MMddyy'))
-                    // 17-26: Account number (same as header, but 10 digits)
-                    detailLine.append(accountNumber.padLeft(10, '0'))
+                    detailLine += ec.l10n.format(payment.effectiveDate, 'MMddyy')
+                    // 17-26: Account number (matches the header, but 10 digits)
+                    detailLine += accountNumber.padStart(10, '0')
                     /* 27-29: Transaction code:
                         Supported:
                         320 check register
@@ -662,43 +640,41 @@ along with this software (see the LICENSE.md file). If not, see
                         630 Release Stop Payment (Cancellation)
                         640 Stop Payment Renewal Cancellation
                      */
-                    detailLine.append(isVoid ? '430' : (isCancel ? '370' : '320'))
+                    detailLine += isVoid ? '430' : (isCancel ? '370' : '320')
                     // 30-39: Check amount (10 numbers, last 2 are cents, left 0 padded); for voids enter all 0s
-                    detailLine.append((isVoid ? '0' : amountStr).padLeft(10, '0'))
+                    detailLine += (isVoid ? '0' : amountStr).padStart(10, '0')
                     // 40-79: Additional data; Payee information (40 chars; pad right with spaces)
-                    detailLine.append(payeeName.padRight(40, ' '))
-
-                    lines.add(detailLine)
+                    detailLine += payeeName.padEnd(40, ' ')
+                    lines.push(detailLine)
                 }
 
                 // Get amount String (10 chars, last 2 are cents)
-                String debitAmountTotalWithCancelsStr = debitAmountTotalWithCancels.movePointRight(2).longValue() as String
+                let debitAmountTotalWithCancelsStr = centsText(debitAmountTotalWithCancels)
 
                 // Trailer
-                StringBuilder fileTrailer = new StringBuilder(80)
+                let fileTrailer = ''
                 // 01-01: Trailer Constant = '&'
-                fileTrailer.append('&')
+                fileTrailer += '&'
                 // 02-15: Spaces (15)
-                fileTrailer.append(' '.padRight(15, ' '))
+                fileTrailer += ' '.padEnd(15, ' ')
                 // 16-20: Number of detail records (5 digits, left 0 pad)
-                fileTrailer.append((entryCount as String).padLeft(5, '0'))
+                fileTrailer += String(entryCount).padStart(5, '0')
                 // 21-23: Blanks (3)
-                fileTrailer.append(' '.padRight(3, ' '))
+                fileTrailer += ' '.padEnd(3, ' ')
                 // 24-33: Sum of check amounts (issues and cancels; 10 numbers, last 2 are cents, left 0 padded)
-                fileTrailer.append(debitAmountTotalWithCancelsStr.padLeft(10, '0'))
+                fileTrailer += debitAmountTotalWithCancelsStr.padStart(10, '0')
                 // 34-80: Blanks (47)
-                fileTrailer.append(" ".padRight(47, ' '))
-
-                lines.add(fileTrailer)
+                fileTrailer += " ".padEnd(47, ' ')
+                lines.push(fileTrailer)
 
                 // combine the lines
-                StringBuilder ftSb = new StringBuilder(81 * lines.size())
-                for (StringBuilder line in lines) {
+                let ftText = ''
+                for (const line of lines) {
                     // NOTE: lines don't have to be exactly 80 chars in this case
-                    ftSb.append(line).append('\n')
+                    ftText += line + '\n'
                 }
                 // get the String value
-                fileText = ftSb.toString()
+                fileText = ftText
             ]]></script>
         </actions>
     </service>
@@ -706,35 +682,41 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="generate" noun="PmftZionsBankCsv">
         <implements service="mantle.account.PositivePayServices.generate#PositivePayInterface"/>
         <actions><script><![CDATA[
-            import org.apache.commons.csv.CSVPrinter
-            import org.apache.commons.csv.CSVFormat
-            import org.apache.commons.csv.CSVRecord
+            // CSV in the Commons CSV DEFAULT format: comma separated, CRLF record separator, a field quoted when it has a
+            // comma, quote or line break, starts with a character at or below '#', ends with a space or less, or is an empty first field
+            const csvField = (value, first) => {
+                const text = value == null ? '' : String(value)
+                let quote = false
+                if (text.length === 0) quote = first
+                else if (/[,"\r\n]/.test(text) || text.charCodeAt(0) <= 35 || text.charCodeAt(text.length - 1) <= 32) quote = true
+                return quote ? '"' + text.replace(/"/g, '""') + '"' : text
+            }
+            const csvRecord = (values) => values.map((value, index) => csvField(value, index === 0)).join(',') + '\r\n'
 
-            StringBuilder outSb = new StringBuilder()
-            CSVPrinter printer = CSVFormat.DEFAULT.withHeader("Check Number", "Amount", "Date", "Payee", "Account", "Void").print(outSb)
+            let outText = csvRecord(["Check Number", "Amount", "Date", "Payee", "Account", "Void"])
 
-            String accountNumber =  bankAccount.accountNumber
+            const accountNumber = bankAccount.accountNumber
 
-            for (Map payment in paymentList) {
+            for (const payment of paymentList) {
                 // Get amount String (10 chars, last 2 are cents)
-                String amountStr = ec.l10n.format(payment.amount, '0.00')
-                String dateStr = ec.l10n.format(payment.effectiveDate, 'MM/dd/yyyy')
+                const amountStr = ec.l10n.format(payment.amount, '0.00')
+                const dateStr = ec.l10n.format(payment.effectiveDate, 'MM/dd/yyyy')
 
-                boolean isVoid = payment.statusId == 'PmntVoid'
-                boolean isCancel = payment.statusId == 'PmntCancelled'
-                String voidStr = isVoid || isCancel ? 'V' : 'N'
+                const isVoid = payment.statusId === 'PmntVoid'
+                const isCancel = payment.statusId === 'PmntCancelled'
+                const voidStr = isVoid || isCancel ? 'V' : 'N'
 
-                String payeeName = ""
-                Map otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
+                let payeeName = ""
+                const otherParty = payment.toPartyId ? ec.entity.find("mantle.party.PartyDetail").condition("partyId", payment.toPartyId).one() : null
                 if (otherParty) {
                     payeeName = otherParty.firstName ? otherParty.firstName + " " + otherParty.lastName : otherParty.organizationName
-                    if (payeeName.length() > 40) payeeName = payeeName.substring(0, 40)
+                    if (payeeName.length > 40) payeeName = payeeName.substring(0, 40)
                 }
 
-                printer.printRecord(payment.paymentRefNum, amountStr, dateStr, payeeName, accountNumber, voidStr)
+                outText += csvRecord([payment.paymentRefNum, amountStr, dateStr, payeeName, accountNumber, voidStr])
             }
 
-            fileText = outSb.toString()
+            fileText = outText
         ]]></script></actions>
     </service>
 </services>

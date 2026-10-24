@@ -1,0 +1,385 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+    <!-- The CalDAV adapter of the framework's DAV server (mr-moqui docs/Sync.md; the conf's dav-server calendar-services,
+        set in this component's MoquiConf.xml): the calendars the user may view (mantle.work.CalendarServices.get#UserCalendars)
+        as VEVENT collections, each event series one object with its changed instances, and the user's tasks as a Tasks
+        collection of VTODOs. Called as the user who logged in with an app password; every service checks the calendar's
+        access as the screens do (check#CalendarAccess). An event a phone writes goes through store#CalendarFeedEvents, so it
+        is matched by its UID; an event a phone deletes is cancelled, or only taken out of this calendar when it is in
+        another too. Not carried over CalDAV: attendees and organizer written by a client (the app's own are served), and
+        the instances a client removes from a series. -->
+
+    <service verb="get" noun="CalendarObjectTags">
+        <description>The objects of a calendar for CalDAV: each event series (not cancelled) by its name (the davName a
+            client stored it under, else workEffortId.ics) with an entity tag over the rows that make its iCalendar text (the
+            event, its recurrence, parties, the user's reminders and its changed instances), its time span for a time-range
+            query, and the calendar's ctag over them all. No access check: the callers check the calendar.</description>
+        <in-parameters><parameter name="calendarId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="objectList" type="List"/>
+            <parameter name="ctag"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const hash = (text) => {
+                let a = 0x811c9dc5, b = 0x9747b28c
+                for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); a = Math.imul(a ^ c, 16777619); b = Math.imul(b ^ c, 2246822519) }
+                return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0')
+            }
+            const millis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const text = String(value)
+                return /^-?\d+$/.test(text) ? Number(text) : Date.parse(text)
+            }
+            const rows = Array.from(ec.entity.find('mantle.work.calendar.CalendarWorkEffortDetail').condition('calendarId', calendarId)
+                    .condition(cf.makeCondition('statusId', 'not-equals', 'WeCancelled', true)).list())
+            objectList = []
+            if (!rows.length) { ctag = hash(`${calendarId}|empty`); return }
+            const ids = rows.map((row) => row.workEffortId)
+            const instanceIds = new Set(Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortAssocTypeEnumId', 'WeatRecurrenceInstance')
+                    .condition(cf.makeCondition('toWorkEffortId', 'in', ids)).selectField('toWorkEffortId').list()).map((link) => link.toWorkEffortId))
+            const series = rows.filter((row) => !instanceIds.has(row.workEffortId))
+            const seriesIds = series.map((row) => row.workEffortId)
+            const overridesOf = new Map()
+            const overrideIds = []
+            if (seriesIds.length) for (const link of Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortAssocTypeEnumId', 'WeatRecurrenceInstance')
+                    .condition(cf.makeCondition('workEffortId', 'in', seriesIds)).list())) {
+                if (!overridesOf.has(link.workEffortId)) overridesOf.set(link.workEffortId, [])
+                overridesOf.get(link.workEffortId).push(link.toWorkEffortId)
+                overrideIds.push(link.toWorkEffortId)
+            }
+            const allIds = Array.from(new Set(seriesIds.concat(overrideIds)))
+            const stamps = new Map()
+            const add = (id, value) => { if (!stamps.has(id)) stamps.set(id, []); stamps.get(id).push(value instanceof Date ? String(value.getTime()) : String(value ?? '')) }
+            // the fields the event's text is made of, so two changes in one millisecond still change the tag
+            const eventFields = ['workEffortName', 'description', 'location', 'infoUrl', 'statusId', 'estimatedStartDate', 'estimatedCompletionDate',
+                'allDayStart', 'allDayEnd', 'revisionNumber', 'ownerPartyId', 'universalId', 'lastUpdatedStamp']
+            for (const row of Array.from(ec.entity.find('mantle.work.effort.WorkEffort').condition(cf.makeCondition('workEffortId', 'in', allIds)).list()))
+                add(row.workEffortId, eventFields.map((field) => row[field] == null ? '' : String(row[field] instanceof Date ? row[field].getTime() : row[field])).join('~'))
+            for (const row of Array.from(ec.entity.find('mantle.work.effort.WorkEffortParty').condition(cf.makeCondition('workEffortId', 'in', allIds)).list()))
+                add(row.workEffortId, `p${row.partyId}~${row.statusId}~${millis(row.thruDate) ?? ''}~${millis(row.lastUpdatedStamp)}`)
+            for (const row of Array.from(ec.entity.find('mantle.work.effort.WorkEffortRecurrence').condition(cf.makeCondition('workEffortId', 'in', allIds)).list()))
+                add(row.workEffortId, `${row.rrule}~${row.exdates}~${row.rdates}~${row.timeZone}~${millis(row.lastUpdatedStamp)}`)
+            const userPartyId = ec.user.userAccount?.partyId
+            if (userPartyId) for (const row of Array.from(ec.entity.find('mantle.work.effort.WorkEffortReminder').condition(cf.makeCondition('workEffortId', 'in', allIds))
+                    .condition('partyId', userPartyId).list())) add(row.workEffortId, `r${row.offsetMinutes}~${row.methodEnumId}~${millis(row.lastUpdatedStamp)}`)
+            const recurring = new Set(Array.from(ec.entity.find('mantle.work.effort.WorkEffortRecurrence').condition(cf.makeCondition('workEffortId', 'in', seriesIds))
+                    .selectField('workEffortId').list()).map((row) => row.workEffortId))
+            for (const row of series) {
+                const id = row.workEffortId
+                const parts = [id].concat((stamps.get(id) || []).sort())
+                for (const override of overridesOf.get(id) || []) parts.push(override, ...(stamps.get(override) || []).sort())
+                const allDay = row.estimatedStartDate == null && row.allDayStart != null
+                const start = allDay ? Date.parse(String(row.allDayStart).substring(0, 10)) : millis(row.estimatedStartDate)
+                const end = allDay ? Date.parse(String(row.allDayEnd || row.allDayStart).substring(0, 10)) + 86400000 : millis(row.estimatedCompletionDate)
+                objectList.push({workEffortId: id, name: row.davName || `${id}.ics`, etag: hash(parts.join('|')), uid: row.universalId || `mantle-${id}`,
+                    start: start, end: end ?? start, recurring: recurring.has(id)})
+            }
+            ctag = hash(objectList.map((object) => `${object.name}:${object.etag}`).sort().join('|'))
+        ]]></script></actions>
+    </service>
+    <service verb="get" noun="TaskObjectTags">
+        <description>The user's tasks for CalDAV's Tasks collection: the WetTask work efforts the user's party is assigned to
+            now, not cancelled, and completed or closed ones only for 30 days after they were completed, each named by its
+            UID (universalId, else workEffortId) with .ics, an entity tag over the task and the user's assignment, and the
+            collection's ctag.</description>
+        <out-parameters>
+            <parameter name="objectList" type="List"/>
+            <parameter name="ctag"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const hash = (text) => {
+                let a = 0x811c9dc5, b = 0x9747b28c
+                for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); a = Math.imul(a ^ c, 16777619); b = Math.imul(b ^ c, 2246822519) }
+                return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0')
+            }
+            const millis = (value) => value == null || value === '' ? null : (value instanceof Date ? value.getTime() : (/^-?\d+$/.test(String(value)) ? Number(String(value)) : Date.parse(String(value))))
+            objectList = []
+            const partyId = ec.user.userAccount?.partyId
+            if (!partyId) { ctag = hash('none'); return }
+            const assigned = new Map(Array.from(ec.entity.find('mantle.work.effort.WorkEffortParty').condition('partyId', partyId)
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list()).map((row) => [row.workEffortId, row]))
+            const ids = Array.from(assigned.keys())
+            const since = Date.now() - 30 * 86400000
+            const tasks = ids.length ? Array.from(ec.entity.find('mantle.work.effort.WorkEffort').condition(cf.makeCondition('workEffortId', 'in', ids))
+                    .condition('workEffortTypeEnumId', 'WetTask').condition(cf.makeCondition('statusId', 'not-equals', 'WeCancelled', true)).list()) : []
+            for (const task of tasks) {
+                const done = ['WeComplete', 'WeClosed'].includes(task.statusId)
+                if (done && (millis(task.actualCompletionDate) ?? millis(task.lastUpdatedStamp) ?? 0) < since) continue
+                const uid = task.universalId || null
+                const name = uid && /^[A-Za-z0-9@._:+-]+$/.test(uid) ? `${uid}.ics` : `${task.workEffortId}.ics`
+                objectList.push({workEffortId: task.workEffortId, name: name, uid: uid || `mantle-task-${task.workEffortId}`,
+                    etag: hash([task.workEffortId, task.workEffortName, task.description, task.statusId, task.priority, task.percentComplete,
+                        millis(task.estimatedStartDate), millis(task.estimatedCompletionDate), millis(task.actualCompletionDate),
+                        millis(task.lastUpdatedStamp), millis(assigned.get(task.workEffortId).lastUpdatedStamp)].map((part) => String(part ?? '')).join('|'))})
+            }
+            ctag = hash(objectList.map((object) => `${object.name}:${object.etag}`).sort().join('|'))
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="DavCollections">
+        <description>The CalDAV collections of the user: each calendar the user may view (not free/busy only), read only
+            below edit permission and for a subscription, named with its owner when shared; and Tasks (collectionId tasks,
+            VTODO). With collectionId only that one.</description>
+        <in-parameters><parameter name="collectionId"/></in-parameters>
+        <out-parameters><parameter name="collectionList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            collectionList = []
+            const out = ec.service.sync().name('mantle.work.CalendarServices.get#UserCalendars').parameters({ensureDefault: true}).call()
+            if (ec.message.hasError()) return
+            let order = 0
+            for (const calendar of Array.from(out.calendarList || [])) {
+                order++
+                if (!['CalpView', 'CalpEdit', 'CalpManage'].includes(calendar.permissionEnumId)) continue
+                if (collectionId && calendar.calendarId !== collectionId) continue
+                const tags = ec.service.sync().name('mantle.work.CalendarDavServices.get#CalendarObjectTags').parameters({calendarId: calendar.calendarId}).call()
+                collectionList.push({collectionId: calendar.calendarId,
+                    name: calendar.group === 'shared' && calendar.ownerName ? `${calendar.calendarName} (${calendar.ownerName})` : calendar.calendarName,
+                    description: calendar.description ?? null, color: calendar.color ?? null, order: order, components: 'VEVENT', ctag: tags.ctag,
+                    readOnly: !['CalpEdit', 'CalpManage'].includes(calendar.permissionEnumId) || calendar.calendarKindEnumId === 'CalkSubscription'})
+            }
+            if (!collectionId || collectionId === 'tasks') {
+                const tags = ec.service.sync().name('mantle.work.CalendarDavServices.get#TaskObjectTags').call()
+                collectionList.push({collectionId: 'tasks', name: ec.l10n.localize('Tasks'), description: ec.l10n.localize('The tasks assigned to you'),
+                    order: order + 1, components: 'VTODO', ctag: tags.ctag, readOnly: false})
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="DavObjects">
+        <description>The objects of a collection, by name (objectNameList) or all, with their iCalendar text (withData,
+            written as CalDAV calendar objects: no METHOD, the user's reminders as alarms); a calendar query's component
+            (componentType) and time range (start, end in epoch millis; a recurring series is always in range).</description>
+        <in-parameters>
+            <parameter name="collectionId" required="true"/>
+            <parameter name="objectNameList" type="List"/>
+            <parameter name="withData" type="Boolean" default="false"/>
+            <parameter name="componentType"/>
+            <parameter name="start" type="Long"/>
+            <parameter name="end" type="Long"/>
+        </in-parameters>
+        <out-parameters><parameter name="objectList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            objectList = []
+            const names = objectNameList ? new Set(Array.from(objectNameList).map(String)) : null
+            const tool = withData ? ec.factory.getTool('ICalendar') : null
+            if (withData && tool == null) { ec.message.addError('The ICalendar tool is not available'); return }
+            const millis = (value) => value == null || value === '' ? null : (value instanceof Date ? value.getTime() : (/^-?\d+$/.test(String(value)) ? Number(String(value)) : Date.parse(String(value))))
+            if (collectionId === 'tasks') {
+                if (componentType && componentType !== 'VTODO') return
+                const tags = ec.service.sync().name('mantle.work.CalendarDavServices.get#TaskObjectTags').call()
+                const wanted = Array.from(tags.objectList || []).filter((object) => !names || names.has(object.name))
+                const status = {WeInProgress: 'IN-PROCESS', WeComplete: 'COMPLETED', WeClosed: 'COMPLETED', WeCancelled: 'CANCELLED'}
+                const rows = wanted.length && withData ? new Map(Array.from(ec.entity.find('mantle.work.effort.WorkEffort')
+                        .condition(ec.entity.conditionFactory.makeCondition('workEffortId', 'in', wanted.map((object) => object.workEffortId))).list())
+                        .map((row) => [row.workEffortId, row])) : new Map()
+                for (const object of wanted) {
+                    const entry = {name: object.name, etag: object.etag, componentType: 'VTODO'}
+                    const row = rows.get(object.workEffortId)
+                    if (row != null) {
+                        const due = millis(row.estimatedCompletionDate)
+                        // a due time of midnight is a due day
+                        const dueDay = due != null && ec.l10n.format(String(due), 'HH:mm:ss') === '00:00:00' ? ec.l10n.format(String(due), 'yyyy-MM-dd') : null
+                        entry.data = tool.write({calendarObject: true, timeZone: ec.user.timeZone, todos: [{uid: object.uid,
+                            sequence: row.revisionNumber == null ? 0 : Number(String(row.revisionNumber)), summary: row.workEffortName ?? null,
+                            description: row.description ?? null, status: status[row.statusId] || 'NEEDS-ACTION',
+                            priority: row.priority == null ? null : Number(String(row.priority)), percentComplete: row.percentComplete == null ? null : Number(String(row.percentComplete)),
+                            start: millis(row.estimatedStartDate), due: dueDay ? null : due, dueDate: dueDay, completed: millis(row.actualCompletionDate),
+                            timeZone: ec.user.timeZone || null, lastModified: millis(row.lastUpdatedStamp)}]})
+                    }
+                    objectList.push(entry)
+                }
+                return
+            }
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: collectionId, permissionEnumId: 'CalpView'}).call()
+            if (ec.message.hasError()) return
+            if (access.userPermissionEnumId === 'CalpFreeBusy') { ec.message.addError(`Calendar ${collectionId} not found`); return }
+            if (componentType && componentType !== 'VEVENT') return
+            const tags = ec.service.sync().name('mantle.work.CalendarDavServices.get#CalendarObjectTags').parameters({calendarId: collectionId}).call()
+            const wanted = Array.from(tags.objectList || []).filter((object) => (!names || names.has(object.name))
+                    && (object.recurring || start == null || object.end == null || object.end >= start) && (object.recurring || end == null || object.start == null || object.start < end))
+            const groups = new Map()
+            if (withData && wanted.length) {
+                const maps = ec.service.sync().name('mantle.work.EventServices.get#EventIcsMaps')
+                        .parameters({workEffortIdList: wanted.map((object) => object.workEffortId)}).call()?.eventMapList || []
+                if (ec.message.hasError()) return
+                for (const map of Array.from(maps)) {
+                    if (!groups.has(map.uid)) groups.set(map.uid, [])
+                    groups.get(map.uid).push(map)
+                }
+            }
+            for (const object of wanted) {
+                const entry = {name: object.name, etag: object.etag, componentType: 'VEVENT'}
+                if (withData) {
+                    // the series first, then its changed instances
+                    const events = (groups.get(object.uid) || []).slice().sort((a, b) => (a.recurrenceId == null ? 0 : 1) - (b.recurrenceId == null ? 0 : 1))
+                    entry.data = tool.write({calendarObject: true, timeZone: access.calendar.timeZone || ec.user.timeZone, events: events})
+                }
+                objectList.push(entry)
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="put" noun="DavObject">
+        <description>Store an object a CalDAV client wrote: a calendar's event series (edit permission, not a subscription
+            calendar) through store#CalendarFeedEvents by its UID, the name kept as davName; or a task in Tasks (a new one
+            made with create#SimpleTask assigned to the user, one the user is assigned to updated: name, description,
+            status, priority, percent complete, start, due and completion). ifMatch and ifNoneMatch are the client's
+            preconditions; status is 412 when one fails, 403 for a calendar the user may not change, 400 for text that holds
+            no event or to-do (or several UIDs).</description>
+        <in-parameters>
+            <parameter name="collectionId" required="true"/>
+            <parameter name="objectName" required="true"/>
+            <parameter name="data" required="true" allow-html="any"/>
+            <parameter name="ifMatch"/>
+            <parameter name="ifNoneMatch"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="etag"/>
+            <parameter name="created" type="Boolean"/>
+            <parameter name="status" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            created = false; etag = null; status = null
+            const tool = ec.factory.getTool('ICalendar')
+            if (tool == null) { ec.message.addError('The ICalendar tool is not available'); return }
+            const bare = (tag) => String(tag || '').trim().replace(/^W\//, '').replace(/"/g, '')
+            const failsPreconditions = (existing) => {
+                if (ifNoneMatch && bare(ifNoneMatch) === '*' && existing) return true
+                if (ifMatch && (!existing || (bare(ifMatch) !== '*' && bare(ifMatch) !== existing.etag))) return true
+                return false
+            }
+            const parsed = tool.parse(String(data))
+            const toDate = (value) => value == null ? null : new Date(Number(value))
+            if (collectionId === 'tasks') {
+                const todos = Array.from(parsed?.todos || [])
+                if (todos.length !== 1) { status = 400; return }
+                const todo = todos[0]
+                const tags = ec.service.sync().name('mantle.work.CalendarDavServices.get#TaskObjectTags').call()
+                const existing = Array.from(tags.objectList || []).find((object) => object.name === objectName)
+                if (failsPreconditions(existing)) { status = 412; return }
+                const statusOf = {'NEEDS-ACTION': null, 'IN-PROCESS': 'WeInProgress', COMPLETED: 'WeComplete', CANCELLED: 'WeCancelled'}
+                const due = todo.dueDate ? ec.l10n.parseTimestamp(`${todo.dueDate} 00:00:00.000`, 'yyyy-MM-dd HH:mm:ss.SSS') : toDate(todo.due)
+                const fields = {workEffortName: todo.summary || ec.l10n.localize('(no title)'), description: todo.description ?? null,
+                    priority: todo.priority ? Number(todo.priority) : null, percentComplete: todo.percentComplete ?? null,
+                    estimatedStartDate: toDate(todo.start), estimatedCompletionDate: due,
+                    actualCompletionDate: todo.status === 'COMPLETED' ? (toDate(todo.completed) || ec.user.nowTimestamp) : null}
+                if (!existing) {
+                    const partyId = ec.user.userAccount?.partyId
+                    if (!partyId) { status = 403; return }
+                    const made = ec.service.sync().name('mantle.work.TaskServices.create#SimpleTask').parameters(Object.assign({}, fields,
+                        {statusId: statusOf[todo.status] || 'WeInPlanning', universalId: todo.uid || objectName.replace(/\.ics$/, ''), assignToPartyId: partyId,
+                            priority: fields.priority || 5})).call()
+                    if (ec.message.hasError()) return
+                    created = true
+                } else {
+                    const row = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', existing.workEffortId).one()
+                    for (const [field, value] of Object.entries(fields)) if (field !== 'priority' || value != null) row.set(field, value)
+                    const next = statusOf[todo.status]
+                    if (next) row.set('statusId', next)
+                    else if (['WeComplete', 'WeClosed', 'WeCancelled'].includes(row.statusId)) row.set('statusId', 'WeApproved')
+                    row.update()
+                }
+                const after = ec.service.sync().name('mantle.work.CalendarDavServices.get#TaskObjectTags').call()
+                etag = Array.from(after.objectList || []).find((object) => object.name === objectName || (object.uid && object.uid === todo.uid))?.etag ?? null
+                return
+            }
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess').parameters({calendarId: collectionId}).call()
+            if (ec.message.hasError()) return
+            if (!['CalpEdit', 'CalpManage'].includes(access.userPermissionEnumId) || access.calendar?.calendarKindEnumId === 'CalkSubscription') { status = 403; return }
+            const events = Array.from(parsed?.events || [])
+            const uids = new Set(events.map((event) => event.uid).filter((uid) => uid))
+            if (!events.length || uids.size !== 1) { status = 400; return }
+            const tags = ec.service.sync().name('mantle.work.CalendarDavServices.get#CalendarObjectTags').parameters({calendarId: collectionId}).call()
+            const objects = Array.from(tags.objectList || [])
+            const existing = objects.find((object) => object.name === objectName)
+            if (failsPreconditions(existing)) { status = 412; return }
+            // the name keeps its event: a client that changed the UID at the same name writes over it
+            let uid = Array.from(uids)[0]
+            if (existing && existing.uid !== uid) { uid = existing.uid; for (const event of events) event.uid = uid }
+            const stored = ec.service.sync().name('mantle.work.CalendarServices.store#CalendarFeedEvents')
+                    .parameters({calendarId: collectionId, eventList: events}).call()
+            if (ec.message.hasError()) return
+            if (stored.failedCount) { status = 400; ec.logger.warn(`CalDAV ${collectionId}/${objectName}: ${stored.failedCount} events not stored`); return }
+            const after = Array.from(ec.service.sync().name('mantle.work.CalendarDavServices.get#CalendarObjectTags').parameters({calendarId: collectionId}).call().objectList || [])
+            const object = after.find((candidate) => candidate.uid === uid)
+            if (object == null) { status = 409; return }
+            created = !existing
+            const link = ec.entity.find('mantle.work.calendar.CalendarWorkEffort').condition('calendarId', collectionId).condition('workEffortId', object.workEffortId).one()
+            const wantName = objectName === `${object.workEffortId}.ics` ? null : objectName
+            if (link != null && (link.davName ?? null) !== wantName) { link.set('davName', wantName); link.update() }
+            if (created) {
+                const partyId = ec.user.userAccount?.partyId
+                const row = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', object.workEffortId).one()
+                if (row != null && partyId && !row.ownerPartyId) { row.set('ownerPartyId', partyId); row.update() }
+            }
+            etag = Array.from(ec.service.sync().name('mantle.work.CalendarDavServices.get#CalendarObjectTags').parameters({calendarId: collectionId}).call().objectList || [])
+                    .find((candidate) => candidate.uid === uid)?.etag ?? null
+        ]]></script></actions>
+    </service>
+
+    <service verb="delete" noun="DavObject">
+        <description>A CalDAV client's delete: an event series of a calendar (edit permission) is cancelled with its changed
+            instances, or only taken out of this calendar when it is in another; a task leaves the Tasks collection by the
+            end of the user's assignment (the task stays for the others on it). status 412 when ifMatch fails, 404 when the
+            name is not there, 403 when the calendar may not be changed.</description>
+        <in-parameters>
+            <parameter name="collectionId" required="true"/>
+            <parameter name="objectName" required="true"/>
+            <parameter name="ifMatch"/>
+        </in-parameters>
+        <out-parameters><parameter name="status" type="Integer"/></out-parameters>
+        <actions><script><![CDATA[
+            status = null
+            const cf = ec.entity.conditionFactory
+            const bare = (tag) => String(tag || '').trim().replace(/^W\//, '').replace(/"/g, '')
+            if (collectionId === 'tasks') {
+                const object = Array.from(ec.service.sync().name('mantle.work.CalendarDavServices.get#TaskObjectTags').call().objectList || [])
+                        .find((candidate) => candidate.name === objectName)
+                if (object == null) { status = 404; return }
+                if (ifMatch && bare(ifMatch) !== '*' && bare(ifMatch) !== object.etag) { status = 412; return }
+                const partyId = ec.user.userAccount?.partyId
+                for (const row of Array.from(ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', object.workEffortId)
+                        .condition('partyId', partyId).condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list())) {
+                    row.set('thruDate', ec.user.nowTimestamp); row.update()
+                }
+                return
+            }
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess').parameters({calendarId: collectionId}).call()
+            if (ec.message.hasError()) return
+            if (!['CalpEdit', 'CalpManage'].includes(access.userPermissionEnumId) || access.calendar?.calendarKindEnumId === 'CalkSubscription') { status = 403; return }
+            const object = Array.from(ec.service.sync().name('mantle.work.CalendarDavServices.get#CalendarObjectTags').parameters({calendarId: collectionId}).call().objectList || [])
+                    .find((candidate) => candidate.name === objectName)
+            if (object == null) { status = 404; return }
+            if (ifMatch && bare(ifMatch) !== '*' && bare(ifMatch) !== object.etag) { status = 412; return }
+            const elsewhere = ec.entity.find('mantle.work.calendar.CalendarWorkEffort').condition('workEffortId', object.workEffortId)
+                    .condition(cf.makeCondition('calendarId', 'not-equals', collectionId)).count() > 0
+            if (elsewhere) {
+                ec.service.sync().name('mantle.work.CalendarServices.remove#CalendarEvent').parameters({calendarId: collectionId, workEffortId: object.workEffortId}).call()
+                return
+            }
+            const ids = [object.workEffortId].concat(Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', object.workEffortId)
+                    .condition('workEffortAssocTypeEnumId', 'WeatRecurrenceInstance').selectField('toWorkEffortId').list()).map((link) => link.toWorkEffortId))
+            for (const row of Array.from(ec.entity.find('mantle.work.effort.WorkEffort').condition(cf.makeCondition('workEffortId', 'in', ids)).list())) {
+                if (row.statusId !== 'WeCancelled') { row.set('statusId', 'WeCancelled'); row.update() }
+            }
+        ]]></script></actions>
+    </service>
+</services>

@@ -30,16 +30,29 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.facility.Facility" value-field="facility"/>
             <service-call name="mantle.facility.ContactServices.get#FacilityContactInfo" out-map="contactInfo"
-                    in-map="[facilityId:facilityId, postalContactMechPurposeId:'PostalPrimary',
+                    in-map="{facilityId:facilityId, postalContactMechPurposeId:'PostalPrimary',
                         telecomContactMechPurposeId:'PhonePrimary', emailContactMechPurposeId:'EmailPrimary',
-                        otherContactMechPurposeId:'WebUrlPrimary']"/>
+                        otherContactMechPurposeId:'WebUrlPrimary'}"/>
             <service-call name="mantle.facility.ContactServices.get#FacilityContactInfo" out-map="contactFaxOut"
-                    in-map="[facilityId:facilityId, telecomContactMechPurposeId:'PhoneFax']"/>
+                    in-map="{facilityId:facilityId, telecomContactMechPurposeId:'PhoneFax'}"/>
             <script>
-                context.putAll(facility)
-                Map contactInfoMap = flattenNestedMap(contactInfo)
-                contactInfoMap.remove('description')
-                context.putAll(contactInfoMap)
+                ec.context.putAll(Object.assign({}, facility))
+                // flatten the nested contact info maps into one map: a nested value is added only if its name is not already set
+                const flattenNestedMap = (theMap) => {
+                    const flat = {}
+                    const nested = []
+                    for (const [key, value] of Object.entries(theMap ?? {})) {
+                        if (value != null &amp;&amp; typeof value === 'object' &amp;&amp; !Array.isArray(value) &amp;&amp; value.constructor === Object) nested.push(value)
+                        else flat[key] = value
+                    }
+                    for (const child of nested) {
+                        for (const [key, value] of Object.entries(flattenNestedMap(child))) if (!(key in flat)) flat[key] = value
+                    }
+                    return flat
+                }
+                const contactInfoMap = flattenNestedMap(contactInfo)
+                delete contactInfoMap.description
+                ec.context.putAll(contactInfoMap)
             </script>
             <set field="emailAddress" from="contactInfo.emailAddress"/>
         </actions>
@@ -59,13 +72,12 @@ along with this software (see the LICENSE.md file). If not, see
                     <entity-find-one entity-name="mantle.facility.Facility" value-field="fac" cache="true">
                         <field-map field-name="facilityId" from="productStore?.inventoryFacilityId"/></entity-find-one>
                     <if condition="fac != null">
-                        <script>resultList.add([facilityId:fac.facilityId, label:ec.resource.expand('FacilityNameTemplate', '', fac)])</script>
+                        <script>resultList.push({facilityId:fac.facilityId, label:ec.resource.expand('FacilityNameTemplate', '', fac)})</script>
                     </if>
                 </if>
             </if>
             <if condition="ownerPartyId">
-                <set field="ownerPartyIdSet" from="new HashSet()"/>
-                <script>ownerPartyIdSet.add(ownerPartyId)</script>
+                <set field="ownerPartyIdSet" from="[ownerPartyId]"/>
                 <!-- look for parent org(s) if any, include facilities from parent org too -->
                 <entity-find entity-name="mantle.party.PartyRelationship" list="parentRelList" cache="true">
                     <date-filter/>
@@ -73,7 +85,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="fromPartyId" from="ownerPartyId"/>
                     <econdition field-name="toPartyId" operator="is-not-null"/>
                 </entity-find>
-                <script>if (parentRelList) ownerPartyIdSet.addAll(parentRelList*.toPartyId)</script>
+                <script>for (const rel of parentRelList) { if (!ownerPartyIdSet.includes(rel.toPartyId)) ownerPartyIdSet.push(rel.toPartyId) }</script>
 
                 <entity-find entity-name="mantle.facility.Facility" list="facList" cache="true">
                     <econdition field-name="ownerPartyId" operator="in" from="ownerPartyIdSet"/>
@@ -82,7 +94,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </entity-find>
             </if>
             <script>
-                for (def fac in facList) resultList.add([facilityId:fac.facilityId, label:ec.resource.expand('FacilityNameTemplate', '', fac)])
+                if (typeof facList !== 'undefined' &amp;&amp; facList) for (const fac of facList) resultList.push({facilityId:fac.facilityId, label:ec.resource.expand('FacilityNameTemplate', '', fac)})
             </script>
         </actions>
     </service>
@@ -110,13 +122,13 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="address1 || city || postalCode">
                 <service-call name="mantle.party.ContactServices.create#PostalAddress" out-map="paOut"
-                        in-map="context + [contactMechPurposeId:'PostalPrimary']"/></if>
+                        in-map="Object.assign({}, context, {contactMechPurposeId:'PostalPrimary'})"/></if>
             <if condition="contactNumber">
                 <service-call name="mantle.party.ContactServices.create#TelecomNumber" out-map="phoneOut"
-                        in-map="context + [contactMechPurposeId:'PhonePrimary']"/></if>
+                        in-map="Object.assign({}, context, {contactMechPurposeId:'PhonePrimary'})"/></if>
             <if condition="emailAddress">
                 <service-call name="mantle.party.ContactServices.create#EmailAddress" out-map="emOut"
-                        in-map="[facilityId:facilityId, emailAddress:emailAddress, contactMechPurposeId:'EmailPrimary']"/></if>
+                        in-map="{facilityId:facilityId, emailAddress:emailAddress, contactMechPurposeId:'EmailPrimary'}"/></if>
         </actions>
     </service>
     <service verb="update" noun="Facility">
@@ -140,12 +152,12 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.facility.FacilityContactMech" list="phoneFcmList"><date-filter/>
                     <econdition field-name="facilityId"/><econdition field-name="contactMechPurposeId" value="PhonePrimary"/>
                 </entity-find>
-                <if condition="phoneFcmList"><then>
+                <if condition="(phoneFcmList?.length > 0)"><then>
                     <service-call name="mantle.facility.ContactServices.update#FacilityTelecomNumber" out-map="phoneOut"
-                            in-map="context + [contactMechId:phoneFcmList[0].contactMechId, contactMechPurposeId:'PhonePrimary']"/>
+                            in-map="Object.assign({}, context, {contactMechId:phoneFcmList[0].contactMechId, contactMechPurposeId:'PhonePrimary'})"/>
                 </then><else>
                     <service-call name="mantle.party.ContactServices.create#TelecomNumber" out-map="phoneOut"
-                            in-map="context + [contactMechPurposeId:'PhonePrimary']"/>
+                            in-map="Object.assign({}, context, {contactMechPurposeId:'PhonePrimary'})"/>
                 </else></if>
                 <set field="telecomContactMechId" from="phoneOut.contactMechId"/>
             </if>
@@ -153,12 +165,12 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.facility.FacilityContactMech" list="emailFcmList"><date-filter/>
                     <econdition field-name="facilityId"/><econdition field-name="contactMechPurposeId" value="EmailPrimary"/>
                 </entity-find>
-                <if condition="emailFcmList"><then>
+                <if condition="(emailFcmList?.length > 0)"><then>
                     <service-call name="mantle.facility.ContactServices.update#FacilityContactOther" out-map="emOut"
-                            in-map="[facilityId:facilityId, contactMechId:emailFcmList[0].contactMechId, infoString:emailAddress, contactMechPurposeId:'EmailPrimary']"/>
+                            in-map="{facilityId:facilityId, contactMechId:emailFcmList[0].contactMechId, infoString:emailAddress, contactMechPurposeId:'EmailPrimary'}"/>
                 </then><else>
                     <service-call name="mantle.party.ContactServices.create#EmailAddress" out-map="emOut"
-                            in-map="[facilityId:facilityId, emailAddress:emailAddress, contactMechPurposeId:'EmailPrimary']"/>
+                            in-map="{facilityId:facilityId, emailAddress:emailAddress, contactMechPurposeId:'EmailPrimary'}"/>
                 </else></if>
                 <set field="emailContactMechId" from="emOut.contactMechId"/>
             </if>
@@ -168,12 +180,12 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.facility.FacilityContactMech" list="addressFcmList"><date-filter/>
                     <econdition field-name="facilityId"/><econdition field-name="contactMechPurposeId" value="PostalPrimary"/>
                 </entity-find>
-                <if condition="addressFcmList"><then>
+                <if condition="(addressFcmList?.length > 0)"><then>
                     <service-call name="mantle.facility.ContactServices.update#FacilityPostalAddress" out-map="paOut"
-                            in-map="context + [contactMechId:addressFcmList[0].contactMechId, contactMechPurposeId:'PostalPrimary']"/>
+                            in-map="Object.assign({}, context, {contactMechId:addressFcmList[0].contactMechId, contactMechPurposeId:'PostalPrimary'})"/>
                 </then><else>
                     <service-call name="mantle.party.ContactServices.create#PostalAddress" out-map="paOut"
-                            in-map="context + [contactMechPurposeId:'PostalPrimary']"/>
+                            in-map="Object.assign({}, context, {contactMechPurposeId:'PostalPrimary'})"/>
                 </else></if>
             </if>
         </actions>
@@ -191,16 +203,16 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="documentFile != null &amp;&amp; documentFile.size &gt; 0">
                 <if condition="!documentLocation">
                     <set field="filename" from="documentFile.getName()"/>
-                    <if condition="org.moqui.resource.ResourceReference.isTextFilename(filename)"><then>
-                        <set field="contentRoot" from="ec.user.getPreference('mantle.content.root') ?: 'dbresource://mantle/content'"/>
+                    <if condition="ResourceReference.isTextFilename(filename)"><then>
+                        <set field="contentRoot" from="ec.user.getPreference('mantle.content.root') || 'dbresource://mantle/content'"/>
                     </then><else>
-                        <set field="contentRoot" from="ec.user.getPreference('mantle.content.large.root') ?: 'dbresource://mantle/content'"/>
+                        <set field="contentRoot" from="ec.user.getPreference('mantle.content.large.root') || 'dbresource://mantle/content'"/>
                     </else></if>
-                    <set field="documentLocation" value="${contentRoot}/facility/${facilityId?:'_NA_'}/certification/${facilityCertificationId}/${filename}"/>
+                    <set field="documentLocation" value="${contentRoot}/facility/${facilityId||'_NA_'}/certification/${facilityCertificationId}/${filename}"/>
                 </if>
                 <set field="docRr" from="ec.resource.getLocationReference(documentLocation)"/>
                 <script>
-                    fileStream = documentFile.getInputStream()
+                    const fileStream = documentFile.getInputStream()
                     try { docRr.putStream(fileStream) } finally { fileStream.close() }
                 </script>
             </if>
@@ -213,7 +225,7 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <auto-parameters entity-name="mantle.facility.FacilityLocation"/>
             <parameter name="facilityId" required="true"/>
-            <parameter name="locationSeqId" default-value="${areaId?:''}${aisleId?:''}${sectionId?:''}${levelId?:''}${positionId?:''}"/>
+            <parameter name="locationSeqId" default-value="${areaId||''}${aisleId||''}${sectionId||''}${levelId||''}${positionId||''}"/>
         </in-parameters>
         <out-parameters><parameter name="locationSeqId"/></out-parameters>
         <actions>
@@ -248,7 +260,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="productId"/>
         </out-parameters>
         <actions>
-            <set field="facilityId" from="facilityId ?: ec.user.getPreference('FacilityActive') ?: ec.user.getPreference('FacilityGeneralDefault')"/>
+            <set field="facilityId" from="facilityId || ec.user.getPreference('FacilityActive') || ec.user.getPreference('FacilityGeneralDefault')"/>
             <if condition="scanId">
                 <!-- see if scanId is a assetId -->
                 <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
@@ -274,7 +286,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- see if scanId matches Product.pseudoId, ProductIdentification.idValue, or Product.productId -->
                 <!-- TODO: who would the Product.ownerPartyId be for an incoming shipment, Shipment.toPartyId or let user specify somehow? -->
                 <service-call name="mantle.product.ProductServices.find#ProductByIdValue" out-map="productByIdOut"
-                        in-map="[idValue:scanId]"/>
+                        in-map="{idValue:scanId}"/>
                 <set field="productId" from="productByIdOut.productId"/>
             </if>
             <if condition="!assetId &amp;&amp; !containerId &amp;&amp; !locationSeqId &amp;&amp; !productId">

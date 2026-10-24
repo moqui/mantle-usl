@@ -1,0 +1,568 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- Work item import (IronStone Projects WorkItemImport, design-projects.md §5 WorkItemImport and §15 Work item import services;
+        impl-projects.md P4c): a CSV file with Jira, Redmine and GitHub issues presets and a generic match by header words, read
+        into work items of one project. A target field (title, type, status, sprint, ...) takes one column by its name; value maps
+        turn the file's types, statuses and priorities into work item types, statuses and 1 to 9. The original key is kept in
+        sourceReferenceId, so an import again finds the items it made and skips or updates them. Parents (a parent key or id,
+        else the epic) link in a second pass, to items of the file or of the project; milestones, releases, components, sprints
+        and labels are found by name in the project, and made when missing (createMissing). People are matched by user name,
+        email or full name, else left unassigned. Each row is imported in its own transaction: a row that fails is logged and
+        named with its reason, and the others are imported. The file comes as an upload (workItemFile), as text (fileText) or as
+        a resource location (fileLocation), so a large import can run later as a job on a stored file. -->
+
+    <service verb="read" noun="WorkItemRows" type="script"
+            location="component://mantle-usl/service/mantle/work/WorkItemImportServices/readWorkItemRows.js">
+        <description>
+            The file's columns (a repeated name once, with its count and first values), the mapping (target field to column:
+            columnMapping overrides the preset's, an empty column leaves a target out; presetId jira, redmine, github or generic,
+            found from the headers when empty), and each row read into a work item's values (item: sourceKey, sourceId, title,
+            typeValue and purposeEnumId, statusValue and statusId, priorityValue and priority, assignee, reporter, createdDay,
+            startDay, dueDay, resolvedDay, estimate in hours (estimateUnit seconds divides, as Jira's Original Estimate is),
+            points, description, parentKey (else the epic), labels, milestone, release, sprint (the last of a repeated column)
+            and earlierSprints, component) with its problems (no title: the row fails) and warnings (a value not read is left
+            empty). valueMaps ({type, status, priority} of the file's value to a purposeEnumId, statusId or 1 to 9) override
+            the guesses from the words; valueMapsUsed is the map of every value the file has, and distinctValues those values.
+        </description>
+        <in-parameters>
+            <parameter name="workItemFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"/>
+            <parameter name="fileLocation"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="presetId"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="valueMaps" type="Map"/>
+            <parameter name="estimateUnit"><description>hours or seconds; by default seconds for Jira's Original Estimate</description></parameter>
+            <parameter name="maxRows" type="Integer"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="presetId"/>
+            <parameter name="columnList" type="List"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="estimateUnitUsed"/>
+            <parameter name="targetFieldList" type="List"/>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="rowList" type="List"/>
+            <parameter name="distinctValues" type="Map"/>
+            <parameter name="valueMapsUsed" type="Map"/>
+        </out-parameters>
+    </service>
+
+    <service verb="parse" noun="WorkItemFile">
+        <description>The import's first steps: the preset found (or given), the columns with the target each maps to and their
+            first values, the mapping, the first rows, the row count, and the file's types, statuses and priorities with the
+            value each maps to (valueMapsUsed), for the mapping step.</description>
+        <in-parameters>
+            <parameter name="workItemFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"/>
+            <parameter name="fileLocation"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="presetId"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="valueMaps" type="Map"/>
+            <parameter name="sampleSize" type="Integer" default="5"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="presetId"/>
+            <parameter name="columnList" type="List"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="estimateUnit"/>
+            <parameter name="targetFieldList" type="List"/>
+            <parameter name="sampleRowList" type="List"/>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="distinctValues" type="Map"/>
+            <parameter name="valueMapsUsed" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const read = ec.service.sync().name('mantle.work.WorkItemImportServices.read#WorkItemRows').parameters({workItemFile: workItemFile,
+                fileText: fileText, fileLocation: fileLocation, characterSet: characterSet, presetId: presetId, columnMapping: columnMapping,
+                valueMaps: valueMaps, maxRows: sampleSize}).call()
+            if (ec.message.hasError()) return
+            presetId = read.presetId
+            columnList = read.columnList
+            columnMapping = read.columnMapping
+            estimateUnit = read.estimateUnitUsed
+            targetFieldList = read.targetFieldList
+            sampleRowList = Array.from(read.rowList || []).map((row) => row.values)
+            rowCount = read.rowCount
+            distinctValues = read.distinctValues
+            valueMapsUsed = read.valueMapsUsed
+        ]]></script></actions>
+    </service>
+
+    <service verb="plan" noun="WorkItemRows" allow-remote="false">
+        <description>
+            What each row of read#WorkItemRows will do in the project: action create, update or skip (an item of the project
+            with its original key in sourceReferenceId, by existingPolicy update or skip) or fail (its problems); the type and
+            priority; the status fitting the project's flow (In Review and In Testing are In Progress on the Default flow); the
+            assignee and reporter matched by user name, email or full name (one match only; else a warning and unassigned); the
+            parent (a row of the file by its key or id, else an item of the project by its original key or its own key; else a
+            warning and the top level); the labels and the milestone, release, component and sprint by name in the project
+            (missing ones made by the import when createMissing, else a warning and left out). Lookups are cached for the rows.
+        </description>
+        <in-parameters>
+            <parameter name="rowList" type="List" required="true"/>
+            <parameter name="rootWorkEffortId" required="true"/>
+            <parameter name="allSourceKeys" type="List"><description>The keys and ids of every row of the file (a preview plans a few rows)</description></parameter>
+            <parameter name="createMissing" type="Boolean" default="true"/>
+            <parameter name="existingPolicy" default-value="skip"/>
+        </in-parameters>
+        <out-parameters><parameter name="plannedList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            plannedList = []
+            const L = (text, values) => ec.resource.expand(ec.l10n.localize(text), '', values || {})
+            const cf = ec.entity.conditionFactory
+            const project = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', rootWorkEffortId).one()
+            if (project == null || project.workEffortTypeEnumId !== 'WetProject') { ec.message.addError(L('Project ${id} not found', {id: rootWorkEffortId})); return }
+            const devFlow = project.statusFlowId === 'WorkEffortDevelopment'
+            // the project's items by their original keys, and their own ids
+            const existingByKey = new Map()
+            const ownIds = new Set()
+            for (const row of ec.entity.find('mantle.work.effort.WorkEffort').condition('rootWorkEffortId', rootWorkEffortId).condition('workEffortTypeEnumId', 'WetTask')
+                    .selectField('workEffortId,sourceReferenceId').list()) {
+                ownIds.add(row.workEffortId)
+                if (row.sourceReferenceId) existingByKey.set(String(row.sourceReferenceId), row.workEffortId)
+            }
+            const fileKeys = new Set(Array.from(allSourceKeys || []).map(String))
+            for (const row of rowList) { if (row.item?.sourceKey) fileKeys.add(String(row.item.sourceKey)); if (row.item?.sourceId) fileKeys.add(String(row.item.sourceId)) }
+            // the plan items by name, lower case
+            const plans = {WetMilestone: new Map(), WetRelease: new Map(), WetSprint: new Map(), WetComponent: new Map()}
+            for (const row of ec.entity.find('mantle.work.effort.WorkEffort').condition('rootWorkEffortId', rootWorkEffortId)
+                    .condition('workEffortTypeEnumId', 'in', Object.keys(plans)).selectField('workEffortId,workEffortTypeEnumId,workEffortName,statusId').list()) {
+                const name = String(row.workEffortName || row.workEffortId).toLowerCase()
+                if (!plans[row.workEffortTypeEnumId].has(name)) plans[row.workEffortTypeEnumId].set(name, {workEffortId: row.workEffortId, statusId: row.statusId})
+            }
+            const labels = new Map()
+            for (const row of ec.entity.find('mantle.work.effort.WorkEffortCategory').condition('categoryTypeEnumId', 'WcatLabel')
+                    .condition(cf.makeCondition([cf.makeCondition('ownerPartyId', 'is-null', null), cf.makeCondition('ownerPartyId', 'equals', project.ownerPartyId || '_NA_')], 'or'))
+                    .selectField('workEffortCategoryId,description').list()) {
+                const name = String(row.description || '').toLowerCase()
+                if (name && !labels.has(name)) labels.set(name, row.workEffortCategoryId)
+            }
+            // people: a user name, an email address or a full name, matched once
+            const people = new Map()
+            const nameOf = (partyId) => {
+                const detail = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one()
+                return detail ? (detail.organizationName || [detail.firstName, detail.lastName].filter((part) => part).join(' ') || partyId) : partyId
+            }
+            const person = (text) => {
+                if (!text) return null
+                const key = String(text).trim().toLowerCase()
+                if (people.has(key)) return people.get(key)
+                let partyIds = []
+                const users = Array.from(ec.entity.find('moqui.security.UserAccount').condition(cf.makeCondition([
+                    cf.makeCondition('username', 'equals', key, false, true), cf.makeCondition('emailAddress', 'equals', key, false, true)], 'or'))
+                    .selectField('userId,partyId').disableAuthz().list()).filter((user) => user.partyId)
+                partyIds = Array.from(new Set(users.map((user) => user.partyId)))
+                if (!partyIds.length && key.includes('@')) partyIds = Array.from(new Set(Array.from(ec.entity.find('mantle.party.contact.PartyContactMechInfo')
+                        .condition(cf.makeCondition('infoString', 'equals', key, false, true)).condition('contactMechTypeEnumId', 'CmtEmailAddress')
+                        .selectField('partyId').list()).map((row) => row.partyId)))
+                if (!partyIds.length) partyIds = Array.from(new Set(Array.from(ec.entity.find('moqui.security.UserAccount')
+                        .condition(cf.makeCondition('userFullName', 'equals', key, false, true)).selectField('partyId').disableAuthz().list())
+                        .map((user) => user.partyId).filter((id) => id)))
+                const found = partyIds.length === 1 ? {partyId: partyIds[0], name: nameOf(partyIds[0])} : null
+                people.set(key, found)
+                return found
+            }
+            const kindNames = {WetMilestone: 'Milestone', WetRelease: 'Release', WetSprint: 'Sprint', WetComponent: 'Component'}
+            const planOf = (type, name, warnings) => {
+                if (!name) return null
+                const found = plans[type].get(String(name).toLowerCase())
+                if (found) return {name: name, workEffortId: found.workEffortId, statusId: found.statusId, make: false}
+                if (createMissing) return {name: name, workEffortId: null, statusId: null, make: true}
+                warnings.push(L('${kind} "${name}" is not in the project; left out', {kind: ec.l10n.localize(kindNames[type]), name}))
+                return null
+            }
+            for (const row of rowList) {
+                const item = row.item || {}
+                const problems = Array.from(row.problems || [])
+                const warnings = Array.from(row.warnings || [])
+                const key = item.sourceKey || item.sourceId || null
+                const existingId = key ? existingByKey.get(String(key)) || null : null
+                let action = problems.length ? 'fail' : (existingId ? (existingPolicy === 'update' ? 'update' : 'skip') : 'create')
+                let statusId = item.statusId || 'WeInPlanning'
+                if (!devFlow && ['WeInReview', 'WeInTesting'].includes(statusId)) statusId = 'WeInProgress'
+                const assignee = person(item.assignee)
+                if (item.assignee && !assignee) warnings.push(L('No one matches the assignee "${name}"; left unassigned', {name: item.assignee}))
+                const reporter = person(item.reporter)
+                if (item.reporter && !reporter) warnings.push(L('No one matches the reporter "${name}"', {name: item.reporter}))
+                let parentWorkEffortId = null
+                let parentInFile = false
+                if (item.parentKey) {
+                    const parentKey = String(item.parentKey)
+                    if (parentKey === key || parentKey === item.sourceId) warnings.push(L('An item is not its own parent; imported at the top level'))
+                    else if (fileKeys.has(parentKey)) parentInFile = true
+                    else if (existingByKey.has(parentKey)) parentWorkEffortId = existingByKey.get(parentKey)
+                    else if (ownIds.has(parentKey)) parentWorkEffortId = parentKey
+                    else warnings.push(L('The parent ${parent} is not in the file or the project; imported at the top level', {parent: parentKey}))
+                }
+                const labelList = []
+                for (const name of item.labels || []) {
+                    const id = labels.get(String(name).toLowerCase())
+                    if (id) labelList.push({name: name, labelId: id, make: false})
+                    else if (createMissing) labelList.push({name: name, labelId: null, make: true})
+                    else warnings.push(L('Label "${name}" is not there; left out', {name}))
+                }
+                plannedList.push({rowNumber: row.rowNumber, action: action, key: key, sourceId: item.sourceId || null, existingWorkEffortId: existingId,
+                    title: item.title || null, purposeEnumId: item.purposeEnumId || 'WepTask', statusId: statusId, priority: item.priority || 5,
+                    assigneePartyId: assignee?.partyId || null, assigneeName: assignee?.name || null, reporterPartyId: reporter?.partyId || null,
+                    reporterName: reporter?.name || null, createdDay: item.createdDay || null, startDay: item.startDay || null, dueDay: item.dueDay || null,
+                    resolvedDay: item.resolvedDay || null, estimate: item.estimate ?? null, points: item.points ?? null, description: item.description || null,
+                    parentKey: item.parentKey || null, parentWorkEffortId: parentWorkEffortId, parentInFile: parentInFile, labelList: labelList,
+                    milestone: planOf('WetMilestone', item.milestone, warnings), release: planOf('WetRelease', item.release, warnings),
+                    component: planOf('WetComponent', item.component, warnings), sprint: planOf('WetSprint', item.sprint, warnings),
+                    earlierSprints: Array.from(item.earlierSprints || []).map((name) => planOf('WetSprint', name, warnings)).filter((plan) => plan),
+                    problems: problems, warnings: warnings, values: row.values || {}})
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="preview" noun="WorkItems">
+        <description>The import's preview: the first maxRows rows (50 by default) as they will be made (plan#WorkItemRows), with
+            the problems and warnings of each, and the counts over the whole file (rows, to create, to update, to skip, failing,
+            with warnings).</description>
+        <in-parameters>
+            <parameter name="workItemFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"/>
+            <parameter name="fileLocation"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="presetId"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="valueMaps" type="Map"/>
+            <parameter name="estimateUnit"/>
+            <parameter name="rootWorkEffortId" required="true"/>
+            <parameter name="createMissing" type="Boolean" default="true"/>
+            <parameter name="existingPolicy" default-value="skip"/>
+            <parameter name="maxRows" type="Integer" default="50"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="previewList" type="List"/>
+            <parameter name="counts" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const read = ec.service.sync().name('mantle.work.WorkItemImportServices.read#WorkItemRows').parameters({workItemFile: workItemFile,
+                fileText: fileText, fileLocation: fileLocation, characterSet: characterSet, presetId: presetId, columnMapping: columnMapping,
+                valueMaps: valueMaps, estimateUnit: estimateUnit}).call()
+            if (ec.message.hasError()) return
+            rowCount = read.rowCount
+            const rows = Array.from(read.rowList || [])
+            const keys = []
+            for (const row of rows) { if (row.item?.sourceKey) keys.push(row.item.sourceKey); if (row.item?.sourceId) keys.push(row.item.sourceId) }
+            const planned = Array.from(ec.service.sync().name('mantle.work.WorkItemImportServices.plan#WorkItemRows').parameters({rowList: rows,
+                rootWorkEffortId: rootWorkEffortId, allSourceKeys: keys, createMissing: createMissing, existingPolicy: existingPolicy}).call()?.plannedList || [])
+            if (ec.message.hasError()) return
+            counts = {rows: rowCount, create: 0, update: 0, skip: 0, fail: 0, warned: 0}
+            for (const row of planned) { counts[row.action] = (counts[row.action] || 0) + 1; if (row.warnings.length) counts.warned++ }
+            previewList = planned.slice(0, Math.max(1, Number(maxRows) || 50))
+        ]]></script></actions>
+    </service>
+
+    <service verb="import" noun="WorkItems" transaction-timeout="3600">
+        <description>
+            Imports the rows of a work item file into the project rootWorkEffortId (plan#WorkItemRows for what each does). First the
+            missing labels, milestones, releases, components and sprints (createMissing), each on its own; then each row in its
+            own transaction (import#WorkItemRow): a row that fails is logged and named in failureList with its reason and values,
+            and the rest are imported; then the parents (a row's parent from the file or the project, its own transaction each;
+            one refused is a warning); then the sprints this import made that the file names as earlier sprints of an item (a
+            carry-over) are completed, after their items are in them. The new items go after the project's others in the
+            backlog's order, in the file's order.
+
+            With progressUserId, how far it is goes to that user as a NotificationMessage on the topic workItemImportProgress
+            (not persisted unless the topic says so), every 25 rows and once at the end: {progressKey, done, total, createdCount,
+            updatedCount, skippedCount, failedCount, finished}. A message that cannot be sent is logged and the import goes on.
+        </description>
+        <in-parameters>
+            <parameter name="workItemFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"/>
+            <parameter name="fileLocation"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="presetId"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="valueMaps" type="Map"/>
+            <parameter name="estimateUnit"/>
+            <parameter name="rootWorkEffortId" required="true"/>
+            <parameter name="createMissing" type="Boolean" default="true"/>
+            <parameter name="existingPolicy" default-value="skip"><description>skip or update the rows already imported</description></parameter>
+            <parameter name="progressUserId"/>
+            <parameter name="progressKey"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="createdCount" type="Integer"/>
+            <parameter name="updatedCount" type="Integer"/>
+            <parameter name="skippedCount" type="Integer"/>
+            <parameter name="failedCount" type="Integer"/>
+            <parameter name="failureList" type="List"><parameter name="failure" type="Map"><description>rowNumber, key, title, values, error</description></parameter></parameter>
+            <parameter name="warningList" type="List"><parameter name="warning" type="Map"><description>rowNumber, key, warning</description></parameter></parameter>
+            <parameter name="resultList" type="List"><parameter name="result" type="Map"><description>rowNumber, key, action, workEffortId</description></parameter></parameter>
+            <parameter name="madeList" type="List"><parameter name="made" type="Map"><description>kind, name, workEffortId (or labelId)</description></parameter></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            createdCount = 0; updatedCount = 0; skippedCount = 0; failedCount = 0
+            failureList = []; warningList = []; resultList = []; madeList = []
+            const L = (text, values) => ec.resource.expand(ec.l10n.localize(text), '', values || {})
+            if (!['skip', 'update'].includes(existingPolicy)) { ec.message.addError(L('Rows already imported are skipped or updated, not ${policy}', {policy: existingPolicy})); return }
+            const project = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', rootWorkEffortId).one()
+            if (project == null || project.workEffortTypeEnumId !== 'WetProject') { ec.message.addError(L('Project ${id} not found', {id: rootWorkEffortId})); return }
+            const read = ec.service.sync().name('mantle.work.WorkItemImportServices.read#WorkItemRows').parameters({workItemFile: workItemFile,
+                fileText: fileText, fileLocation: fileLocation, characterSet: characterSet, presetId: presetId, columnMapping: columnMapping,
+                valueMaps: valueMaps, estimateUnit: estimateUnit}).call()
+            if (ec.message.hasError()) return
+            rowCount = read.rowCount
+            const rows = Array.from(read.rowList || [])
+            const planned = Array.from(ec.service.sync().name('mantle.work.WorkItemImportServices.plan#WorkItemRows').parameters({rowList: rows,
+                rootWorkEffortId: rootWorkEffortId, createMissing: createMissing, existingPolicy: existingPolicy}).call()?.plannedList || [])
+            if (ec.message.hasError()) return
+            const errorText = (err) => String(err && err.message ? err.message : err).trim()
+            // writes before the rows go in transactions of their own, so a row's transaction does not wait on this one
+            const separately = (name, parameters) => {
+                const out = ec.service.sync().name(name).parameters(parameters || {}).requireNewTransaction(true).call()
+                if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                return out
+            }
+
+            // ===== the labels and plan items to make, each on its own
+            const madeIds = {}
+            const madeSprintIds = new Set()
+            const make = (kind, name, run) => {
+                const key = kind + '|' + String(name).toLowerCase()
+                if (key in madeIds) return madeIds[key]
+                madeIds[key] = null
+                try {
+                    const id = run()
+                    madeIds[key] = id
+                    madeList.push({kind: kind, name: name, workEffortId: id})
+                    return id
+                } catch (err) {
+                    const error = errorText(err)
+                    ec.message.clearErrors()
+                    ec.logger.error(`Work item import into ${rootWorkEffortId}: ${kind} ${name} not made: ${error}`)
+                    warningList.push({rowNumber: null, key: null, warning: L('${kind} "${name}" not made: ${error}', {kind, name, error})})
+                    return null
+                }
+            }
+            const services = {WetMilestone: 'mantle.work.ProjectServices.create#Milestone', WetRelease: 'mantle.work.ProjectServices.create#Release',
+                WetComponent: 'mantle.work.ProjectServices.create#Component'}
+            const resolve = (type, plan) => {
+                if (!plan) return null
+                if (plan.workEffortId) return plan.workEffortId
+                if (!plan.make) return null
+                return make(type, plan.name, () => {
+                    if (type === 'WetSprint') {
+                        const id = separately('mantle.work.ProjectServices.create#Sprint', {rootWorkEffortId: rootWorkEffortId, workEffortName: plan.name})?.workEffortId
+                        madeSprintIds.add(id)
+                        return id
+                    }
+                    return separately(services[type], {rootWorkEffortId: rootWorkEffortId, workEffortName: plan.name})?.workEffortId
+                })
+            }
+            for (const row of planned) {
+                if (row.action === 'fail' || row.action === 'skip') continue
+                row.milestoneId = resolve('WetMilestone', row.milestone)
+                row.releaseId = resolve('WetRelease', row.release)
+                row.componentId = resolve('WetComponent', row.component)
+                row.sprintId = resolve('WetSprint', row.sprint)
+                row.earlierSprintIds = row.earlierSprints.map((plan) => resolve('WetSprint', plan)).filter((id) => id)
+                row.labelIds = row.labelList.map((label) => label.labelId || make('label', label.name, () =>
+                    separately('mantle.work.TaskServices.create#Label', {description: label.name, ownerPartyId: project.ownerPartyId || null})?.workEffortCategoryId)).filter((id) => id)
+            }
+
+            // ===== the rows, each in its own transaction
+            const settings = ec.service.sync().name('mantle.work.ProjectServices.get#ProjectSettings').parameters({workEffortId: rootWorkEffortId}).call()?.settings || {}
+            const visibilityEnumId = settings.WstShareNewItems === 'Y' ? 'WevGeneral' : 'WevWorkGroup'
+            let rank = 0
+            for (const row of ec.entity.find('mantle.work.effort.WorkEffort').condition('rootWorkEffortId', rootWorkEffortId).condition('workEffortTypeEnumId', 'WetTask')
+                    .selectField('sequenceNum').list()) if (row.sequenceNum != null) rank = Math.max(rank, Number(String(row.sequenceNum)))
+            const progress = (done, finished) => {
+                if (!progressUserId) return
+                try {
+                    ec.makeNotificationMessage().topic('workItemImportProgress').userId(progressUserId).message({progressKey: progressKey || null,
+                        done: done, total: planned.length, createdCount, updatedCount, skippedCount, failedCount, finished: finished}).send()
+                } catch (err) { ec.logger.warn(`Work item import progress for ${progressUserId} not sent: ${err}`) }
+            }
+            const idByKey = new Map()
+            let rowsDone = 0
+            for (const row of planned) {
+                if (rowsDone > 0 && rowsDone % 25 === 0) progress(rowsDone, false)
+                rowsDone++
+                for (const warning of row.warnings) warningList.push({rowNumber: row.rowNumber, key: row.key, warning: warning})
+                if (row.action === 'fail') {
+                    failedCount++
+                    const error = row.problems.join('; ')
+                    ec.logger.warn(`Work item import into ${rootWorkEffortId}: row ${row.rowNumber} ${row.key || ''} failed: ${error}`)
+                    failureList.push({rowNumber: row.rowNumber, key: row.key, title: row.title, values: row.values, error: error})
+                    resultList.push({rowNumber: row.rowNumber, key: row.key, action: 'fail', workEffortId: null})
+                    continue
+                }
+                if (row.action === 'skip') {
+                    skippedCount++
+                    if (row.key) idByKey.set(String(row.key), row.existingWorkEffortId)
+                    if (row.sourceId) idByKey.set(String(row.sourceId), row.existingWorkEffortId)
+                    resultList.push({rowNumber: row.rowNumber, key: row.key, action: 'skip', workEffortId: row.existingWorkEffortId})
+                    continue
+                }
+                if (row.action === 'create') { rank += 1000; row.sequenceNum = rank }
+                try {
+                    const out = ec.service.sync().name('mantle.work.WorkItemImportServices.import#WorkItemRow').parameters({row: row, rootWorkEffortId: rootWorkEffortId,
+                        visibilityEnumId: visibilityEnumId}).requireNewTransaction(true).call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    if (row.action === 'create') createdCount++
+                    else updatedCount++
+                    for (const warning of Array.from(out?.warningList || [])) warningList.push({rowNumber: row.rowNumber, key: row.key, warning: warning})
+                    if (row.key) idByKey.set(String(row.key), out.workEffortId)
+                    if (row.sourceId) idByKey.set(String(row.sourceId), out.workEffortId)
+                    row.workEffortId = out.workEffortId
+                    resultList.push({rowNumber: row.rowNumber, key: row.key, action: row.action, workEffortId: out.workEffortId})
+                } catch (err) {
+                    const error = errorText(err)
+                    ec.message.clearErrors()
+                    ec.logger.warn(`Work item import into ${rootWorkEffortId}: row ${row.rowNumber} ${row.key || ''} failed: ${error}`)
+                    failedCount++
+                    failureList.push({rowNumber: row.rowNumber, key: row.key, title: row.title, values: row.values, error: error})
+                    resultList.push({rowNumber: row.rowNumber, key: row.key, action: 'fail', workEffortId: null})
+                }
+            }
+
+            // ===== the parents, each on its own
+            for (const row of planned) {
+                if (!row.workEffortId || !row.parentKey) continue
+                const parentId = row.parentInFile ? idByKey.get(String(row.parentKey)) : row.parentWorkEffortId
+                if (!parentId) {
+                    if (row.parentInFile) warningList.push({rowNumber: row.rowNumber, key: row.key, warning: L('The parent ${parent} was not imported; at the top level', {parent: row.parentKey})})
+                    continue
+                }
+                try {
+                    const current = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', row.workEffortId).one()
+                    if (current.parentWorkEffortId === parentId) continue
+                    ec.service.sync().name('mantle.work.TaskServices.move#Task').parameters({workEffortId: row.workEffortId, parentWorkEffortId: parentId})
+                            .requireNewTransaction(true).call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                } catch (err) {
+                    const error = errorText(err)
+                    ec.message.clearErrors()
+                    ec.logger.warn(`Work item import into ${rootWorkEffortId}: row ${row.rowNumber} not put under ${parentId}: ${error}`)
+                    warningList.push({rowNumber: row.rowNumber, key: row.key, warning: L('Not put under ${parent}: ${error}', {parent: row.parentKey, error})})
+                }
+            }
+
+            // ===== the sprints the file shows as past: complete, now that their items are in them
+            const pastSprintIds = new Set()
+            for (const row of planned) for (const id of row.earlierSprintIds || []) if (madeSprintIds.has(id)) pastSprintIds.add(id)
+            for (const sprintId of pastSprintIds) {
+                try {
+                    // straight to Complete: a planned sprint has no move there in the flows (the record's history is the file's)
+                    const sprint = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', sprintId).one()
+                    sprint.set('statusId', 'WeComplete')
+                    sprint.set('actualStartDate', sprint.estimatedStartDate)
+                    sprint.set('actualCompletionDate', sprint.estimatedCompletionDate || ec.user.nowTimestamp)
+                    sprint.update()
+                } catch (err) {
+                    const error = errorText(err)
+                    ec.message.clearErrors()
+                    ec.logger.error(`Work item import into ${rootWorkEffortId}: sprint ${sprintId} not completed: ${error}`)
+                    warningList.push({rowNumber: null, key: null, warning: L('Sprint ${id} not completed: ${error}', {id: sprintId, error})})
+                }
+            }
+            progress(rowsDone, true)
+        ]]></script></actions>
+    </service>
+
+    <service verb="import" noun="WorkItemRow" allow-remote="false">
+        <description>One row of import#WorkItems, which runs it in its own transaction: the work item made (create#Task, its
+            original key in sourceReferenceId, the reporter a Reporter party) or updated (the fields of the file; the status through
+            set#TaskStatus, a move the flow refuses a warning), then its assignee, labels, plan items and sprint: an open sprint by
+            set#TaskSprint, a complete one, and the earlier sprints it was carried over from, by their membership rows written
+            directly (ended for the earlier ones).</description>
+        <in-parameters>
+            <parameter name="row" type="Map" required="true"/>
+            <parameter name="rootWorkEffortId" required="true"/>
+            <parameter name="visibilityEnumId" default-value="WevWorkGroup"/>
+        </in-parameters>
+        <out-parameters><parameter name="workEffortId"/><parameter name="warningList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            warningList = []
+            const L = (text, values) => ec.resource.expand(ec.l10n.localize(text), '', values || {})
+            const stamp = (day, time) => day ? ec.l10n.parseTimestamp(day + ' ' + (time || '00:00:00.000'), 'yyyy-MM-dd HH:mm:ss.SSS') : null
+            const done = ['WeComplete', 'WeClosed'].includes(row.statusId)
+            const resolution = done ? 'WerCompleted' : (row.statusId === 'WeCancelled' ? 'WerWontComplete' : 'WerUnresolved')
+            const fields = {workEffortName: String(row.title).substring(0, 255), purposeEnumId: row.purposeEnumId, priority: Number(row.priority) || 5,
+                description: row.description || null, estimatedStartDate: stamp(row.startDay), estimatedCompletionDate: stamp(row.dueDay),
+                estimatedWorkTime: row.estimate ?? null, estimatedPoints: row.points ?? null}
+            if (row.action === 'update') {
+                workEffortId = row.existingWorkEffortId
+                const current = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+                if (current == null) { ec.message.addError(L('Work item ${id} not found', {id: workEffortId})); return }
+                const changes = {workEffortId: workEffortId}
+                for (const [name, value] of Object.entries(fields)) if (value != null) changes[name] = value
+                ec.service.sync().name('update#mantle.work.effort.WorkEffort').parameters(changes).call()
+                if (ec.message.hasError()) return
+                if (current.statusId !== row.statusId) {
+                    ec.message.pushErrors()
+                    try {
+                        ec.service.sync().name('mantle.work.TaskServices.set#TaskStatus').parameters({workEffortId: workEffortId, statusId: row.statusId,
+                            resolutionEnumId: resolution}).call()
+                        if (ec.message.hasError()) warningList.push(L('Status not changed: ${error}', {error: ec.message.getErrorsString()}))
+                    } finally { ec.message.clearErrors(); ec.message.popErrors() }
+                }
+            } else {
+                const created = ec.service.sync().name('mantle.work.TaskServices.create#Task').parameters(Object.assign({}, fields, {rootWorkEffortId: rootWorkEffortId,
+                    statusId: row.statusId, resolutionEnumId: resolution, sourceReferenceId: row.key ? String(row.key) : null, visibilityEnumId: visibilityEnumId,
+                    remainingWorkTime: done ? 0 : (row.estimate ?? null), sequenceNum: row.sequenceNum ?? null,
+                    actualCompletionDate: done || row.statusId === 'WeCancelled' ? stamp(row.resolvedDay || row.dueDay) : null})).call()
+                if (ec.message.hasError()) return
+                workEffortId = created.workEffortId
+            }
+            const party = (partyId, roleTypeId, fromDay) => {
+                const there = ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', workEffortId).condition('partyId', partyId)
+                        .condition('roleTypeId', roleTypeId).conditionDate('fromDate', 'thruDate', null).count()
+                if (there) return
+                ec.service.sync().name('create#mantle.work.effort.WorkEffortParty').parameters({workEffortId: workEffortId, partyId: partyId, roleTypeId: roleTypeId,
+                    fromDate: stamp(fromDay) || ec.user.nowTimestamp, statusId: 'WeptAssigned'}).call()
+            }
+            if (row.assigneePartyId) party(row.assigneePartyId, 'Assignee', null)
+            if (row.reporterPartyId) party(row.reporterPartyId, 'Reporter', row.createdDay)
+            if (ec.message.hasError()) return
+            for (const labelId of row.labelIds || []) ec.service.sync().name('mantle.work.TaskServices.add#TaskLabel').parameters({workEffortId: workEffortId, workEffortCategoryId: labelId}).call()
+            if (ec.message.hasError()) return
+            const plan = (assocTypeEnumId, planId) => {
+                if (planId) ec.service.sync().name('mantle.work.TaskServices.set#TaskPlanItem').parameters({workEffortId: workEffortId, assocTypeEnumId: assocTypeEnumId,
+                    planWorkEffortId: planId}).call()
+            }
+            plan('WeatMilestone', row.milestoneId)
+            plan('WeatRelease', row.releaseId)
+            plan('WeatComponent', row.componentId)
+            if (ec.message.hasError()) return
+            // a membership row written directly: a complete sprint takes no items by set#TaskSprint
+            const membership = (sprintId, ended) => {
+                const there = ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', sprintId).condition('toWorkEffortId', workEffortId)
+                        .condition('workEffortAssocTypeEnumId', 'WeatSprint').count()
+                if (there) return
+                const sprint = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', sprintId).one()
+                const from = sprint?.estimatedStartDate || ec.user.nowTimestamp
+                ec.service.sync().name('create#mantle.work.effort.WorkEffortAssoc').parameters({workEffortId: sprintId, toWorkEffortId: workEffortId,
+                    workEffortAssocTypeEnumId: 'WeatSprint', fromDate: from, thruDate: ended ? (sprint?.estimatedCompletionDate || ec.user.nowTimestamp) : null}).call()
+            }
+            for (const sprintId of row.earlierSprintIds || []) if (sprintId !== row.sprintId) membership(sprintId, true)
+            if (row.sprintId) {
+                const sprint = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', row.sprintId).one()
+                if (sprint && ['WeComplete', 'WeClosed'].includes(sprint.statusId)) membership(row.sprintId, false)
+                else ec.service.sync().name('mantle.work.TaskServices.set#TaskSprint').parameters({workEffortId: workEffortId, sprintWorkEffortId: row.sprintId}).call()
+            }
+        ]]></script></actions>
+    </service>
+</services>

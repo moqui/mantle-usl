@@ -23,12 +23,12 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.product.receipt.AssetReceipt" value-field="assetReceipt" for-update="true"/>
             <if condition="assetReceipt == null"><return error="true" message="Not posting inventory transaction, could not find Asset Receipt with ID ${assetReceiptId}"/></if>
-            <if condition="!assetReceipt.quantityAccepted"><return message="No quantity accepted on receipt, not posting inventory transaction to GL for receipt ${assetReceiptId}"/></if>
-            <set field="asset" from="assetReceipt.'mantle.product.asset.Asset'"/>
+            <if condition="assetReceipt.quantityAccepted == null || toDecimal(assetReceipt.quantityAccepted).isZero()"><return message="No quantity accepted on receipt, not posting inventory transaction to GL for receipt ${assetReceiptId}"/></if>
+            <set field="asset" from="assetReceipt['mantle.product.asset.Asset']"/>
             <set field="organizationPartyId" from="asset.ownerPartyId"/>
 
             <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="papOut"
-                    in-map="[organizationPartyId:organizationPartyId]"/>
+                    in-map="{organizationPartyId:organizationPartyId}"/>
             <set field="partyAcctgPreference" from="papOut.partyAcctgPreference"/>
             <!-- if no preference we shouldn't post anything -->
             <if condition="!partyAcctgPreference">
@@ -53,13 +53,13 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
-            <if condition="existingTransList">
-                <return message="Asset Receipt ${assetReceiptId} has already been posted in accounting transaction ${existingTransList*.acctgTransId}"/></if>
+            <if condition="(existingTransList?.length > 0)">
+                <return message="Asset Receipt ${assetReceiptId} has already been posted in accounting transaction [${existingTransList.map((trans) =&gt; trans.acctgTransId).join(', ')}]"/></if>
 
             <!-- get assetTypeGlAccount -->
             <service-call name="mantle.ledger.AssetAutoPostServices.get#AssetTypeGlAccount" out-map="context"
-                    in-map="[organizationPartyId:organizationPartyId, assetTypeEnumId:asset.assetTypeEnumId,
-                        classEnumId:asset.classEnumId, assetId:asset.assetId]"/>
+                    in-map="{organizationPartyId:organizationPartyId, assetTypeEnumId:asset.assetTypeEnumId,
+                        classEnumId:asset.classEnumId, assetId:asset.assetId}"/>
             <!--
             <log message="======= receipt asset=${asset}"/>
             <log message="======= receipt assetTypeGlAccount=${assetTypeGlAccount}"/>
@@ -68,14 +68,14 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- determine the acctgTransTypeEnumId, etc based on assetTypeEnumId; only used if values not set on AssetTypeGlAccount -->
             <if condition="asset.assetTypeEnumId == 'AstTpInventory'">
                 <then>
-                    <set field="acctgTransTypeEnumId" from="assetTypeGlAccount?.receiptTransTypeEnumId ?: 'AttInventoryReceipt'"/>
+                    <set field="acctgTransTypeEnumId" from="assetTypeGlAccount?.receiptTransTypeEnumId || 'AttInventoryReceipt'"/>
                     <!-- handle WorkEffort (Asset.ownerPartyId (should always) = WorkEffort.ownerPartyId for receipt from run, use WIP account) -->
                     <set field="receiptGlAccountTypeEnumId" from="assetReceipt.workEffortId ? 'GatWipInventory' : 'GatUnreceivedInventory'"/>
                     <set field="assetGlAccountTypeEnumId" value="GatInventory"/>
                 </then>
                 <!-- TODO: handle supplies receipt -->
                 <else>
-                    <set field="acctgTransTypeEnumId" from="assetTypeGlAccount?.receiptTransTypeEnumId ?: 'AttAssetReceipt'"/>
+                    <set field="acctgTransTypeEnumId" from="assetTypeGlAccount?.receiptTransTypeEnumId || 'AttAssetReceipt'"/>
                     <set field="receiptGlAccountTypeEnumId" value="GatUnreceivedFixedAsset"/>
                     <set field="assetGlAccountTypeEnumId" value="GatFixedAsset"/>
                     <!-- don't need to do this, is the default anyway:
@@ -101,8 +101,8 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if not specifically configured look for a default account -->
             <if condition="!receiptGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="creditGlAccountOut"
-                        in-map="[glAccountTypeEnumId:receiptGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
-                            organizationPartyId:organizationPartyId, otherPartyId:null]"/>
+                        in-map="{glAccountTypeEnumId:receiptGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
+                            organizationPartyId:organizationPartyId, otherPartyId:null}"/>
                 <set field="receiptGlAccountId" from="creditGlAccountOut.glAccountId"/>
             </if>
             <if condition="receiptGlAccountId">
@@ -115,8 +115,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="assetGlAccountId" from="assetTypeGlAccount?.assetGlAccountId"/>
             <if condition="!assetGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="assetGlAccountOut"
-                        in-map="[glAccountTypeEnumId:assetGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
-                            organizationPartyId:organizationPartyId, otherPartyId:null]"/>
+                        in-map="{glAccountTypeEnumId:assetGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
+                            organizationPartyId:organizationPartyId, otherPartyId:null}"/>
                 <set field="assetGlAccountId" from="assetGlAccountOut.glAccountId"/>
             </if>
             <if condition="assetGlAccountId">
@@ -126,7 +126,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- set the amount -->
-            <set field="amount" from="assetReceipt.quantityAccepted * asset.acquireCost"/>
+            <set field="amount" from="toDecimal(assetReceipt.quantityAccepted).multiply(asset.acquireCost)"/>
 
             <!-- create the AcctgTrans -->
             <set field="useErrorJournal" from="false"/>
@@ -137,32 +137,32 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="otherPartyId" from="shipment?.fromPartyId"/>
             </if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTrans" out-map="context"
-                    in-map="[acctgTransTypeEnumId:acctgTransTypeEnumId, organizationPartyId:organizationPartyId,
+                    in-map="{acctgTransTypeEnumId:acctgTransTypeEnumId, organizationPartyId:organizationPartyId,
                         otherPartyId:otherPartyId, amountUomId:asset.acquireCostUomId, assetReceiptId:assetReceiptId,
-                        assetId:asset.assetId, shipmentId:assetReceipt.shipmentId, transactionDate:assetReceipt.receivedDate]"/>
+                        assetId:asset.assetId, shipmentId:assetReceipt.shipmentId, transactionDate:assetReceipt.receivedDate}"/>
             <!-- note: could populate invoiceId, etc... but should we? for now no -->
 
             <!-- Credit to GatUnreceivedInventory or GatUnreceivedFixedAsset (look for assetTypeEnumId=AstTpFixed or parentEnumId=AstTpFixed) -->
             <if condition="!receiptGlAccountId"><set field="useErrorJournal" from="true"/></if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                    in-map="[acctgTransId:acctgTransId, debitCreditFlag:'C', glAccountTypeEnumId:receiptGlAccountTypeEnumId,
-                        glAccountId:receiptGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId]"/>
+                    in-map="{acctgTransId:acctgTransId, debitCreditFlag:'C', glAccountTypeEnumId:receiptGlAccountTypeEnumId,
+                        glAccountId:receiptGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId}"/>
 
             <!-- Debit to GatInventory or GatFixedAsset -->
             <if condition="!assetGlAccountId"><set field="useErrorJournal" from="true"/></if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                    in-map="[acctgTransId:acctgTransId, debitCreditFlag:'D', glAccountTypeEnumId:assetGlAccountTypeEnumId,
-                        glAccountId:assetGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId]"/>
+                    in-map="{acctgTransId:acctgTransId, debitCreditFlag:'D', glAccountTypeEnumId:assetGlAccountTypeEnumId,
+                        glAccountId:assetGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId}"/>
 
             <if condition="useErrorJournal"><then>
                 <!-- put in the error journal for the org -->
                 <if condition="partyAcctgPreference?.errorGlJournalId">
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
-                            in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
+                            in-map="{acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId}"/>
                 </if>
             </then><else>
                 <!-- call the post service -->
-                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="[acctgTransId:acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="{acctgTransId:acctgTransId}"/>
             </else></if>
 
             <!-- set acctg trans result to Success -->
@@ -186,18 +186,18 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
-            <if condition="!existingTransList"><log level="warn" message="In repost#AssetReceipt ${assetReceiptId} no existing AcctgTrans records found"/></if>
+            <if condition="!existingTransList?.length"><log level="warn" message="In repost#AssetReceipt ${assetReceiptId} no existing AcctgTrans records found"/></if>
             <!-- unpost and delete existing -->
             <iterate list="existingTransList" entry="acctgTrans">
-                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
-                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="{acctgTransId:acctgTrans.acctgTransId}"/>
+                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="{acctgTransId:acctgTrans.acctgTransId}"/>
             </iterate>
 
             <!-- now post the AssetReceipt again (if has acquireCost and ownerPartyId) -->
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
                 <field-map field-name="assetId" from="assetReceipt.assetId"/></entity-find-one>
-            <if condition="asset?.acquireCost &amp;&amp; asset?.ownerPartyId">
-                <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetReceipt" in-map="[assetReceiptId:assetReceiptId]"/></if>
+            <if condition="asset?.acquireCost != null &amp;&amp; !toDecimal(asset.acquireCost).isZero() &amp;&amp; asset.ownerPartyId">
+                <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetReceipt" in-map="{assetReceiptId:assetReceiptId}"/></if>
         </actions>
     </service>
 
@@ -209,13 +209,13 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.product.issuance.AssetIssuance" value-field="assetIssuance" for-update="true"/>
             <if condition="assetIssuance == null"><return error="true" message="Not posting inventory transaction, could not find Asset Issuance with ID ${assetIssuanceId}"/></if>
-            <if condition="!assetIssuance.quantity"><return message="No quantity issued, not posting inventory transaction to GL for issuance ${assetIssuanceId}"/></if>
+            <if condition="assetIssuance.quantity == null || toDecimal(assetIssuance.quantity).isZero()"><return message="No quantity issued, not posting inventory transaction to GL for issuance ${assetIssuanceId}"/></if>
 
-            <set field="asset" from="assetIssuance.'mantle.product.asset.Asset'"/>
+            <set field="asset" from="assetIssuance['mantle.product.asset.Asset']"/>
             <set field="organizationPartyId" from="asset.ownerPartyId"/>
 
             <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="papOut"
-                    in-map="[organizationPartyId:organizationPartyId]"/>
+                    in-map="{organizationPartyId:organizationPartyId}"/>
             <set field="partyAcctgPreference" from="papOut.partyAcctgPreference"/>
             <!-- if no preference we shouldn't post anything -->
             <if condition="!partyAcctgPreference">
@@ -225,7 +225,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/>
             </if>
             <!-- check acquireCost -->
-            <if condition="asset.acquireCost == null || asset.acquireCost == 0.0">
+            <if condition="asset.acquireCost == null || toDecimal(asset.acquireCost).isZero()">
                 <set field="assetIssuance.acctgTransResultEnumId" value="AtrNoAcquireCost"/>
                 <entity-update value-field="assetIssuance"/>
                 <return message="Not posting Asset Issuance ${assetIssuanceId}, Asset ${asset.assetId} has no Acquire Cost"/>
@@ -239,13 +239,13 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
-            <if condition="existingTransList">
-                <return message="Asset Issuance ${assetIssuanceId} has already been posted in accounting transaction ${existingTransList*.acctgTransId}"/></if>
+            <if condition="(existingTransList?.length > 0)">
+                <return message="Asset Issuance ${assetIssuanceId} has already been posted in accounting transaction [${existingTransList.map((trans) =&gt; trans.acctgTransId).join(', ')}]"/></if>
 
             <!-- get assetTypeGlAccount -->
             <service-call name="mantle.ledger.AssetAutoPostServices.get#AssetTypeGlAccount" out-map="context"
-                    in-map="[organizationPartyId:organizationPartyId, assetTypeEnumId:asset.assetTypeEnumId,
-                        classEnumId:asset.classEnumId, assetId:asset.assetId]"/>
+                    in-map="{organizationPartyId:organizationPartyId, assetTypeEnumId:asset.assetTypeEnumId,
+                        classEnumId:asset.classEnumId, assetId:asset.assetId}"/>
             <!--
             <log message="======= issuance asset=${asset}"/>
             <log message="======= issuance assetTypeGlAccount=${assetTypeGlAccount}"/>
@@ -259,14 +259,14 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- determine the acctgTransTypeEnumId, etc based on assetTypeEnumId; only used if values not set on AssetTypeGlAccount -->
             <if condition="asset.assetTypeEnumId == 'AstTpInventory'">
                 <then>
-                    <set field="acctgTransTypeEnumId" from="assetTypeGlAccount?.issuanceTransTypeEnumId ?: 'AttInventoryIssuance'"/>
+                    <set field="acctgTransTypeEnumId" from="assetTypeGlAccount?.issuanceTransTypeEnumId || 'AttInventoryIssuance'"/>
                     <!-- handle WorkEffort with Asset.ownerPartyId = WorkEffort.ownerPartyId use WIP account, different parties treat as COGS -->
                     <set field="issuanceGlAccountTypeEnumId" from="workEffort?.ownerPartyId == asset.ownerPartyId ? 'GatWipInventory' : 'GatCogs'"/>
                     <set field="assetGlAccountTypeEnumId" value="GatInventory"/>
                 </then>
                 <!-- TODO: handle supplies issuance -->
                 <else>
-                    <set field="acctgTransTypeEnumId" from="assetTypeGlAccount?.issuanceTransTypeEnumId ?: 'AttAssetIssuance'"/>
+                    <set field="acctgTransTypeEnumId" from="assetTypeGlAccount?.issuanceTransTypeEnumId || 'AttAssetIssuance'"/>
                     <set field="issuanceGlAccountTypeEnumId" value="GatUnissuedFixedAsset"/>
                     <set field="assetGlAccountTypeEnumId" value="GatFixedAsset"/>
                     <!-- don't need to do this, is the default anyway:
@@ -282,8 +282,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="assetGlAccountId" from="assetTypeGlAccount?.assetGlAccountId"/>
             <if condition="!assetGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="assetGlAccountOut"
-                        in-map="[glAccountTypeEnumId:assetGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
-                            organizationPartyId:organizationPartyId, otherPartyId:null]"/>
+                        in-map="{glAccountTypeEnumId:assetGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
+                            organizationPartyId:organizationPartyId, otherPartyId:null}"/>
                 <set field="assetGlAccountId" from="assetGlAccountOut.glAccountId"/>
             </if>
             <if condition="assetGlAccountId">
@@ -306,8 +306,8 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- if not specifically configured look for a default account -->
             <if condition="!issuanceGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="issuanceGlAccountOut"
-                        in-map="[glAccountTypeEnumId:issuanceGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
-                            organizationPartyId:organizationPartyId, otherPartyId:null]"/>
+                        in-map="{glAccountTypeEnumId:issuanceGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
+                            organizationPartyId:organizationPartyId, otherPartyId:null}"/>
                 <set field="issuanceGlAccountId" from="issuanceGlAccountOut.glAccountId"/>
             </if>
             <if condition="issuanceGlAccountId">
@@ -317,36 +317,36 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <!-- set the amount -->
-            <set field="amount" from="assetIssuance.quantity * asset.acquireCost"/>
+            <set field="amount" from="toDecimal(assetIssuance.quantity).multiply(asset.acquireCost)"/>
 
             <!-- create the AcctgTrans -->
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTrans" out-map="context"
-                    in-map="[acctgTransTypeEnumId:acctgTransTypeEnumId, organizationPartyId:organizationPartyId,
+                    in-map="{acctgTransTypeEnumId:acctgTransTypeEnumId, organizationPartyId:organizationPartyId,
                         otherPartyId:null, amountUomId:asset.acquireCostUomId, assetIssuanceId:assetIssuanceId,
-                        assetId:asset.assetId, shipmentId:assetIssuance.shipmentId, transactionDate:assetIssuance.issuedDate]"/>
+                        assetId:asset.assetId, shipmentId:assetIssuance.shipmentId, transactionDate:assetIssuance.issuedDate}"/>
             <!-- note: could populate invoiceId, etc... but should we? for now no -->
 
             <set field="useErrorJournal" from="false"/>
             <!-- Credit to assetGlAccountId (GatInventory, GatFixedAsset, etc) -->
             <if condition="!assetGlAccountId"><set field="useErrorJournal" from="true"/></if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                    in-map="[acctgTransId:acctgTransId, debitCreditFlag:'C', glAccountTypeEnumId:assetGlAccountTypeEnumId,
-                        glAccountId:assetGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId]"/>
+                    in-map="{acctgTransId:acctgTransId, debitCreditFlag:'C', glAccountTypeEnumId:assetGlAccountTypeEnumId,
+                        glAccountId:assetGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId}"/>
             <!-- Debit to issuanceGlAccountId (GatCogs, GatUnissuedFixedAsset, etc) -->
             <if condition="!issuanceGlAccountId"><set field="useErrorJournal" from="true"/></if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                    in-map="[acctgTransId:acctgTransId, debitCreditFlag:'D', glAccountTypeEnumId:issuanceGlAccountTypeEnumId,
-                        glAccountId:issuanceGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId]"/>
+                    in-map="{acctgTransId:acctgTransId, debitCreditFlag:'D', glAccountTypeEnumId:issuanceGlAccountTypeEnumId,
+                        glAccountId:issuanceGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId}"/>
 
             <if condition="useErrorJournal"><then>
                 <!-- put in the error journal for the org -->
                 <if condition="partyAcctgPreference?.errorGlJournalId">
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
-                            in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
+                            in-map="{acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId}"/>
                 </if>
             </then><else>
                 <!-- call the post service -->
-                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="[acctgTransId:acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="{acctgTransId:acctgTransId}"/>
             </else></if>
 
             <!-- set acctg trans result to Success -->
@@ -368,15 +368,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
                 <econdition field-name="acctgTransTypeEnumId" operator="in" value="AttAssetIssuance,AttInventoryIssuance"/>
             </entity-find>
-            <if condition="acctgTransList"><then>
-                <if condition="acctgTransList.size() == 1"><then>
-                    <set field="curAcctgTransId" from="acctgTransList.first.acctgTransId"/>
+            <if condition="(acctgTransList?.length > 0)"><then>
+                <if condition="acctgTransList.length === 1"><then>
+                    <set field="curAcctgTransId" from="acctgTransList[0].acctgTransId"/>
                     <!-- make asset issuance transactions lighter weight by unpost/delete instead of adding a reverse TX -->
-                    <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:curAcctgTransId]"/>
-                    <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:curAcctgTransId]"/>
+                    <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="{acctgTransId:curAcctgTransId}"/>
+                    <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="{acctgTransId:curAcctgTransId}"/>
                     <!-- old approach:
                     <service-call name="mantle.ledger.LedgerServices.post#ReverseAcctgTrans"
-                            in-map="[acctgTransId:acctgTransList.first.acctgTransId, deleteIfNotPosted:true]"/> -->
+                            in-map="{acctgTransId:acctgTransList[0].acctgTransId, deleteIfNotPosted:true}"/> -->
                 </then><else>
                     <return error="true" message="Found more than one accounting transaction for Asset Issuance ${assetIssuanceId}, may already be reversed, not posting reverse transaction."/>
                 </else></if>
@@ -401,22 +401,22 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
-            <if condition="!existingTransList"><then>
+            <if condition="!existingTransList?.length"><then>
                 <log level="warn" message="In repost#AssetIssuance ${assetIssuanceId} no existing AcctgTrans records found"/>
             </then><else>
-                <log message="In repost#AssetIssuance ${assetIssuanceId} unposting and deleting AcctgTrans ${existingTransList*.acctgTransId}"/>
+                <log message="In repost#AssetIssuance ${assetIssuanceId} unposting and deleting AcctgTrans [${existingTransList.map((trans) =&gt; trans.acctgTransId).join(', ')}]"/>
             </else></if>
             <!-- unpost and delete existing -->
             <iterate list="existingTransList" entry="acctgTrans">
-                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
-                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="{acctgTransId:acctgTrans.acctgTransId}"/>
+                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="{acctgTransId:acctgTrans.acctgTransId}"/>
             </iterate>
 
             <!-- now post the AssetIssuance again (if has acquireCost and ownerPartyId) -->
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
                 <field-map field-name="assetId" from="assetIssuance.assetId"/></entity-find-one>
-            <if condition="asset?.acquireCost &amp;&amp; asset?.ownerPartyId">
-                <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetIssuance" in-map="[assetIssuanceId:assetIssuanceId]"/></if>
+            <if condition="asset?.acquireCost != null &amp;&amp; !toDecimal(asset.acquireCost).isZero() &amp;&amp; asset.ownerPartyId">
+                <service-call name="mantle.ledger.AssetAutoPostServices.post#AssetIssuance" in-map="{assetIssuanceId:assetIssuanceId}"/></if>
         </actions>
     </service>
 
@@ -446,48 +446,55 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/>
             </if>
 
-            <if condition="!asset.acquireCost"><message error="true">Asset [${assetId}] has no Acquire Cost, not calculating depreciation</message></if>
+            <if condition="asset.acquireCost == null || toDecimal(asset.acquireCost).isZero()"><message error="true">Asset [${assetId}] has no Acquire Cost, not calculating depreciation</message></if>
             <if condition="!asset.acquiredDate"><message error="true">Asset [${assetId}] has no Acquired Date, not calculating depreciation</message></if>
             <if condition="!asset.expectedEndOfLife"><message error="true">Asset [${assetId}] has no Expected End of Life, not calculating depreciation</message></if>
             <check-errors/>
 
+            <!-- A Date field reaches a script as epoch millis text at UTC midnight (or as yyyy-mm-dd), so its years and days of
+                the year are taken in UTC. A Timestamp (acquiredDate, transactionDate) is taken in the user's time zone as
+                Calendar did in the Groovy service (ec.user.nowCalendar), so the useful life years of an asset acquired at
+                2020-01-01 UTC is 11 in a zone behind UTC and 10 elsewhere, as in Java; plusMonths clamps the day as Calendar.add does -->
             <script><![CDATA[
-                Calendar nowCalendar = ec.user.nowCalendar
+                function dateOf(value, isTimestamp) {
+                    const text = String(value)
+                    if (/^-?\d+$/.test(text)) {
+                        const at = new Date(Number(text))
+                        if (isTimestamp) return new Date(Date.UTC(at.getFullYear(), at.getMonth(), at.getDate()))
+                        return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()))
+                    }
+                    const [y, m, d] = text.slice(0, 10).split('-').map(Number)
+                    return new Date(Date.UTC(y, m - 1, d))
+                }
+                function plusMonths(dt, n) {
+                    const first = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + n, 1))
+                    const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate()
+                    return new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), Math.min(dt.getUTCDate(), last)))
+                }
+                function dayOfYear(dt) { return Math.round((dt.getTime() - Date.UTC(dt.getUTCFullYear(), 0, 1)) / 86400000) + 1 }
 
-                Calendar acquiredCal = nowCalendar.clone()
-                acquiredCal.setTime(asset.acquiredDate)
-                Calendar expectedEndOfLifeCal = nowCalendar.clone()
-                expectedEndOfLifeCal.setTime(asset.expectedEndOfLife)
+                const acquiredDt = dateOf(asset.acquiredDate, true)
+                const endOfLifeDt = dateOf(asset.expectedEndOfLife)
+                // use integer number of years, partial year depreciation is not common and should be needed (may cause issues)
+                usefulLifeYears = endOfLifeDt.getUTCFullYear() - acquiredDt.getUTCFullYear()
 
-                usefulLifeYears = expectedEndOfLifeCal.get(Calendar.YEAR) - acquiredCal.get(Calendar.YEAR)
-                /* use integer number of years, partial year depreciation is not common and should be needed (may cause issues)
-                int days = expectedEndOfLifeCal.get(Calendar.DAY_OF_YEAR) - acquiredCal.get(Calendar.DAY_OF_YEAR)
-                // NOTE: using 365 days isn't always correct, should use number of days in expectedEndOfLife year, but shouldn't matter much
-                int daysInYear = 365
-                if (days < 0) { yearsInt = yearsInt - 1; days = daysInYear + days }
-                usefulLifeYears = (yearsInt as BigDecimal) + days/daysInYear
-                */
-
-                Calendar txCal = nowCalendar.clone()
-                txCal.setTime(transactionDate)
-                yearsRemaining = expectedEndOfLifeCal.get(Calendar.YEAR) -  txCal.get(Calendar.YEAR)
+                const txDt = dateOf(transactionDate, true)
+                yearsRemaining = endOfLifeDt.getUTCFullYear() - txDt.getUTCFullYear()
                 // if we are before the day in the year of end of life, add 1 year (we haven't gone to the next year for this asset)
-                boolean txBeforeDayOfYear = false
-                if (txCal.get(Calendar.DAY_OF_YEAR) < expectedEndOfLifeCal.get(Calendar.DAY_OF_YEAR) - 1) {
-                    yearsRemaining = yearsRemaining + 1I
+                let txBeforeDayOfYear = false
+                if (dayOfYear(txDt) < dayOfYear(endOfLifeDt) - 1) {
+                    yearsRemaining = yearsRemaining + 1
                     txBeforeDayOfYear = true
                 }
 
                 // see if it is the last period for each depreciation year (based on Asset.expectedEndOfLife)
-                Calendar nextMonthCal =  txCal.clone()
-                nextMonthCal.add(Calendar.MONTH, 1)
-                isLastYearPeriod = (txBeforeDayOfYear && nextMonthCal.get(Calendar.DAY_OF_YEAR) > expectedEndOfLifeCal.get(Calendar.DAY_OF_YEAR))
+                isLastYearPeriod = (txBeforeDayOfYear && dayOfYear(plusMonths(txDt, 1)) > dayOfYear(endOfLifeDt))
             ]]></script>
 
-            <set field="netBookValue" from="asset.acquireCost - (asset.salvageValue ?: 0) - (asset.depreciation ?: 0)"/>
-            <set field="yearBeginNetBookValue" from="asset.acquireCost - (asset.salvageValue ?: 0) - (asset.yearBeginDepreciation ?: 0)"/>
+            <set field="netBookValue" from="toDecimal(asset.acquireCost).subtract(asset.salvageValue ?? 0).subtract(asset.depreciation ?? 0)"/>
+            <set field="yearBeginNetBookValue" from="toDecimal(asset.acquireCost).subtract(asset.salvageValue ?? 0).subtract(asset.yearBeginDepreciation ?? 0)"/>
 
-            <if condition="netBookValue == 0">
+            <if condition="netBookValue.isZero()">
                 <log level="trace" message="Asset [${assetId}], is fully depreciated (net book value is zero)"/>
                 <set field="annualDepreciation" from="0"/>
                 <set field="monthlyDepreciation" from="0"/>
@@ -498,7 +505,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <then>
                     <!-- Straight Line -->
                     <!-- require acquireCost, acquiredDate, expectedEndOfLife; optional salvageValue, depreciation (both default to 0) -->
-                    <set field="annualDepreciation" from="(asset.acquireCost - (asset.salvageValue ?: 0)) / usefulLifeYears"/>
+                    <set field="annualDepreciation" from="toDecimal(asset.acquireCost).subtract(asset.salvageValue ?? 0).divide(usefulLifeYears)"/>
                 </then>
                 <else-if condition="asset.depreciationTypeEnumId == 'DtpDoubleDeclining'">
                     <!-- Double Declining -->
@@ -506,16 +513,17 @@ along with this software (see the LICENSE.md file). If not, see
                     <if condition="yearsRemaining == 1">
                         <!-- handle last year where full net book value should be used -->
                         <then><set field="annualDepreciation" from="yearBeginNetBookValue"/></then>
-                        <else><set field="annualDepreciation" from="yearBeginNetBookValue * (2 / usefulLifeYears)"/></else>
+                        <else><set field="annualDepreciation" from="yearBeginNetBookValue.multiply(toDecimal(2).divide(usefulLifeYears))"/></else>
                     </if>
                 </else-if>
                 <else-if condition="asset.depreciationTypeEnumId == 'DtpSumYearsDigits'">
                     <!-- Sum of Years Digits -->
                     <script><![CDATA[
-                        sumOfYearsDigits = 0I
-                        for (int i = usefulLifeYears; i > 0; i--) sumOfYearsDigits += i
+                        let digits = 0
+                        for (let i = usefulLifeYears; i > 0; i--) digits += i
+                        sumOfYearsDigits = digits
                     ]]></script>
-                    <set field="annualDepreciation" from="(asset.acquireCost - (asset.salvageValue ?: 0)) * (yearsRemaining / sumOfYearsDigits)"/>
+                    <set field="annualDepreciation" from="toDecimal(asset.acquireCost).subtract(asset.salvageValue ?? 0).multiply(toDecimal(yearsRemaining).divide(sumOfYearsDigits))"/>
                 </else-if>
                 <!-- TODO support DtpUnitsProduction (specify a meter to use for the calculation?)
                 <else-if condition="asset.depreciationTypeEnumId == 'DtpUnitsProduction'">
@@ -527,13 +535,13 @@ along with this software (see the LICENSE.md file). If not, see
                 </else>
             </if>
 
-            <if condition="annualDepreciation"><then>
-                <if condition="annualDepreciation &gt; yearBeginNetBookValue">
+            <if condition="annualDepreciation != null &amp;&amp; !toDecimal(annualDepreciation).isZero()"><then>
+                <if condition="toDecimal(annualDepreciation).compare(yearBeginNetBookValue) &gt; 0">
                     <set field="annualDepreciation" from="yearBeginNetBookValue"/></if>
-                <set field="annualDepreciation" from="((BigDecimal) annualDepreciation).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+                <set field="annualDepreciation" from="toDecimal(annualDepreciation).setScale(2, 'HALF_UP')"/>
 
-                <set field="monthlyDepreciation" from="(annualDepreciation / 12).setScale(2, BigDecimal.ROUND_HALF_UP)"/>
-                <if condition="monthlyDepreciation &gt; netBookValue"><set field="monthlyDepreciation" from="netBookValue"/></if>
+                <set field="monthlyDepreciation" from="annualDepreciation.divide(12).setScale(2, 'HALF_UP')"/>
+                <if condition="monthlyDepreciation.compare(netBookValue) &gt; 0"><set field="monthlyDepreciation" from="netBookValue"/></if>
             </then><else>
                 <set field="annualDepreciation" from="0"/>
                 <set field="monthlyDepreciation" from="0"/>
@@ -569,7 +577,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
 
             <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="papOut"
-                    in-map="[organizationPartyId:organizationPartyId]"/>
+                    in-map="{organizationPartyId:organizationPartyId}"/>
             <set field="partyAcctgPreference" from="papOut.partyAcctgPreference"/>
             <!-- if no preference we shouldn't post anything -->
             <if condition="!partyAcctgPreference">
@@ -579,7 +587,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- if no transactionDate set from TimePeriod.thruDate -->
             <if condition="!transactionDate">
-                <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="[timePeriodId:timePeriodId]" out-map="periodInfo"/>
+                <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="{timePeriodId:timePeriodId}" out-map="periodInfo"/>
                 <set field="transactionDate" from="periodInfo.thruTimestampLate"/>
             </if>
 
@@ -592,15 +600,15 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- get assetTypeGlAccount -->
             <service-call name="mantle.ledger.AssetAutoPostServices.get#AssetTypeGlAccount" out-map="context"
-                    in-map="[organizationPartyId:organizationPartyId, assetTypeEnumId:asset.assetTypeEnumId,
-                        classEnumId:asset.classEnumId, assetId:asset.assetId]"/>
+                    in-map="{organizationPartyId:organizationPartyId, assetTypeEnumId:asset.assetTypeEnumId,
+                        classEnumId:asset.classEnumId, assetId:asset.assetId}"/>
 
             <!-- determine accDepreciationGlAccountId (credit; GatFaAccumDepreciation) -->
             <set field="accDepreciationGlAccountId" from="assetTypeGlAccount?.accDepreciationGlAccountId"/>
             <if condition="!accDepreciationGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="accDepreciationGlAccountOut"
-                        in-map="[glAccountTypeEnumId:'GatFaAccumDepreciation', acctgTransTypeEnumId:acctgTransTypeEnumId,
-                            organizationPartyId:organizationPartyId, otherPartyId:null]"/>
+                        in-map="{glAccountTypeEnumId:'GatFaAccumDepreciation', acctgTransTypeEnumId:acctgTransTypeEnumId,
+                            organizationPartyId:organizationPartyId, otherPartyId:null}"/>
                 <set field="accDepreciationGlAccountId" from="accDepreciationGlAccountOut.glAccountId"/>
             </if>
             <if condition="accDepreciationGlAccountId">
@@ -613,8 +621,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="depreciationGlAccountId" from="assetTypeGlAccount?.depreciationGlAccountId"/>
             <if condition="!depreciationGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="depreciationGlAccountOut"
-                        in-map="[glAccountTypeEnumId:'GatFaDepreciation', acctgTransTypeEnumId:acctgTransTypeEnumId,
-                            organizationPartyId:organizationPartyId, otherPartyId:null]"/>
+                        in-map="{glAccountTypeEnumId:'GatFaDepreciation', acctgTransTypeEnumId:acctgTransTypeEnumId,
+                            organizationPartyId:organizationPartyId, otherPartyId:null}"/>
                 <set field="depreciationGlAccountId" from="depreciationGlAccountOut.glAccountId"/>
             </if>
             <if condition="depreciationGlAccountId">
@@ -628,45 +636,45 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- create the AcctgTrans -->
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTrans" out-map="context"
-                    in-map="[acctgTransTypeEnumId:'AttDepreciation', organizationPartyId:organizationPartyId,
+                    in-map="{acctgTransTypeEnumId:'AttDepreciation', organizationPartyId:organizationPartyId,
                         otherPartyId:null, amountUomId:asset.acquireCostUomId, assetIssuanceId:assetIssuanceId,
-                        assetId:asset.assetId, transactionDate:transactionDate]"/>
+                        assetId:asset.assetId, transactionDate:transactionDate}"/>
             <!-- note: could populate invoiceId, etc... but should we? for now no -->
 
             <set field="useErrorJournal" from="false"/>
             <!-- Credit to accDepreciationGlAccountId (GatFaAccumDepreciation) -->
             <if condition="!accDepreciationGlAccountId"><set field="useErrorJournal" from="true"/></if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                    in-map="[acctgTransId:acctgTransId, debitCreditFlag:'C', glAccountTypeEnumId:accDepreciationGlAccountTypeEnumId,
-                        glAccountId:accDepreciationGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId]"/>
+                    in-map="{acctgTransId:acctgTransId, debitCreditFlag:'C', glAccountTypeEnumId:accDepreciationGlAccountTypeEnumId,
+                        glAccountId:accDepreciationGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId}"/>
             <!-- Debit to depreciationGlAccountId (GatFaDepreciation) -->
             <if condition="!depreciationGlAccountId"><set field="useErrorJournal" from="true"/></if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                    in-map="[acctgTransId:acctgTransId, debitCreditFlag:'D', glAccountTypeEnumId:depreciationGlAccountTypeEnumId,
-                        glAccountId:depreciationGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId]"/>
+                    in-map="{acctgTransId:acctgTransId, debitCreditFlag:'D', glAccountTypeEnumId:depreciationGlAccountTypeEnumId,
+                        glAccountId:depreciationGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId}"/>
 
             <if condition="useErrorJournal"><then>
                 <!-- put in the error journal for the org -->
                 <if condition="partyAcctgPreference?.errorGlJournalId">
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
-                            in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
+                            in-map="{acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId}"/>
                 </if>
             </then><else>
                 <!-- call the post service -->
-                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="[acctgTransId:acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="{acctgTransId:acctgTransId}"/>
             </else></if>
 
             <!-- update Asset.depreciation and Asset.yearBeginDepreciation -->
-            <set field="asset.depreciation" from="(asset.depreciation ?: 0) + monthlyDepreciation"/>
+            <set field="asset.depreciation" from="toDecimal(asset.depreciation ?? 0).add(monthlyDepreciation)"/>
             <if condition="isLastYearPeriod">
-                <set field="asset.yearBeginDepreciation" from="(asset.yearBeginDepreciation ?: 0) + annualDepreciation"/></if>
+                <set field="asset.yearBeginDepreciation" from="toDecimal(asset.yearBeginDepreciation ?? 0).add(annualDepreciation)"/></if>
             <entity-update value-field="asset"/>
 
             <!-- create the AssetDepreciation history record -->
-            <service-call name="create#mantle.product.asset.AssetDepreciation" in-map="[assetId:assetId,
+            <service-call name="create#mantle.product.asset.AssetDepreciation" in-map="{assetId:assetId,
                     timePeriodId:timePeriodId, monthlyDepreciation:monthlyDepreciation, annualDepreciation:annualDepreciation,
                     isLastYearPeriod:(isLastYearPeriod ? 'Y' : 'N'), yearBeginDepreciation:asset.yearBeginDepreciation,
-                    usefulLifeYears:usefulLifeYears, yearsRemaining:yearsRemaining, acctgTransId:acctgTransId]"/>
+                    usefulLifeYears:usefulLifeYears, yearsRemaining:yearsRemaining, acctgTransId:acctgTransId}"/>
         </actions>
     </service>
     <service verb="calculateAndPost" noun="FixedAssetDepreciation">
@@ -691,7 +699,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.party.time.TimePeriod" value-field="timePeriod"/>
             <!-- if no transactionDate set from TimePeriod.thruDate -->
             <if condition="transactionDate == null">
-                <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="[timePeriod:timePeriod]" out-map="periodInfo"/>
+                <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="{timePeriod:timePeriod}" out-map="periodInfo"/>
                 <set field="transactionDate" from="periodInfo.thruTimestampLate"/>
             </if>
             <if condition="timePeriod.timePeriodTypeId != 'FiscalMonth'">
@@ -699,7 +707,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <service-call name="mantle.ledger.AssetAutoPostServices.calculate#FixedAssetDepreciation"
                     in-map="context" out-map="context"/>
-            <if condition="monthlyDepreciation">
+            <if condition="monthlyDepreciation != null &amp;&amp; !toDecimal(monthlyDepreciation).isZero()">
                 <service-call name="mantle.ledger.AssetAutoPostServices.post#FixedAssetDepreciation"
                         in-map="context" out-map="context"/>
             </if>
@@ -720,23 +728,23 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="timePeriod.timePeriodTypeId != 'FiscalMonth'">
                 <return error="true" message="Can only post fixed asset depreciation to Fiscal Month periods"/></if>
             <if condition="!transactionDate">
-                <set field="transactionDate" from="new Timestamp(timePeriod.thruDate.time - 1)"/></if>
+                <set field="transactionDate" from="String(Number(timePeriod.thruDate) - 1)"/></if>
 
             <service-call name="mantle.ledger.LedgerServices.expand#ChildOrganizationList" out-map="expandResult"
-                    in-map="[organizationPartyId:timePeriod.partyId, onlyWithNoAcctgPreference:true]"/>
+                    in-map="{organizationPartyId:timePeriod.partyId, onlyWithNoAcctgPreference:true}"/>
             <set field="orgPartyIdList" from="expandResult.orgPartyIdList"/>
-            <if condition="!orgPartyIdList.contains(timePeriod.partyId)">
-                <script>orgPartyIdList.add(timePeriod.partyId)</script></if>
+            <if condition="!orgPartyIdList.includes(timePeriod.partyId)">
+                <script>orgPartyIdList.push(timePeriod.partyId)</script></if>
             <entity-find entity-name="mantle.product.asset.Asset" list="assetList">
-                <econdition field-name="ownerPartyId" operator="in" from="expandResult.orgPartyIdList"/>
+                <econdition field-name="ownerPartyId" operator="in" from="orgPartyIdList"/>
                 <econdition field-name="depreciationTypeEnumId" operator="not-equals" from="null"/>
                 <order-by field-name="assetId"/>
             </entity-find>
 
-            <log level="info" message="Calculating and posting depreciation for organizations: ${expandResult.orgPartyIdList}, assets: ${assetList.assetId}"/>
+            <log level="info" message="Calculating and posting depreciation for organizations: ${orgPartyIdList}, assets: ${assetList.map((asset) =&gt; asset.assetId)}"/>
             <iterate list="assetList" entry="asset">
                 <service-call name="mantle.ledger.AssetAutoPostServices.calculateAndPost#FixedAssetDepreciation"
-                        in-map="[assetId:asset.assetId, timePeriodId:timePeriodId, transactionDate:transactionDate]"/>
+                        in-map="{assetId:asset.assetId, timePeriodId:timePeriodId, transactionDate:transactionDate}"/>
             </iterate>
         </actions>
     </service>
@@ -749,7 +757,7 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.product.asset.AssetDetail" value-field="assetDetail" for-update="true"/>
             <if condition="!assetDetail.physicalInventoryId"><return/></if>
-            <if condition="!assetDetail.quantityOnHandDiff"><return/></if>
+            <if condition="assetDetail.quantityOnHandDiff == null || toDecimal(assetDetail.quantityOnHandDiff).isZero()"><return/></if>
 
             <set field="assetId" from="assetDetail.assetId"/>
             <set field="physicalInventoryId" from="assetDetail.physicalInventoryId"/>
@@ -772,10 +780,10 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
-            <if condition="existingTransList">
-                <return message="Physical Inventory change in asset detail ${assetDetailId}, physical inventory ${assetDetail.physicalInventoryId} has already been posted in accounting transaction ${existingTransList*.acctgTransId}"/></if>
+            <if condition="(existingTransList?.length > 0)">
+                <return message="Physical Inventory change in asset detail ${assetDetailId}, physical inventory ${assetDetail.physicalInventoryId} has already been posted in accounting transaction [${existingTransList.map((trans) =&gt; trans.acctgTransId).join(', ')}]"/></if>
 
-            <set field="transactionDate" from="physicalInventory.physicalInventoryDate ?: assetDetail.effectiveDate"/>
+            <set field="transactionDate" from="physicalInventory.physicalInventoryDate || assetDetail.effectiveDate"/>
             <set field="organizationPartyId" from="asset.ownerPartyId"/>
             <if condition="!organizationPartyId">
                 <log level="trace" message="Not posting Physical Inventory ${assetDetail.physicalInventoryId} variance for Asset Detail ${assetDetailId}, Asset ${assetId} has no Owner Party"/>
@@ -784,12 +792,12 @@ along with this software (see the LICENSE.md file). If not, see
                 <return/>
             </if>
 
-            <set field="isFound" from="assetDetail.quantityOnHandDiff &gt; 0"/>
-            <set field="quantity" from="assetDetail.quantityOnHandDiff &gt; 0 ? assetDetail.quantityOnHandDiff : -assetDetail.quantityOnHandDiff"/>
-            <set field="amount" from="quantity * asset.acquireCost"/>
+            <set field="isFound" from="toDecimal(assetDetail.quantityOnHandDiff).compare(0) &gt; 0"/>
+            <set field="quantity" from="isFound ? toDecimal(assetDetail.quantityOnHandDiff) : toDecimal(assetDetail.quantityOnHandDiff).multiply(-1)"/>
+            <set field="amount" from="quantity.multiply(asset.acquireCost)"/>
 
             <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="papOut"
-                    in-map="[organizationPartyId:organizationPartyId]"/>
+                    in-map="{organizationPartyId:organizationPartyId}"/>
             <set field="partyAcctgPreference" from="papOut.partyAcctgPreference"/>
             <!-- if no preference we shouldn't post anything -->
             <if condition="!partyAcctgPreference">
@@ -801,8 +809,8 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- get assetTypeGlAccount -->
             <service-call name="mantle.ledger.AssetAutoPostServices.get#AssetTypeGlAccount" out-map="context"
-                    in-map="[organizationPartyId:organizationPartyId, assetTypeEnumId:asset.assetTypeEnumId,
-                        classEnumId:asset.classEnumId, assetId:asset.assetId]"/>
+                    in-map="{organizationPartyId:organizationPartyId, assetTypeEnumId:asset.assetTypeEnumId,
+                        classEnumId:asset.classEnumId, assetId:asset.assetId}"/>
 
             <!-- determine the acctgTransTypeEnumId, etc based on assetTypeEnumId; only used if values not set on AssetTypeGlAccount -->
             <if condition="asset.assetTypeEnumId == 'AstTpInventory'"><then>
@@ -820,8 +828,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="varianceGlAccountId" from="isFound ? assetTypeGlAccount?.foundGlAccountId : assetTypeGlAccount?.shrinkageGlAccountId"/>
             <if condition="!varianceGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="creditGlAccountOut"
-                        in-map="[glAccountTypeEnumId:varianceGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
-                            organizationPartyId:organizationPartyId, otherPartyId:null]"/>
+                        in-map="{glAccountTypeEnumId:varianceGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
+                            organizationPartyId:organizationPartyId, otherPartyId:null}"/>
                 <set field="varianceGlAccountId" from="creditGlAccountOut.glAccountId"/>
             </if>
             <if condition="varianceGlAccountId">
@@ -834,8 +842,8 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="assetGlAccountId" from="assetTypeGlAccount?.assetGlAccountId"/>
             <if condition="!assetGlAccountId">
                 <service-call name="mantle.ledger.LedgerServices.get#DefaultGlAccountByType" out-map="assetGlAccountOut"
-                        in-map="[glAccountTypeEnumId:assetGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
-                            organizationPartyId:organizationPartyId, otherPartyId:null]"/>
+                        in-map="{glAccountTypeEnumId:assetGlAccountTypeEnumId, acctgTransTypeEnumId:acctgTransTypeEnumId,
+                            organizationPartyId:organizationPartyId, otherPartyId:null}"/>
                 <set field="assetGlAccountId" from="assetGlAccountOut.glAccountId"/>
             </if>
             <if condition="assetGlAccountId">
@@ -847,32 +855,32 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- create the AcctgTrans -->
             <set field="useErrorJournal" from="false"/>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTrans" out-map="context"
-                    in-map="[acctgTransTypeEnumId:acctgTransTypeEnumId, organizationPartyId:organizationPartyId,
+                    in-map="{acctgTransTypeEnumId:acctgTransTypeEnumId, organizationPartyId:organizationPartyId,
                         otherPartyId:null, amountUomId:asset.acquireCostUomId, physicalInventoryId:physicalInventoryId,
-                        assetId:asset.assetId, transactionDate:transactionDate]"/>
+                        assetId:asset.assetId, transactionDate:transactionDate}"/>
             <!-- note: could populate invoiceId, etc... but should we? for now no -->
 
             <!-- Credit to GatUnreceivedInventory or GatUnreceivedFixedAsset (look for assetTypeEnumId=AstTpFixed or parentEnumId=AstTpFixed) -->
             <if condition="!varianceGlAccountId"><set field="useErrorJournal" from="true"/></if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                    in-map="[acctgTransId:acctgTransId, debitCreditFlag:(isFound ? 'C' : 'D'), glAccountTypeEnumId:varianceGlAccountTypeEnumId,
-                        glAccountId:varianceGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId]"/>
+                    in-map="{acctgTransId:acctgTransId, debitCreditFlag:(isFound ? 'C' : 'D'), glAccountTypeEnumId:varianceGlAccountTypeEnumId,
+                        glAccountId:varianceGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId}"/>
 
             <!-- Debit to GatInventory or GatFixedAsset -->
             <if condition="!assetGlAccountId"><set field="useErrorJournal" from="true"/></if>
             <service-call name="mantle.ledger.LedgerServices.create#AcctgTransEntry"
-                    in-map="[acctgTransId:acctgTransId, debitCreditFlag:(isFound ? 'D' : 'C'), glAccountTypeEnumId:assetGlAccountTypeEnumId,
-                        glAccountId:assetGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId]"/>
+                    in-map="{acctgTransId:acctgTransId, debitCreditFlag:(isFound ? 'D' : 'C'), glAccountTypeEnumId:assetGlAccountTypeEnumId,
+                        glAccountId:assetGlAccountId, amount:amount, productId:asset.productId, assetId:asset.assetId}"/>
 
             <if condition="useErrorJournal"><then>
                 <!-- put in the error journal for the org -->
                 <if condition="partyAcctgPreference?.errorGlJournalId">
                     <service-call name="update#mantle.ledger.transaction.AcctgTrans"
-                            in-map="[acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId]"/>
+                            in-map="{acctgTransId:acctgTransId, glJournalId:partyAcctgPreference.errorGlJournalId}"/>
                 </if>
             </then><else>
                 <!-- call the post service -->
-                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="[acctgTransId:acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.post#AcctgTrans" in-map="{acctgTransId:acctgTransId}"/>
             </else></if>
 
             <!-- set acctg trans result to Success -->
@@ -886,7 +894,7 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.product.asset.AssetDetail" value-field="assetDetail" for-update="true"/>
             <if condition="!assetDetail.physicalInventoryId"><return/></if>
-            <if condition="!assetDetail.quantityOnHandDiff"><return/></if>
+            <if condition="assetDetail.quantityOnHandDiff == null || toDecimal(assetDetail.quantityOnHandDiff).isZero()"><return/></if>
 
             <entity-find entity-name="mantle.ledger.transaction.AcctgTrans" list="existingTransList">
                 <econdition field-name="physicalInventoryId" from="assetDetail.physicalInventoryId"/>
@@ -895,18 +903,18 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="reversedByAcctgTransId" from="null"/>
                 <econdition field-name="reverseOfAcctgTransId" from="null"/>
             </entity-find>
-            <if condition="!existingTransList"><log level="warn" message="In repost#PhysicalInventoryVariance ${assetDetailId} no existing AcctgTrans records found"/></if>
+            <if condition="!existingTransList?.length"><log level="warn" message="In repost#PhysicalInventoryVariance ${assetDetailId} no existing AcctgTrans records found"/></if>
             <!-- unpost and delete existing -->
             <iterate list="existingTransList" entry="acctgTrans">
-                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
-                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="[acctgTransId:acctgTrans.acctgTransId]"/>
+                <service-call name="mantle.ledger.LedgerServices.unpost#AcctgTrans" in-map="{acctgTransId:acctgTrans.acctgTransId}"/>
+                <service-call name="mantle.ledger.LedgerServices.delete#AcctgTrans" in-map="{acctgTransId:acctgTrans.acctgTransId}"/>
             </iterate>
 
             <!-- now post the PhysicalInventoryVariance again (if has acquireCost and ownerPartyId) -->
             <entity-find-one entity-name="mantle.product.asset.Asset" value-field="asset">
                 <field-map field-name="assetId" from="assetDetail.assetId"/></entity-find-one>
-            <if condition="asset?.acquireCost &amp;&amp; asset?.ownerPartyId">
-                <service-call name="mantle.ledger.AssetAutoPostServices.post#PhysicalInventoryVariance" in-map="[assetDetailId:assetDetailId]"/></if>
+            <if condition="asset?.acquireCost != null &amp;&amp; !toDecimal(asset.acquireCost).isZero() &amp;&amp; asset.ownerPartyId">
+                <service-call name="mantle.ledger.AssetAutoPostServices.post#PhysicalInventoryVariance" in-map="{assetDetailId:assetDetailId}"/></if>
         </actions>
     </service>
 
@@ -927,7 +935,7 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="assetId">
                 <entity-find entity-name="mantle.ledger.config.AssetTypeGlAccount" list="assetTypeGlAccountList" cache="true">
                     <econdition field-name="organizationPartyId"/><econdition field-name="assetId"/></entity-find>
-                <set field="assetTypeGlAccount" from="assetTypeGlAccountList ? assetTypeGlAccountList[0] : null"/>
+                <set field="assetTypeGlAccount" from="assetTypeGlAccountList.length ? assetTypeGlAccountList[0] : null"/>
             </if>
 
             <!-- try by assetTypeEnumId AND classEnumId -->
@@ -935,7 +943,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.ledger.config.AssetTypeGlAccount" list="assetTypeGlAccountList" cache="true">
                     <econdition field-name="organizationPartyId"/>
                     <econdition field-name="assetTypeEnumId"/><econdition field-name="classEnumId"/></entity-find>
-                <set field="assetTypeGlAccount" from="assetTypeGlAccountList ? assetTypeGlAccountList[0] : null"/>
+                <set field="assetTypeGlAccount" from="assetTypeGlAccountList.length ? assetTypeGlAccountList[0] : null"/>
             </if>
 
             <!-- try by assetTypeEnumId only (classEnumId == null) -->
@@ -943,7 +951,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find entity-name="mantle.ledger.config.AssetTypeGlAccount" list="assetTypeGlAccountList" cache="true">
                     <econdition field-name="organizationPartyId"/><econdition field-name="assetTypeEnumId"/>
                     <econdition field-name="classEnumId" from="null"/></entity-find>
-                <set field="assetTypeGlAccount" from="assetTypeGlAccountList ? assetTypeGlAccountList[0] : null"/>
+                <set field="assetTypeGlAccount" from="assetTypeGlAccountList.length ? assetTypeGlAccountList[0] : null"/>
             </if>
 
             <!-- not found? try the parent org -->
@@ -955,10 +963,10 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="fromRoleTypeId" value="OrgInternal"/>
                     <econdition field-name="toRoleTypeId" value="OrgInternal"/>
                 </entity-find>
-                <if condition="partyRelationshipList">
+                <if condition="(partyRelationshipList?.length > 0)">
                     <service-call name="mantle.ledger.AssetAutoPostServices.get#AssetTypeGlAccount" out-map="context"
-                            in-map="[organizationPartyId:partyRelationshipList[0].toPartyId,
-                                assetTypeEnumId:assetTypeEnumId, classEnumId:classEnumId, assetId:assetId]"/>
+                            in-map="{organizationPartyId:partyRelationshipList[0].toPartyId,
+                                assetTypeEnumId:assetTypeEnumId, classEnumId:classEnumId, assetId:assetId}"/>
                 </if>
             </if>
         </actions>
@@ -974,14 +982,14 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="assetId"/></entity-find>
             <iterate list="assetReceiptList" entry="assetReceipt">
                 <service-call name="mantle.ledger.AssetAutoPostServices.repost#AssetReceipt"
-                        in-map="[assetReceiptId:assetReceipt.assetReceiptId]"/>
+                        in-map="{assetReceiptId:assetReceipt.assetReceiptId}"/>
             </iterate>
 
             <entity-find entity-name="mantle.product.issuance.AssetIssuance" list="assetIssuanceList" for-update="true">
                 <econdition field-name="assetId"/></entity-find>
             <iterate list="assetIssuanceList" entry="assetIssuance">
                 <service-call name="mantle.ledger.AssetAutoPostServices.repost#AssetIssuance"
-                        in-map="[assetIssuanceId:assetIssuance.assetIssuanceId]"/>
+                        in-map="{assetIssuanceId:assetIssuance.assetIssuanceId}"/>
             </iterate>
 
             <entity-find entity-name="mantle.product.asset.AssetDetail" list="assetDetailList" for-update="true">
@@ -989,7 +997,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="assetId"/></entity-find>
             <iterate list="assetDetailList" entry="assetDetail">
                 <service-call name="mantle.ledger.AssetAutoPostServices.repost#PhysicalInventoryVariance"
-                        in-map="[assetDetailId:assetDetail.assetDetailId]"/>
+                        in-map="{assetDetailId:assetDetail.assetDetailId}"/>
             </iterate>
         </actions>
     </service>

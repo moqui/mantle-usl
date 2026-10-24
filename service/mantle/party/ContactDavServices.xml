@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+    <!-- The CardDAV adapter of the framework's DAV server (mr-moqui docs/Sync.md; the conf's dav-server contact-services):
+        each contact book the user may open (mantle.party.ContactBookServices.get#UserContactBooks) is an address book of
+        vCards 3.0, the cards ContactImportServices.export#Contacts writes, one per party the user may see. A personal book
+        is read and written: a new card is a personal contact (import#ContactRow), a changed card replaces the contact's
+        names and its emails, phones, addresses and websites (those no longer on the card end), and a deleted card leaves
+        the book (and is deleted when it is in no other book of the user). A shared book is read only over CardDAV: its
+        contacts are directory parties, changed on the Contacts screens. The card's own UID and the name the client stored
+        it under are kept on its ContactBookParty row (davUid, davName). -->
+
+    <service verb="get" noun="ContactObjectTags">
+        <description>The cards of a contact book for CardDAV: each current member the user may see, by its name (davName,
+            else partyId.vcf), with an entity tag over the rows its vCard is made of (the party, person or organization,
+            contact mechanisms, relationships, the book membership), and the book's ctag. No access check: the callers check
+            the book.</description>
+        <in-parameters><parameter name="contactBookId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="objectList" type="List"/>
+            <parameter name="ctag"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const userId = ec.user.userId || null
+            const hash = (text) => {
+                let a = 0x811c9dc5, b = 0x9747b28c
+                for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); a = Math.imul(a ^ c, 16777619); b = Math.imul(b ^ c, 2246822519) }
+                return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0')
+            }
+            const millis = (value) => value == null || value === '' ? '' : String(value instanceof Date ? value.getTime() : value)
+            const members = Array.from(ec.entity.find('mantle.party.contact.ContactBookPartyDetail').condition('contactBookId', contactBookId)
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null))
+                    .condition(cf.makeCondition([cf.makeCondition('privateOwnerUserId', 'equals', null), cf.makeCondition('privateOwnerUserId', 'equals', userId)], 'or'))
+                    .condition(cf.makeCondition('disabled', 'not-equals', 'Y', true)).list())
+            objectList = []
+            const ids = Array.from(new Set(members.map((row) => row.partyId)))
+            if (!ids.length) { ctag = hash(`${contactBookId}|empty`); return }
+            const stamps = new Map()
+            const add = (id, value) => { if (!stamps.has(id)) stamps.set(id, []); stamps.get(id).push(millis(value)) }
+            // the fields the card is made of, so two changes in one millisecond still change the tag
+            const partyFields = {'mantle.party.Party': ['comments', 'disabled'], 'mantle.party.Person': ['firstName', 'middleName', 'lastName',
+                'personalTitle', 'suffix', 'nickname', 'birthDate'], 'mantle.party.Organization': ['organizationName']}
+            for (const [entity, fields] of Object.entries(partyFields))
+                for (const row of Array.from(ec.entity.find(entity).condition(cf.makeCondition('partyId', 'in', ids)).list()))
+                    add(row.partyId, fields.map((field) => String(row[field] ?? '')).concat(millis(row.lastUpdatedStamp)).join('~'))
+            const mechs = Array.from(ec.entity.find('mantle.party.contact.PartyContactMech').condition(cf.makeCondition('partyId', 'in', ids)).list())
+            const mechOwners = new Map()
+            for (const row of mechs) {
+                add(row.partyId, `${row.contactMechId}~${row.contactMechPurposeId}~${millis(row.thruDate)}~${millis(row.lastUpdatedStamp)}`)
+                if (!mechOwners.has(row.contactMechId)) mechOwners.set(row.contactMechId, [])
+                mechOwners.get(row.contactMechId).push(row.partyId)
+            }
+            const mechIds = Array.from(mechOwners.keys())
+            if (mechIds.length) for (const entity of ['mantle.party.contact.ContactMech', 'mantle.party.contact.TelecomNumber', 'mantle.party.contact.PostalAddress'])
+                for (const row of Array.from(ec.entity.find(entity).condition(cf.makeCondition('contactMechId', 'in', mechIds)).list()))
+                    for (const owner of mechOwners.get(row.contactMechId) || []) add(owner, JSON.stringify(row.getMap()))
+            for (const row of Array.from(ec.entity.find('mantle.party.PartyRelationship').condition(cf.makeCondition('fromPartyId', 'in', ids))
+                    .condition(cf.makeCondition('relationshipTypeEnumId', 'in', ['PrtContact', 'PrtEmployee'])).list()))
+                add(row.fromPartyId, `rel${millis(row.lastUpdatedStamp)}`)
+            const seen = new Set()
+            for (const row of members) {
+                if (seen.has(row.partyId)) continue
+                seen.add(row.partyId)
+                const parts = [row.partyId, row.davUid || '', row.isFavorite || ''].concat((stamps.get(row.partyId) || []).sort())
+                objectList.push({partyId: row.partyId, name: row.davName || `${row.partyId}.vcf`, uid: row.davUid || null,
+                    fromDate: row.fromDate, isPersonal: row.privateOwnerUserId === userId, etag: hash(parts.join('|'))})
+            }
+            ctag = hash(objectList.map((object) => `${object.name}:${object.etag}`).sort().join('|'))
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="DavCollections">
+        <description>The CardDAV address books of the user: each contact book the user may view, read only when it is shared
+            (a personal book is the user's own to change). With collectionId only that one.</description>
+        <in-parameters><parameter name="collectionId"/></in-parameters>
+        <out-parameters><parameter name="collectionList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            collectionList = []
+            ec.service.sync().name('mantle.party.ContactBookServices.ensure#UserDefaultContactBook').call()
+            if (ec.message.hasError()) return
+            const out = ec.service.sync().name('mantle.party.ContactBookServices.get#UserContactBooks').call()
+            if (ec.message.hasError()) return
+            for (const book of Array.from(out.contactBookList || [])) {
+                if (collectionId && book.contactBookId !== collectionId) continue
+                const tags = ec.service.sync().name('mantle.party.ContactDavServices.get#ContactObjectTags').parameters({contactBookId: book.contactBookId}).call()
+                collectionList.push({collectionId: book.contactBookId, name: book.contactBookName, description: book.description ?? null,
+                    color: book.color ?? null, ctag: tags.ctag, readOnly: !(book.isOwner && book.visibilityEnumId === 'CbvPersonal')})
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="DavObjects">
+        <description>The cards of an address book, by name (objectNameList) or all, with their vCard 3.0 text (withData): the
+            text export#Contacts writes for the party, with the UID the client gave the card.</description>
+        <in-parameters>
+            <parameter name="collectionId" required="true"/>
+            <parameter name="objectNameList" type="List"/>
+            <parameter name="withData" type="Boolean" default="false"/>
+            <parameter name="componentType"/>
+            <parameter name="start" type="Long"/>
+            <parameter name="end" type="Long"/>
+        </in-parameters>
+        <out-parameters><parameter name="objectList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            objectList = []
+            ec.service.sync().name('mantle.party.ContactBookServices.check#ContactBookAccess').parameters({contactBookId: collectionId, permissionEnumId: 'CbpView'}).call()
+            if (ec.message.hasError()) return
+            const names = objectNameList ? new Set(Array.from(objectNameList).map(String)) : null
+            const tags = ec.service.sync().name('mantle.party.ContactDavServices.get#ContactObjectTags').parameters({contactBookId: collectionId}).call()
+            const wanted = Array.from(tags.objectList || []).filter((object) => !names || names.has(object.name))
+            const cards = new Map()
+            if (withData && wanted.length) {
+                const exported = ec.service.sync().name('mantle.party.ContactImportServices.export#Contacts').parameters({format: 'vcard', vcardVersion: '3.0',
+                    partyIdList: wanted.map((object) => object.partyId)}).call()
+                if (ec.message.hasError()) return
+                // one card per party, known by the UID the export writes: urn:moqui:mantle.party.Party:<partyId>
+                for (const card of String(exported.fileText || '').split(/(?=BEGIN:VCARD)/i)) {
+                    const match = /\r?\nUID:urn:moqui:mantle\.party\.Party:([^\r\n]+)/i.exec(card)
+                    if (match) cards.set(match[1].trim(), card.trim() + '\r\n')
+                }
+            }
+            for (const object of wanted) {
+                const entry = {name: object.name, etag: object.etag}
+                if (withData) {
+                    let card = cards.get(object.partyId)
+                    if (card == null) continue
+                    if (object.uid) card = card.replace(/(\r?\n)UID:[^\r\n]*/i, (all, newline) => `${newline}UID:${object.uid}`)
+                    entry.data = card
+                }
+                objectList.push(entry)
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="put" noun="DavObject">
+        <description>Store a card a CardDAV client wrote in a personal book: a new card becomes a personal contact in the book
+            (import#ContactRow, never matched to another party), a card at a known name replaces that contact's names and its
+            emails, phones, addresses and websites; the card's UID and name are kept on its book row. status 403 for a shared
+            book or a directory party, 412 when ifMatch or ifNoneMatch fails, 400 for text that is not one vCard.</description>
+        <in-parameters>
+            <parameter name="collectionId" required="true"/>
+            <parameter name="objectName" required="true"/>
+            <parameter name="data" required="true" allow-html="any"/>
+            <parameter name="ifMatch"/>
+            <parameter name="ifNoneMatch"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="etag"/>
+            <parameter name="created" type="Boolean"/>
+            <parameter name="status" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            created = false; etag = null; status = null
+            const cf = ec.entity.conditionFactory
+            const userId = ec.user.userId
+            const access = ec.service.sync().name('mantle.party.ContactBookServices.check#ContactBookAccess').parameters({contactBookId: collectionId}).call()
+            if (ec.message.hasError()) return
+            if (!access.isOwner || access.contactBook?.visibilityEnumId !== 'CbvPersonal') { status = 403; return }
+            const bare = (tag) => String(tag || '').trim().replace(/^W\//, '').replace(/"/g, '')
+            const tags = Array.from(ec.service.sync().name('mantle.party.ContactDavServices.get#ContactObjectTags').parameters({contactBookId: collectionId}).call().objectList || [])
+            const existing = tags.find((object) => object.name === objectName)
+            if (ifNoneMatch && bare(ifNoneMatch) === '*' && existing) { status = 412; return }
+            if (ifMatch && (!existing || (bare(ifMatch) !== '*' && bare(ifMatch) !== existing.etag))) { status = 412; return }
+            if (ec.factory.getToolFactory('VCard') == null) { ec.message.addError('The VCard tool is not available'); return }
+            const cards = Array.from(ec.factory.getTool('VCard').parse(String(data)) || [])
+            if (cards.length !== 1) { status = 400; return }
+            const uid = cards[0].uid || null
+            const rows = ec.service.sync().name('mantle.party.ContactImportServices.read#ContactRows').parameters({fileText: String(data), fileName: 'card.vcf'}).call()
+            if (ec.message.hasError()) return
+            const contact = (rows.contactList || [])[0]?.contact
+            if (contact == null) { status = 400; return }
+            let partyId
+            if (!existing) {
+                const imported = ec.service.sync().name('mantle.party.ContactImportServices.import#ContactRow').parameters({contact: contact,
+                    duplicatePolicy: 'create', asPersonal: true, contactBookId: collectionId}).call()
+                if (ec.message.hasError()) return
+                partyId = imported.partyId
+                created = true
+            } else {
+                partyId = existing.partyId
+                const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+                if (party == null || party.privateOwnerUserId !== userId) { status = 403; return }
+                const text = (value) => value == null ? null : (String(value).trim() || null)
+                if (party.partyTypeEnumId === 'PtyOrganization') {
+                    const org = ec.entity.find('mantle.party.Organization').condition('partyId', partyId).one()
+                    if (org != null && text(contact.organizationName)) { org.set('organizationName', text(contact.organizationName)); org.update() }
+                } else {
+                    const person = ec.entity.find('mantle.party.Person').condition('partyId', partyId).one()
+                    if (person != null) {
+                        for (const field of ['firstName', 'middleName', 'lastName', 'personalTitle', 'suffix', 'nickname']) person.set(field, text(contact[field]))
+                        person.set('birthDate', text(contact.birthDate))
+                        person.update()
+                    }
+                }
+                party.set('comments', text(contact.comments))
+                party.update()
+                // the mechanisms the card no longer has end; store#ContactParty then adds those it has that the party lacks
+                const norm = {
+                    CmtEmailAddress: (value) => String(value || '').trim().toLowerCase(),
+                    CmtWebAddress: (value) => String(value || '').trim().toLowerCase().replace(/\/+$/, ''),
+                }
+                const keep = new Set()
+                for (const email of Array.from(contact.emails || [])) keep.add('E' + norm.CmtEmailAddress(email.emailAddress))
+                for (const site of Array.from(contact.websites || [])) keep.add('W' + norm.CmtWebAddress(site.webAddress))
+                for (const phone of Array.from(contact.phones || [])) keep.add('P' + [phone.countryCode, phone.areaCode, phone.contactNumber].join('').replace(/\D/g, ''))
+                for (const address of Array.from(contact.addresses || [])) keep.add('A' + [address.address1, address.city, address.postalCode].map((part) => String(part || '').trim().toLowerCase()).join('|'))
+                for (const link of Array.from(ec.entity.find('mantle.party.contact.PartyContactMech').condition('partyId', partyId)
+                        .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list())) {
+                    const mech = ec.entity.find('mantle.party.contact.ContactMech').condition('contactMechId', link.contactMechId).one()
+                    if (mech == null) continue
+                    let key = null
+                    if (mech.contactMechTypeEnumId === 'CmtEmailAddress') key = 'E' + norm.CmtEmailAddress(mech.infoString)
+                    else if (mech.contactMechTypeEnumId === 'CmtWebAddress') key = 'W' + norm.CmtWebAddress(mech.infoString)
+                    else if (mech.contactMechTypeEnumId === 'CmtTelecomNumber') {
+                        const tn = ec.entity.find('mantle.party.contact.TelecomNumber').condition('contactMechId', link.contactMechId).one()
+                        key = 'P' + [tn?.countryCode, tn?.areaCode, tn?.contactNumber].join('').replace(/\D/g, '')
+                    } else if (mech.contactMechTypeEnumId === 'CmtPostalAddress') {
+                        const pa = ec.entity.find('mantle.party.contact.PostalAddress').condition('contactMechId', link.contactMechId).one()
+                        key = 'A' + [pa?.address1, pa?.city, pa?.postalCode].map((part) => String(part || '').trim().toLowerCase()).join('|')
+                    }
+                    if (key != null && !keep.has(key)) { link.set('thruDate', ec.user.nowTimestamp); link.update() }
+                }
+                ec.service.sync().name('mantle.party.ContactBookServices.store#ContactParty').parameters({contact: contact, partyId: partyId, updateData: true}).call()
+                if (ec.message.hasError()) return
+            }
+            const member = ec.entity.find('mantle.party.contact.ContactBookParty').condition('contactBookId', collectionId).condition('partyId', partyId)
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).one()
+            if (member != null) {
+                member.set('davName', objectName === `${partyId}.vcf` ? null : objectName)
+                member.set('davUid', uid)
+                member.update()
+            }
+            etag = Array.from(ec.service.sync().name('mantle.party.ContactDavServices.get#ContactObjectTags').parameters({contactBookId: collectionId}).call().objectList || [])
+                    .find((object) => object.partyId === partyId)?.etag ?? null
+        ]]></script></actions>
+    </service>
+
+    <service verb="delete" noun="DavObject">
+        <description>A CardDAV client's delete in a personal book: the card leaves the book, and a personal contact in no
+            other book of the user is deleted (delete#Contact). status 403 for a shared book, 404 when the name is not there,
+            412 when ifMatch fails.</description>
+        <in-parameters>
+            <parameter name="collectionId" required="true"/>
+            <parameter name="objectName" required="true"/>
+            <parameter name="ifMatch"/>
+        </in-parameters>
+        <out-parameters><parameter name="status" type="Integer"/></out-parameters>
+        <actions><script><![CDATA[
+            status = null
+            const cf = ec.entity.conditionFactory
+            const access = ec.service.sync().name('mantle.party.ContactBookServices.check#ContactBookAccess').parameters({contactBookId: collectionId}).call()
+            if (ec.message.hasError()) return
+            if (!access.isOwner || access.contactBook?.visibilityEnumId !== 'CbvPersonal') { status = 403; return }
+            const bare = (tag) => String(tag || '').trim().replace(/^W\//, '').replace(/"/g, '')
+            const object = Array.from(ec.service.sync().name('mantle.party.ContactDavServices.get#ContactObjectTags').parameters({contactBookId: collectionId}).call().objectList || [])
+                    .find((candidate) => candidate.name === objectName)
+            if (object == null) { status = 404; return }
+            if (ifMatch && bare(ifMatch) !== '*' && bare(ifMatch) !== object.etag) { status = 412; return }
+            ec.service.sync().name('mantle.party.ContactBookServices.remove#ContactBookParties').parameters({contactBookId: collectionId, partyId: object.partyId}).call()
+            if (ec.message.hasError()) return
+            const userBooks = Array.from(ec.entity.find('mantle.party.contact.ContactBook').condition('ownerUserId', ec.user.userId).selectField('contactBookId').list())
+                    .map((row) => row.contactBookId)
+            const inAnother = userBooks.length && ec.entity.find('mantle.party.contact.ContactBookParty').condition('partyId', object.partyId)
+                    .condition(cf.makeCondition('contactBookId', 'in', userBooks)).condition(cf.makeConditionDate('fromDate', 'thruDate', null)).count() > 0
+            if (object.isPersonal && !inAnother) ec.service.sync().name('mantle.party.ContactBookServices.delete#Contact').parameters({partyId: object.partyId}).call()
+        ]]></script></actions>
+    </service>
+</services>

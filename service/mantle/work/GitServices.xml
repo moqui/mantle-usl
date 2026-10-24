@@ -1,0 +1,1213 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<!-- Git repositories of projects, and their commits, branches and tags on tasks (MR Moqui, no Java counterpart). The
+    repositories are the framework's moqui.resource.GitRepository, served over HTTPS and SSH; the rules that call the
+    link services on each push or mirror fetch are service/Work.gitecas.xml. Conventions, in a repository linked to a
+    project:
+    - a task ID of the project as a word of a commit message (PROJ-100023), or a "Task: <workEffortId>" trailer for
+      any task, links the commit; "Fixes PROJ-100023" (also Closes, Resolves) completes the task when the commit
+      reaches the default branch
+    - a branch named PROJ-100023 or PROJ-100023-some-words links the branch to the task
+    - a tag named <workEffortId> or <workEffortId>/<anything> (PROJ/v1.2.0, PROJ-100023/review) links the tag to that
+      project, milestone or task; an annotated tag's message is read for task IDs as a commit's is; a tag named as a
+      release's version (1.4.0 or v1.4.0) links that release
+    - a merge request whose source branch is named for a task, or whose title or description names one, is linked to it
+      (WorkEffortGitMergeRequest; the rules of service/WorkGit.secas.xml), and Closes PROJ-100023 there completes the task
+      when it merges
+    Repository rights follow the project roles (check#GitRepositoryAuthz); review comments on a merge request's lines are
+    CommunicationEvents with a CommunicationEventGitAnchor. The guide is docs/Git-Hosting.md of mr-moqui. -->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- ========== Projects and repositories ========== -->
+
+    <service verb="add" noun="ProjectRepository">
+        <description>Link a git repository to a project.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="project"/>
+            <if condition="project?.workEffortTypeEnumId != 'WetProject'">
+                <return error="true" message="Project ${workEffortId} not found"/></if>
+            <entity-find-one entity-name="moqui.resource.GitRepository" value-field="repository"/>
+            <if condition="repository == null"><return error="true" message="Git repository ${repositoryId} not found"/></if>
+            <entity-find entity-name="mantle.work.effort.WorkEffortGitRepository" list="existingList">
+                <date-filter/><econdition field-name="workEffortId"/><econdition field-name="repositoryId"/></entity-find>
+            <if condition="existingList.length"><return/></if>
+            <service-call name="create#mantle.work.effort.WorkEffortGitRepository"
+                    in-map="{workEffortId:workEffortId, repositoryId:repositoryId, fromDate:ec.user.nowTimestamp}"/>
+        </actions>
+    </service>
+    <service verb="remove" noun="ProjectRepository">
+        <description>Unlink a git repository from a project (the links of its commits and refs stay).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find entity-name="mantle.work.effort.WorkEffortGitRepository" list="linkList">
+                <date-filter/><econdition field-name="workEffortId"/><econdition field-name="repositoryId"/></entity-find>
+            <iterate list="linkList" entry="link">
+                <service-call name="update#mantle.work.effort.WorkEffortGitRepository"
+                        in-map="{workEffortId:link.workEffortId, repositoryId:link.repositoryId, fromDate:link.fromDate, thruDate:ec.user.nowTimestamp}"/>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="create" noun="ProjectRepository">
+        <description>Make a git repository for a project and link it: kept on disk (local, the default for code) or
+            in the database (db). A content repository (a web site's images, documents and media) keeps images, video,
+            audio, PDFs and archives in Git LFS. The kind and branch not given come from the organization's repository
+            defaults (get#RepositoryDefaults), else local and main, and those defaults' merge method and default branch rule
+            are applied to it (apply#RepositoryDefaults).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId"><description>The project ID in lower case when empty</description></parameter>
+            <parameter name="repositoryKind"><description>local or db; the organization's default, else local</description></parameter>
+            <parameter name="description"/>
+            <parameter name="branch"><description>The organization's default, else main</description></parameter>
+            <parameter name="contentRepository" type="Boolean" default-value="false"/>
+            <parameter name="applyDefaults" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="repositoryId"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="project"/>
+            <if condition="project?.workEffortTypeEnumId != 'WetProject'">
+                <return error="true" message="Project ${workEffortId} not found"/></if>
+            <if condition="!repositoryId"><set field="repositoryId" from="workEffortId.toLowerCase()"/></if>
+            <if condition="!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repositoryId) || repositoryId.endsWith('.git')">
+                <return error="true" message="A repository ID has letters, digits, '_', '.' and '-', and does not end in .git"/></if>
+            <service-call name="mantle.work.GitServices.get#RepositoryDefaults" in-map="{workEffortId:workEffortId}" out-map="defaultsOut"/>
+            <if condition="!repositoryKind"><set field="repositoryKind" from="defaultsOut.defaults.storage || 'local'"/></if>
+            <if condition="!branch"><set field="branch" from="defaultsOut.defaults.branch || 'main'"/></if>
+            <if condition="!['local', 'db'].includes(repositoryKind)">
+                <return error="true" message="A project repository is local or db"/></if>
+            <entity-find-one entity-name="moqui.resource.GitRepository" value-field="existing"/>
+            <if condition="existing != null"><return error="true" message="Git repository ${repositoryId} already exists"/></if>
+            <service-call name="create#moqui.resource.GitRepository" in-map="{repositoryId:repositoryId,
+                    repositoryKind:repositoryKind, branch:branch, description:description || project.workEffortName}"/>
+            <service-call name="org.moqui.impl.GitServices.init#GitRepository"
+                    in-map="{repositoryId:repositoryId, contentRepository:contentRepository}"/>
+            <service-call name="mantle.work.GitServices.add#ProjectRepository"
+                    in-map="{workEffortId:workEffortId, repositoryId:repositoryId}"/>
+            <if condition="applyDefaults">
+                <service-call name="mantle.work.GitServices.apply#RepositoryDefaults"
+                        in-map="{repositoryId:repositoryId, defaults:defaultsOut.defaults}"/></if>
+        </actions>
+    </service>
+    <service verb="get" noun="RepositoryDefaults">
+        <description>An organization's defaults for new project repositories (the PartySetting ProjRepositoryDefaults, a JSON
+            object, kept small for its 255 characters, impl-projects.md F9): storage (local or db), branch (the default
+            branch's name), mergeMethod (GmmMerge or GmmSquash), protectDefault (Y: the default branch takes no force push or
+            delete), requireMergeRequest (Y or N), approvals (the approvals a merge needs) and dismissStale (Y: a new head
+            sets the approvals back to requested). The organization is organizationPartyId, else the project's as
+            ProjectServices.get#ProjectSettings finds it. Without a setting, or one that is not JSON (logged), defaults is
+            empty and nothing is applied.</description>
+        <in-parameters>
+            <parameter name="workEffortId"/>
+            <parameter name="organizationPartyId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="defaults" type="Map"/>
+            <parameter name="organizationPartyId"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            defaults = {}
+            if (!organizationPartyId && workEffortId) organizationPartyId = ec.service.sync().name('mantle.work.ProjectServices.get#ProjectSettings')
+                    .parameters({workEffortId}).call()?.organizationPartyId || null
+            if (!organizationPartyId) return
+            const row = ec.entity.find('mantle.party.PartySetting').condition('partyId', organizationPartyId)
+                    .condition('partySettingTypeId', 'ProjRepositoryDefaults').disableAuthz().one()
+            if (!row?.settingValue) return
+            try {
+                const parsed = JSON.parse(row.settingValue)
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) defaults = parsed
+                else ec.logger.error(`Repository defaults of ${organizationPartyId}: ProjRepositoryDefaults is not a JSON object, skipped`)
+            } catch (err) {
+                ec.logger.error(`Repository defaults of ${organizationPartyId}: ProjRepositoryDefaults is not JSON, skipped: ${err}`)
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="apply" noun="RepositoryDefaults">
+        <description>Apply an organization's repository defaults (get#RepositoryDefaults) to a new repository: its default
+            merge method, and with protectDefault Y a branch rule on its default branch (no force push or delete, the
+            merge request, approvals and stale approvals as the defaults say). An organization's policy applied when the
+            repository is made, so with authorization off; a part that fails is logged and the others still apply.</description>
+        <in-parameters>
+            <parameter name="repositoryId" required="true"/>
+            <parameter name="defaults" type="Map"/>
+            <parameter name="workEffortId"><description>To read the defaults when not given</description></parameter>
+        </in-parameters>
+        <actions><script><![CDATA[
+            let values = defaults
+            if (values == null) values = ec.service.sync().name('mantle.work.GitServices.get#RepositoryDefaults').parameters({workEffortId}).call()?.defaults || {}
+            if (!values || !Object.keys(values).length) return
+            const repo = ec.entity.find('moqui.resource.GitRepository').condition('repositoryId', repositoryId).disableAuthz().one()
+            if (repo == null) return
+            const yes = (value) => value === true || value === 'Y' || value === 'true'
+            const part = (name, run) => {
+                ec.message.pushErrors()
+                try {
+                    run()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                } catch (err) {
+                    ec.logger.error(`Repository defaults of ${repositoryId}: ${name} not applied: ${err && err.message ? err.message : err}`)
+                } finally { ec.message.clearErrors(); ec.message.popErrors() }
+            }
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                if (['GmmMerge', 'GmmSquash'].includes(values.mergeMethod) && repo.defaultMergeMethodEnumId !== values.mergeMethod) part('the merge method', () => {
+                    repo.defaultMergeMethodEnumId = values.mergeMethod
+                    repo.update()
+                })
+                if (yes(values.protectDefault)) part('the default branch rule', () => {
+                    const pattern = repo.branch || 'main'
+                    const existing = ec.entity.find('moqui.resource.GitBranchRule').condition({repositoryId, refPattern: pattern}).disableAuthz().count()
+                    if (existing > 0) return
+                    ec.service.sync().name('org.moqui.impl.GitServices.store#GitBranchRule').parameters({repositoryId, refPattern: pattern,
+                        allowForcePush: 'N', allowDelete: 'N', requireMergeRequest: yes(values.requireMergeRequest) ? 'Y' : 'N',
+                        requiredApprovals: Math.max(0, Number(values.approvals || 0) || 0), dismissStaleApprovals: yes(values.dismissStale) ? 'Y' : 'N'}).call()
+                })
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+    <service verb="get" noun="RepositoryProjects">
+        <description>The projects a git repository is linked to now.</description>
+        <in-parameters><parameter name="repositoryId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="projectIdList" type="List"/>
+            <parameter name="linkList" type="List"/>
+        </out-parameters>
+        <actions>
+            <entity-find entity-name="mantle.work.effort.WorkEffortGitRepository" list="linkList">
+                <date-filter/><econdition field-name="repositoryId"/></entity-find>
+            <set field="projectIdList" from="linkList.map(link => link.workEffortId)"/>
+        </actions>
+    </service>
+
+    <!-- ========== Task references ========== -->
+
+    <service verb="find" noun="TaskReferences">
+        <description>The tasks a text names: a word that is the ID of a task of a project linked to the repository
+            (PROJ-100023), and each Task trailer value (an ID of any task). A word right after Fix, Fixes, Fixed,
+            Close, Closes, Closed, Resolve, Resolves or Resolved (any case) marks its task to complete. At most 50
+            candidate words are read.</description>
+        <in-parameters>
+            <parameter name="repositoryId" required="true"/>
+            <parameter name="text"/>
+            <parameter name="trailerValues" type="List"><description>The values of the Task trailers</description></parameter>
+            <parameter name="projectIdList" type="List"><description>The linked projects, when the caller has them</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="referenceList" type="List"><description>Maps: workEffortId, rootWorkEffortId,
+                linkSourceEnumId (WglsMessage or WglsTrailer), complete (Boolean)</description></parameter>
+        </out-parameters>
+        <actions>
+            <if condition="projectIdList == null">
+                <service-call name="mantle.work.GitServices.get#RepositoryProjects" in-map="{repositoryId:repositoryId}"
+                        out-map="projectOut"/>
+                <set field="projectIdList" from="projectOut.projectIdList"/>
+            </if>
+            <script><![CDATA[
+                const prefixes = new Set(projectIdList ?? [])
+                const keywords = /^(fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)$/i
+                const fromText = new Map()
+                const word = /[A-Za-z0-9][A-Za-z0-9_-]*/g
+                let match
+                let previous = null
+                let candidates = 0
+                while ((match = word.exec(text ?? '')) !== null && candidates < 50) {
+                    const token = match[0].replace(/[-_]+$/, '')
+                    const dash = token.indexOf('-')
+                    if (dash > 0 && prefixes.has(token.substring(0, dash))) {
+                        candidates++
+                        const complete = previous != null && keywords.test(previous)
+                        fromText.set(token, (fromText.get(token) ?? false) || complete)
+                    }
+                    previous = token
+                }
+                const fromTrailers = new Set()
+                for (const value of trailerValues ?? []) {
+                    for (const id of String(value).split(/[\s,]+/)) {
+                        if (id) fromTrailers.add(id)
+                    }
+                }
+                textIds = Array.from(fromText.keys())
+                trailerIds = Array.from(fromTrailers)
+                completeIds = Array.from(fromText.entries()).filter(([, complete]) => complete).map(([id]) => id)
+            ]]></script>
+            <set field="referenceList" from="[]"/>
+            <if condition="textIds.length">
+                <entity-find entity-name="mantle.work.effort.WorkEffort" list="textTaskList">
+                    <econdition field-name="workEffortId" operator="in" from="textIds"/>
+                    <econdition field-name="rootWorkEffortId" operator="in" from="projectIdList"/>
+                    <econdition field-name="workEffortTypeEnumId" value="WetTask"/>
+                    <select-field field-name="workEffortId,rootWorkEffortId"/>
+                </entity-find>
+                <iterate list="textTaskList" entry="task">
+                    <!-- a trailer is the explicit form, so it names the source when the text has the ID too -->
+                    <script>referenceList.push({workEffortId:task.workEffortId, rootWorkEffortId:task.rootWorkEffortId,
+                        linkSourceEnumId:trailerIds.includes(task.workEffortId) ? 'WglsTrailer' : 'WglsMessage',
+                        complete:completeIds.includes(task.workEffortId)})</script>
+                </iterate>
+            </if>
+            <if condition="trailerIds.length">
+                <entity-find entity-name="mantle.work.effort.WorkEffort" list="trailerTaskList">
+                    <econdition field-name="workEffortId" operator="in" from="trailerIds"/>
+                    <econdition field-name="workEffortTypeEnumId" value="WetTask"/>
+                    <select-field field-name="workEffortId,rootWorkEffortId"/>
+                </entity-find>
+                <iterate list="trailerTaskList" entry="task">
+                    <if condition="!referenceList.some(ref => ref.workEffortId == task.workEffortId)">
+                        <script>referenceList.push({workEffortId:task.workEffortId, rootWorkEffortId:task.rootWorkEffortId,
+                            linkSourceEnumId:'WglsTrailer', complete:false})</script>
+                    </if>
+                </iterate>
+            </if>
+        </actions>
+    </service>
+
+    <!-- ========== Commits on tasks ========== -->
+
+    <service verb="store" noun="TaskCommit">
+        <description>Link a commit (a map as org.moqui.impl.GitServices.get#GitCommit gives it) to a work effort,
+            unless it is linked already.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId" required="true"/>
+            <parameter name="commit" type="Map" required="true"/>
+            <parameter name="refName"/>
+            <parameter name="linkSourceEnumId" default-value="WglsExplicit"/>
+        </in-parameters>
+        <out-parameters><parameter name="created" type="Boolean"/></out-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffortGitCommit" value-field="existing">
+                <field-map field-name="workEffortId"/><field-map field-name="repositoryId"/>
+                <field-map field-name="commitId" from="commit.commitId"/></entity-find-one>
+            <if condition="existing != null"><set field="created" from="false"/><return/></if>
+            <service-call name="create#mantle.work.effort.WorkEffortGitCommit" in-map="{workEffortId:workEffortId,
+                    repositoryId:repositoryId, commitId:commit.commitId, summary:(commit.summary ?? '').substring(0, 255),
+                    authorName:commit.authorName, authorEmail:commit.authorEmail, commitDate:commit.committerDate,
+                    refName:refName, linkSourceEnumId:linkSourceEnumId, linkedByUserId:ec.user.userId,
+                    linkedDate:ec.user.nowTimestamp}"/>
+            <set field="created" from="true"/>
+        </actions>
+    </service>
+    <service verb="add" noun="TaskCommit">
+        <description>Link a commit to a task by hand, by its ID or a prefix of at least 4 hex digits.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId" required="true"/>
+            <parameter name="commitId" required="true"/>
+        </in-parameters>
+        <actions>
+            <service-call name="org.moqui.impl.GitServices.get#GitCommit" out-map="found"
+                    in-map="{repositoryId:repositoryId, commitId:commitId.trim(), stats:false}"/>
+            <if condition="!found.commit"><return error="true" message="No commit ${commitId} in repository ${repositoryId}"/></if>
+            <service-call name="mantle.work.GitServices.store#TaskCommit" in-map="{workEffortId:workEffortId,
+                    repositoryId:repositoryId, commit:found.commit, linkSourceEnumId:'WglsExplicit'}"/>
+        </actions>
+    </service>
+    <service verb="remove" noun="TaskCommit">
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId" required="true"/>
+            <parameter name="commitId" required="true"/>
+        </in-parameters>
+        <actions>
+            <service-call name="delete#mantle.work.effort.WorkEffortGitCommit" in-map="context"/>
+        </actions>
+    </service>
+    <service verb="link" noun="CommitReferences">
+        <description>For the commit gitECA event: link the commit to each task its message names.</description>
+        <implements service="org.moqui.GitServices.process#GitEca"/>
+        <actions>
+            <set field="trailerValues" from="commit?.trailers?.Task ?? []"/>
+            <service-call name="mantle.work.GitServices.get#RepositoryProjects" in-map="{repositoryId:repositoryId}"
+                    out-map="projectOut"/>
+            <if condition="!projectOut.projectIdList.length &amp;&amp; !trailerValues.length"><return/></if>
+            <service-call name="mantle.work.GitServices.find#TaskReferences" out-map="refOut"
+                    in-map="{repositoryId:repositoryId, text:commit.message, trailerValues:trailerValues,
+                        projectIdList:projectOut.projectIdList}"/>
+            <iterate list="refOut.referenceList" entry="reference">
+                <service-call name="mantle.work.GitServices.store#TaskCommit" in-map="{workEffortId:reference.workEffortId,
+                        repositoryId:repositoryId, commit:commit, refName:refName, linkSourceEnumId:reference.linkSourceEnumId}"/>
+            </iterate>
+        </actions>
+    </service>
+
+    <!-- ========== Branches and tags on work efforts ========== -->
+
+    <service verb="store" noun="WorkEffortRef">
+        <description>Link a branch or tag to a work effort, or renew a link a deleted ref ended.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId" required="true"/>
+            <parameter name="refName" required="true"/>
+            <parameter name="objectId"/>
+            <parameter name="linkSourceEnumId" default-value="WglsExplicit"/>
+        </in-parameters>
+        <actions>
+            <set field="refType" from="refName.startsWith('refs/tags/') ? 'tag' : 'branch'"/>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffortGitRef" value-field="existing">
+                <field-map field-name="workEffortId"/><field-map field-name="repositoryId"/><field-map field-name="refName"/></entity-find-one>
+            <if condition="existing != null">
+                <service-call name="update#mantle.work.effort.WorkEffortGitRef" in-map="{workEffortId:workEffortId,
+                        repositoryId:repositoryId, refName:refName, objectId:objectId ?? existing.objectId, thruDate:null}"/>
+                <return/>
+            </if>
+            <service-call name="create#mantle.work.effort.WorkEffortGitRef" in-map="{workEffortId:workEffortId,
+                    repositoryId:repositoryId, refName:refName, refType:refType, objectId:objectId,
+                    linkSourceEnumId:linkSourceEnumId, linkedByUserId:ec.user.userId, linkedDate:ec.user.nowTimestamp}"/>
+        </actions>
+    </service>
+    <service verb="add" noun="WorkEffortRef">
+        <description>Link a branch or tag to a work effort by hand: a full ref name, or a branch or tag name.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId" required="true"/>
+            <parameter name="refName" required="true"/>
+        </in-parameters>
+        <actions>
+            <service-call name="org.moqui.impl.GitServices.get#GitRefs" in-map="{repositoryId:repositoryId}" out-map="refsOut"/>
+            <set field="found" from="(refsOut.refList ?? []).find(ref => ref.refName == refName.trim() || ref.shortName == refName.trim())"/>
+            <if condition="!found"><return error="true" message="No branch or tag ${refName} in repository ${repositoryId}"/></if>
+            <service-call name="mantle.work.GitServices.store#WorkEffortRef" in-map="{workEffortId:workEffortId,
+                    repositoryId:repositoryId, refName:found.refName, objectId:found.commitId ?? found.objectId,
+                    linkSourceEnumId:'WglsExplicit'}"/>
+        </actions>
+    </service>
+    <service verb="remove" noun="WorkEffortRef">
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId" required="true"/>
+            <parameter name="refName" required="true"/>
+        </in-parameters>
+        <actions>
+            <service-call name="delete#mantle.work.effort.WorkEffortGitRef" in-map="context"/>
+        </actions>
+    </service>
+    <service verb="link" noun="RefByName">
+        <description>For the tag event and a branch's ref-update create event: link the ref to the work efforts its
+            name names, under the projects linked to the repository. A tag: the name before its first '/' is the ID
+            of the project, a milestone or a task (PROJ/v1.0, PROJ-100023/review, or PROJ-100023 alone); an annotated
+            tag's message names tasks as a commit message does; a tag named as a release's version, or v and the version
+            (1.4.0, v1.4.0), links that release of a linked project. A branch: its last path segment, or the part of it
+            before a '-', is the ID of a task (PROJ-100023, feature/PROJ-100023-login-fix).</description>
+        <implements service="org.moqui.GitServices.process#GitEca"/>
+        <actions>
+            <service-call name="mantle.work.GitServices.get#RepositoryProjects" in-map="{repositoryId:repositoryId}"
+                    out-map="projectOut"/>
+            <set field="projectIdList" from="projectOut.projectIdList"/>
+            <if condition="!projectIdList.length"><return/></if>
+            <set field="isTag" from="refName.startsWith('refs/tags/')"/>
+            <set field="objectId" from="isTag ? (tag?.commitId ?? newId) : newId"/>
+            <script><![CDATA[
+                const short = refName.replace(/^refs\/(heads|tags)\//, '')
+                if (isTag) {
+                    candidateIds = [short.split('/')[0]]
+                } else {
+                    // the last path segment, then each prefix of it that ends before a '-', longest first
+                    const segment = short.split('/').pop()
+                    candidateIds = []
+                    let end = segment.length
+                    while (end > 0) {
+                        candidateIds.push(segment.substring(0, end))
+                        end = segment.lastIndexOf('-', end - 1)
+                    }
+                }
+            ]]></script>
+            <entity-find entity-name="mantle.work.effort.WorkEffort" list="namedList">
+                <econdition field-name="workEffortId" operator="in" from="candidateIds"/>
+                <select-field field-name="workEffortId,rootWorkEffortId,workEffortTypeEnumId"/>
+            </entity-find>
+            <!-- the longest name that is a work effort here: a task for a branch; the project itself, or anything
+                under it, for a tag -->
+            <set field="named" from="candidateIds.map(id => namedList.find(we => we.workEffortId == id)).find(we => we != null
+                    &amp;&amp; (isTag ? (projectIdList.includes(we.workEffortId) || projectIdList.includes(we.rootWorkEffortId))
+                        : (we.workEffortTypeEnumId == 'WetTask' &amp;&amp; projectIdList.includes(we.rootWorkEffortId))))"/>
+            <if condition="named">
+                <service-call name="mantle.work.GitServices.store#WorkEffortRef" in-map="{workEffortId:named.workEffortId,
+                        repositoryId:repositoryId, refName:refName, objectId:objectId,
+                        linkSourceEnumId:isTag ? 'WglsTagName' : 'WglsBranchName'}"/>
+            </if>
+            <!-- a tag named as a release's version, or v and the version (1.4.0, v1.4.0): the releases of the linked projects
+                whose name is that version, with or without its own v -->
+            <if condition="isTag">
+                <set field="versionName" from="refName.replace(/^refs\/tags\//, '').replace(/^[vV](?=\d)/, '')"/>
+                <if condition="/^\d[0-9A-Za-z._+-]*$/.test(versionName)">
+                    <entity-find entity-name="mantle.work.effort.WorkEffort" list="releaseList">
+                        <econdition field-name="rootWorkEffortId" operator="in" from="projectIdList"/>
+                        <econdition field-name="workEffortTypeEnumId" value="WetRelease"/>
+                        <econdition field-name="workEffortName" operator="in" from="[versionName, 'v' + versionName, 'V' + versionName]"/>
+                        <select-field field-name="workEffortId"/>
+                    </entity-find>
+                    <iterate list="releaseList" entry="release">
+                        <if condition="release.workEffortId != named?.workEffortId">
+                            <service-call name="mantle.work.GitServices.store#WorkEffortRef" in-map="{workEffortId:release.workEffortId,
+                                    repositoryId:repositoryId, refName:refName, objectId:objectId, linkSourceEnumId:'WglsReleaseVersion'}"/>
+                        </if>
+                    </iterate>
+                </if>
+            </if>
+            <if condition="isTag &amp;&amp; tag?.annotated">
+                <service-call name="mantle.work.GitServices.find#TaskReferences" out-map="refOut"
+                        in-map="{repositoryId:repositoryId, text:tag.message, projectIdList:projectIdList}"/>
+                <iterate list="refOut.referenceList" entry="reference">
+                    <if condition="reference.workEffortId != named?.workEffortId">
+                        <service-call name="mantle.work.GitServices.store#WorkEffortRef" in-map="{workEffortId:reference.workEffortId,
+                                repositoryId:repositoryId, refName:refName, objectId:objectId, linkSourceEnumId:'WglsTagMessage'}"/>
+                    </if>
+                </iterate>
+            </if>
+        </actions>
+    </service>
+    <service verb="close" noun="RefLinks">
+        <description>For a ref-update delete event: end the links of a deleted branch or tag.</description>
+        <implements service="org.moqui.GitServices.process#GitEca"/>
+        <actions>
+            <entity-find entity-name="mantle.work.effort.WorkEffortGitRef" list="linkList">
+                <econdition field-name="repositoryId"/><econdition field-name="refName"/>
+                <econdition field-name="thruDate" operator="is-null"/></entity-find>
+            <iterate list="linkList" entry="link">
+                <service-call name="update#mantle.work.effort.WorkEffortGitRef" in-map="{workEffortId:link.workEffortId,
+                        repositoryId:link.repositoryId, refName:link.refName, thruDate:ec.user.nowTimestamp}"/>
+            </iterate>
+        </actions>
+    </service>
+
+    <!-- ========== Keywords ========== -->
+
+    <service verb="apply" noun="CommitKeywords">
+        <description>For a ref-update event of the default branch: complete (and resolve) each task a commit the branch
+            gained names after Fixes, Closes or Resolves. Only commits made after the repository was linked to the task's
+            project count, so the first fetch of a mirror does not complete tasks from old history; a task already
+            complete, closed or cancelled, or whose status flow has no way to Complete from where it is, is left.</description>
+        <implements service="org.moqui.GitServices.process#GitEca"/>
+        <actions>
+            <service-call name="mantle.work.GitServices.get#RepositoryProjects" in-map="{repositoryId:repositoryId}"
+                    out-map="projectOut"/>
+            <if condition="!projectOut.projectIdList.length"><return/></if>
+            <iterate list="newCommitIds" entry="commitId">
+                <service-call name="org.moqui.impl.GitServices.get#GitCommit" out-map="found"
+                        in-map="{repositoryId:repositoryId, commitId:commitId, stats:false}"/>
+                <if condition="!found.commit"><continue/></if>
+                <service-call name="mantle.work.GitServices.find#TaskReferences" out-map="refOut"
+                        in-map="{repositoryId:repositoryId, text:found.commit.message, projectIdList:projectOut.projectIdList}"/>
+                <iterate list="refOut.referenceList" entry="reference">
+                    <if condition="!reference.complete"><continue/></if>
+                    <set field="link" from="projectOut.linkList.find(link => link.workEffortId == reference.rootWorkEffortId)"/>
+                    <!-- a commit time has whole seconds -->
+                    <if condition="!link || Number(found.commit.committerDate) + 999 &lt; Number(link.fromDate)"><continue/></if>
+                    <service-call name="mantle.work.GitServices.complete#TaskFromCommit"
+                            in-map="{workEffortId:reference.workEffortId, commitId:commitId}"/>
+                </iterate>
+            </iterate>
+        </actions>
+    </service>
+    <service verb="complete" noun="TaskFromCommit">
+        <description>Complete and resolve a task when its status flow allows it from where it is.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="commitId"/>
+        </in-parameters>
+        <out-parameters><parameter name="completed" type="Boolean"/></out-parameters>
+        <actions>
+            <set field="completed" from="false"/>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="task"/>
+            <if condition="task == null || ['WeComplete', 'WeClosed', 'WeCancelled'].includes(task.statusId)"><return/></if>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="project">
+                <field-map field-name="workEffortId" from="task.rootWorkEffortId"/></entity-find-one>
+            <set field="statusFlowId" from="task.statusFlowId || project?.statusFlowId || 'Default'"/>
+            <entity-find entity-name="moqui.basic.StatusFlowTransition" list="transitionList">
+                <econdition field-name="statusFlowId"/><econdition field-name="statusId" from="task.statusId"/>
+                <econdition field-name="toStatusId" value="WeComplete"/></entity-find>
+            <if condition="!transitionList.length">
+                <log level="info" message="Task ${workEffortId} named by commit ${commitId} cannot go from ${task.statusId} to WeComplete"/>
+                <return/>
+            </if>
+            <service-call name="update#mantle.work.effort.WorkEffort"
+                    in-map="{workEffortId:workEffortId, statusId:'WeComplete', resolutionEnumId:'WerCompleted'}"/>
+            <set field="completed" from="true"/>
+        </actions>
+    </service>
+
+    <!-- ========== Merge requests on work items (design-projects.md §7, §15 "Merge request links") ========== -->
+
+    <service verb="link" noun="MergeRequestItems">
+        <description>Link a merge request to the work items it names, in the projects its repository is linked to: the task
+            its source branch is named for (as link#RefByName reads a branch: its last path segment, or the part of it before
+            a '-'), and the keys in its title and description (find#TaskReferences). completeOnMerge: a Closes, Fixes or
+            Resolves keyword before the key, completeItems when given, else the project's WstMergeRequestMoves. A text link
+            whose key is gone from the text is removed; branch and hand-made links stay. The rule of the merge request's
+            opened and updated events (handle#MergeRequestEvent), so with authorization off.</description>
+        <in-parameters>
+            <parameter name="mergeRequestId" required="true"/>
+            <parameter name="completeItems" type="Boolean"><description>Every linked item completes on merge (true) or only
+                the Closes ones (false); the project's WstMergeRequestMoves when empty</description></parameter>
+        </in-parameters>
+        <out-parameters><parameter name="workEffortIdList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            workEffortIdList = []
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            if (mr == null) { ec.message.addError(ec.resource.expand('Merge request ${mergeRequestId} not found', '', {mergeRequestId})); return }
+            const projectOut = ec.service.sync().name('mantle.work.GitServices.get#RepositoryProjects').parameters({repositoryId: mr.repositoryId}).disableAuthz().call()
+            const projectIds = Array.from(projectOut?.projectIdList || [])
+            if (!projectIds.length) return
+            const found = new Map()
+            // the source branch's task: the last path segment, then each prefix of it that ends before a '-', longest first
+            const segment = String(mr.sourceRef || '').split('/').pop()
+            const candidates = []
+            for (let end = segment.length; end > 0; end = segment.lastIndexOf('-', end - 1)) candidates.push(segment.substring(0, end))
+            if (candidates.length) {
+                const rows = Array.from(ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', 'in', candidates)
+                        .condition('workEffortTypeEnumId', 'WetTask').condition('rootWorkEffortId', 'in', projectIds)
+                        .selectField('workEffortId,rootWorkEffortId').disableAuthz().list())
+                const named = candidates.map((id) => rows.find((row) => row.workEffortId === id)).find((row) => row)
+                if (named) found.set(named.workEffortId, {rootWorkEffortId: named.rootWorkEffortId, source: 'WglsMergeRequestBranch', complete: false})
+            }
+            const refs = ec.service.sync().name('mantle.work.GitServices.find#TaskReferences').parameters({repositoryId: mr.repositoryId,
+                text: [mr.title || '', mr.description || ''].join('\n'), projectIdList: projectIds}).disableAuthz().call()
+            const textIds = []
+            for (const reference of Array.from(refs?.referenceList || [])) {
+                if (reference.linkSourceEnumId !== 'WglsMessage') continue
+                textIds.push(reference.workEffortId)
+                const had = found.get(reference.workEffortId)
+                if (had) had.complete = had.complete || !!reference.complete
+                else found.set(reference.workEffortId, {rootWorkEffortId: reference.rootWorkEffortId, source: 'WglsMergeRequestText', complete: !!reference.complete})
+            }
+            // the project's choice: every linked item completes on merge
+            const moves = {}
+            const movesOf = (projectId) => {
+                if (!(projectId in moves)) moves[projectId] = ec.service.sync().name('mantle.work.ProjectServices.get#ProjectSettings')
+                        .parameters({workEffortId: projectId}).disableAuthz().call()?.settings?.WstMergeRequestMoves === 'Y'
+                return moves[projectId]
+            }
+            const existing = Array.from(ec.entity.find('mantle.work.effort.WorkEffortGitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().list())
+            const now = ec.user.nowTimestamp
+            for (const [workEffortId, link] of found) {
+                const complete = link.complete || (completeItems != null ? !!completeItems : movesOf(link.rootWorkEffortId))
+                const row = existing.find((one) => one.workEffortId === workEffortId)
+                if (row) {
+                    if ((row.completeOnMerge === 'Y') !== complete && row.linkSourceEnumId !== 'WglsExplicit') { row.completeOnMerge = complete ? 'Y' : 'N'; row.update() }
+                } else {
+                    ec.service.sync().name('create#mantle.work.effort.WorkEffortGitMergeRequest').parameters({workEffortId, mergeRequestId,
+                        repositoryId: mr.repositoryId, linkSourceEnumId: link.source, completeOnMerge: complete ? 'Y' : 'N',
+                        linkedByUserId: ec.user.userId || null, linkedDate: now}).disableAuthz().call()
+                }
+                workEffortIdList.push(workEffortId)
+            }
+            // a key taken out of the text takes its link with it
+            for (const row of existing) {
+                if (row.linkSourceEnumId === 'WglsMergeRequestText' && !found.has(row.workEffortId)) row.delete()
+                else if (!found.has(row.workEffortId)) workEffortIdList.push(row.workEffortId)
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="add" noun="MergeRequestItem">
+        <description>Link a work item to a merge request by hand (MergeRequestDetail's Link), for a user who may view the
+            merge request's repository; completeOnMerge Y completes the item when it merges.</description>
+        <in-parameters>
+            <parameter name="mergeRequestId" required="true"/>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="completeOnMerge" default-value="N"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            const access = mr ? ec.service.sync().name('org.moqui.impl.GitServices.get#GitRepositoryAccess').parameters({repositoryId: mr.repositoryId}).call() : null
+            if (!mr || !access?.canView) { ec.message.addError(ec.resource.expand('Merge request ${mergeRequestId} not found', '', {mergeRequestId})); return }
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null || task.workEffortTypeEnumId !== 'WetTask') { ec.message.addError(ec.resource.expand('Work item ${workEffortId} not found', '', {workEffortId})); return }
+            const row = ec.entity.find('mantle.work.effort.WorkEffortGitMergeRequest').condition({workEffortId, mergeRequestId}).disableAuthz().one()
+            const complete = completeOnMerge === 'Y' || completeOnMerge === true ? 'Y' : 'N'
+            if (row) { row.linkSourceEnumId = 'WglsExplicit'; row.completeOnMerge = complete; row.update(); return }
+            ec.service.sync().name('create#mantle.work.effort.WorkEffortGitMergeRequest').parameters({workEffortId, mergeRequestId, repositoryId: mr.repositoryId,
+                linkSourceEnumId: 'WglsExplicit', completeOnMerge: complete, linkedByUserId: ec.user.userId || null, linkedDate: ec.user.nowTimestamp}).disableAuthz().call()
+        ]]></script></actions>
+    </service>
+    <service verb="remove" noun="MergeRequestItem">
+        <description>Unlink a work item from a merge request, for a user who may view the merge request's repository.</description>
+        <in-parameters>
+            <parameter name="mergeRequestId" required="true"/>
+            <parameter name="workEffortId" required="true"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            const access = mr ? ec.service.sync().name('org.moqui.impl.GitServices.get#GitRepositoryAccess').parameters({repositoryId: mr.repositoryId}).call() : null
+            if (!mr || !access?.canView) { ec.message.addError(ec.resource.expand('Merge request ${mergeRequestId} not found', '', {mergeRequestId})); return }
+            ec.entity.find('mantle.work.effort.WorkEffortGitMergeRequest').condition({workEffortId, mergeRequestId}).disableAuthz().deleteAll()
+        ]]></script></actions>
+    </service>
+    <service verb="get" noun="MergeRequestItems">
+        <description>The work items linked to a merge request, for a user who may view its repository: workEffortId,
+            workEffortName, statusId, status, rootWorkEffortId, linkSourceEnumId, linkSource, completeOnMerge.</description>
+        <in-parameters><parameter name="mergeRequestId" required="true"/></in-parameters>
+        <out-parameters><parameter name="itemList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            itemList = []
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            const access = mr ? ec.service.sync().name('org.moqui.impl.GitServices.get#GitRepositoryAccess').parameters({repositoryId: mr.repositoryId}).call() : null
+            if (!mr || !access?.canView) { ec.message.addError(ec.resource.expand('Merge request ${mergeRequestId} not found', '', {mergeRequestId})); return }
+            const nameOf = (table, field, id) => id ? ec.entity.find(table).condition(field, id).useCache(true).disableAuthz().one()?.description || id : null
+            for (const link of Array.from(ec.entity.find('mantle.work.effort.WorkEffortGitMergeRequest').condition('mergeRequestId', mergeRequestId)
+                    .orderBy('workEffortId').disableAuthz().list())) {
+                const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', link.workEffortId).disableAuthz().one()
+                itemList.push({workEffortId: link.workEffortId, workEffortName: task?.workEffortName || '', statusId: task?.statusId || null,
+                    status: nameOf('moqui.basic.StatusItem', 'statusId', task?.statusId), rootWorkEffortId: task?.rootWorkEffortId || null,
+                    linkSourceEnumId: link.linkSourceEnumId, linkSource: nameOf('moqui.basic.Enumeration', 'enumId', link.linkSourceEnumId),
+                    completeOnMerge: link.completeOnMerge === 'Y'})
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="complete" noun="MergeRequestItems">
+        <description>On a merged merge request, complete (and resolve) its work items linked with completeOnMerge Y, each
+            where its status flow allows (complete#TaskFromCommit, with the merge commit); an item that does not complete is
+            logged and the others still do.</description>
+        <in-parameters><parameter name="mergeRequestId" required="true"/></in-parameters>
+        <out-parameters><parameter name="completedIdList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            completedIdList = []
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            if (mr == null || mr.statusId !== 'GmrMerged') return
+            for (const link of Array.from(ec.entity.find('mantle.work.effort.WorkEffortGitMergeRequest').condition('mergeRequestId', mergeRequestId)
+                    .condition('completeOnMerge', 'Y').disableAuthz().list())) {
+                ec.message.pushErrors()
+                try {
+                    const out = ec.service.sync().name('mantle.work.GitServices.complete#TaskFromCommit').parameters({workEffortId: link.workEffortId,
+                        commitId: mr.mergeCommitId || mr.headCommitId}).disableAuthz().call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    if (out?.completed) completedIdList.push(link.workEffortId)
+                } catch (err) {
+                    ec.logger.error(`Merge request ${mergeRequestId}: work item ${link.workEffortId} not completed: ${err && err.message ? err.message : err}`)
+                } finally { ec.message.clearErrors(); ec.message.popErrors() }
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="move" noun="MergeRequestItemsToReview">
+        <description>A merge request opened or marked ready: its linked work items in progress (or approved) move to In Review
+            where their status flow has it (set#TaskStatus), when their project's WstMergeRequestMoves is Y. An item that
+            does not move is logged and the others still do.</description>
+        <in-parameters><parameter name="mergeRequestId" required="true"/></in-parameters>
+        <out-parameters><parameter name="movedIdList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            movedIdList = []
+            const moves = {}
+            for (const link of Array.from(ec.entity.find('mantle.work.effort.WorkEffortGitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().list())) {
+                const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', link.workEffortId).disableAuthz().one()
+                if (task == null || !['WeInProgress', 'WeApproved'].includes(task.statusId) || !task.rootWorkEffortId) continue
+                if (!(task.rootWorkEffortId in moves)) moves[task.rootWorkEffortId] = ec.service.sync().name('mantle.work.ProjectServices.get#ProjectSettings')
+                        .parameters({workEffortId: task.rootWorkEffortId}).disableAuthz().call()?.settings?.WstMergeRequestMoves === 'Y'
+                if (!moves[task.rootWorkEffortId]) continue
+                ec.message.pushErrors()
+                try {
+                    const flow = ec.service.sync().name('mantle.work.TaskServices.get#TaskStatusFlow').parameters({workEffortId: task.workEffortId}).disableAuthz().call()
+                    if (!Array.from(flow?.transitionList || []).some((transition) => transition.toStatusId === 'WeInReview')) continue
+                    ec.service.sync().name('mantle.work.TaskServices.set#TaskStatus').parameters({workEffortId: task.workEffortId, statusId: 'WeInReview'}).disableAuthz().call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    movedIdList.push(task.workEffortId)
+                } catch (err) {
+                    ec.logger.error(`Merge request ${mergeRequestId}: work item ${task.workEffortId} not moved to In Review: ${err && err.message ? err.message : err}`)
+                } finally { ec.message.clearErrors(); ec.message.popErrors() }
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="handle" noun="MergeRequestEvent">
+        <description>The gitECA-style rules of a merge request's events (service/Work.secas.xml, after the framework's
+            org.moqui.impl.GitReviewServices services): opened, updated, ready and reopened link its work items
+            (link#MergeRequestItems), and opened or ready move them to In Review (move#MergeRequestItemsToReview); merged
+            completes them (complete#MergeRequestItems); and the reviewers and the author are told (topics MergeRequestReview
+            and MergeRequestUpdate, notify#MergeRequest). synchronize (a new head of the source) marks the review threads it
+            changed outdated (refresh#ReviewAnchors). Each rule on its own: one that fails is logged, the others and the change
+            itself stand.</description>
+        <in-parameters>
+            <parameter name="mergeRequestId" required="true"/>
+            <parameter name="action" required="true"><description>opened, updated, ready, reviewed, synchronize, closed,
+                reopened, merged or review_requested</description></parameter>
+            <parameter name="actorUserId"><description>Who made the change; the current user when empty</description></parameter>
+            <parameter name="userIdList" type="List"><description>For review_requested: the reviewers asked</description></parameter>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            if (mr == null) return
+            const actor = actorUserId || ec.user.userId || null
+            const rule = (name, run) => {
+                ec.message.pushErrors()
+                try {
+                    run()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                } catch (err) {
+                    ec.logger.error(`Merge request ${mergeRequestId} ${action}: ${name} failed: ${err && err.message ? err.message : err}`)
+                } finally { ec.message.clearErrors(); ec.message.popErrors() }
+            }
+            const call = (name, parameters) => ec.service.sync().name(name).parameters(parameters).disableAuthz().call()
+            const notify = (kind, change, userIds) => rule('the ' + kind + ' notice', () => call('mantle.work.GitServices.notify#MergeRequest',
+                    {mergeRequestId, kind, change, actorUserId: actor, userIdList: userIds || null}))
+            if (['opened', 'updated', 'ready', 'reopened'].includes(action)) rule('the work item links', () => call('mantle.work.GitServices.link#MergeRequestItems', {mergeRequestId}))
+            if ((action === 'opened' || action === 'ready') && mr.statusId === 'GmrOpen') {
+                rule('the move to In Review', () => call('mantle.work.GitServices.move#MergeRequestItemsToReview', {mergeRequestId}))
+                notify('review', null, null)
+            }
+            if (action === 'review_requested' && mr.statusId === 'GmrOpen') {
+                // the reviewers this change asked: requested with the merge request's change
+                let asked = userIdList != null ? Array.from(userIdList).map(String) : null
+                if (asked == null) {
+                    const changed = mr.lastUpdatedDate ? Number(mr.lastUpdatedDate) : 0
+                    asked = Array.from(ec.entity.find('moqui.resource.GitMergeRequestReviewer').condition({mergeRequestId, statusId: 'GmrrRequested'}).disableAuthz().list())
+                            .filter((row) => row.requestedDate && Math.abs(Number(row.requestedDate) - changed) < 10000).map((row) => row.userId)
+                }
+                if (asked.length) notify('review', null, asked)
+            }
+            if (action === 'merged' && mr.statusId === 'GmrMerged') {
+                rule('the work items completed', () => call('mantle.work.GitServices.complete#MergeRequestItems', {mergeRequestId}))
+                notify('update', 'merged', null)
+            }
+            if (action === 'synchronize') {
+                rule('the review threads', () => call('mantle.work.GitServices.refresh#ReviewAnchors', {mergeRequestId}))
+                notify('update', 'pushed new commits', null)
+            }
+            if (action === 'reviewed') {
+                const review = actor ? ec.entity.find('moqui.resource.GitMergeRequestReviewer').condition({mergeRequestId, userId: actor}).disableAuthz().one() : null
+                const change = {GmrrApproved: 'approved', GmrrChangesRequested: 'requested changes', GmrrCommented: 'reviewed'}[review?.statusId] || 'reviewed'
+                notify('update', change, null)
+            }
+            if (action === 'closed') notify('update', 'closed', null)
+        ]]></script></actions>
+    </service>
+    <service verb="notify" noun="MergeRequest">
+        <description>Tell users of a merge request's change: kind review (topic MergeRequestReview) the reviewers asked
+            (userIdList, else every reviewer still requested); kind update (topic MergeRequestUpdate, with change: approved,
+            requested changes, reviewed, commented, pushed new commits, merged, closed) its author and reviewers. Never the
+            one who made the change. Message: mergeRequestId, mergeRequestNum, title, repositoryId, sourceRef, targetRef,
+            actorName, change, the merge request as the record. A notice that fails is logged.</description>
+        <in-parameters>
+            <parameter name="mergeRequestId" required="true"/>
+            <parameter name="kind" required="true"/>
+            <parameter name="change"/>
+            <parameter name="actorUserId"/>
+            <parameter name="userIdList" type="List"/>
+        </in-parameters>
+        <out-parameters><parameter name="notifiedUserIdList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            notifiedUserIdList = []
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            if (mr == null) return
+            const reviewers = Array.from(ec.entity.find('moqui.resource.GitMergeRequestReviewer').condition('mergeRequestId', mergeRequestId).disableAuthz().list())
+            let userIds
+            if (kind === 'review') userIds = userIdList != null ? Array.from(userIdList).map(String)
+                    : reviewers.filter((row) => row.statusId === 'GmrrRequested').map((row) => row.userId)
+            else userIds = [mr.authorUserId].concat(reviewers.map((row) => row.userId))
+            const actor = actorUserId || ec.user.userId || null
+            userIds = Array.from(new Set(userIds.filter((id) => id && id !== actor)))
+            if (!userIds.length) return
+            const account = actor ? ec.entity.find('moqui.security.UserAccount').condition('userId', actor).useCache(true).disableAuthz().one() : null
+            const actorName = account ? (account.userFullName || account.username || actor) : 'Moqui'
+            try {
+                const nm = ec.makeNotificationMessage().topic(kind === 'review' ? 'MergeRequestReview' : 'MergeRequestUpdate').userIds(userIds)
+                        .message({mergeRequestId, mergeRequestNum: mr.mergeRequestNum, title: mr.title, repositoryId: mr.repositoryId,
+                            sourceRef: mr.sourceRef, targetRef: mr.targetRef, actorName, change: change || null,
+                            recordEntityName: 'moqui.resource.GitMergeRequest', recordId: mergeRequestId})
+                if (typeof nm.record === 'function') nm.record('moqui.resource.GitMergeRequest', mergeRequestId)
+                nm.send()
+                notifiedUserIdList = userIds
+            } catch (err) {
+                ec.logger.error(`Merge request ${mergeRequestId}: the ${kind} notice not sent: ${err && err.message ? err.message : err}`)
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="notify" noun="CommitStatusFailed">
+        <description>A failure or error status posted on a commit (the SECA on org.moqui.impl.GitServices.create#GitCommitStatus):
+            topic CommitStatusFailed to the commit's author (its Moqui-User-Id, else the user accounts with its email) and to
+            the authors of the open merge requests whose head it is, not the one who posted it. Message: repositoryId,
+            commitId, shortId, summary, checkContext (a template's context names the context itself), state, stateLabel, description, targetUrl. A notice that fails is logged.</description>
+        <in-parameters><parameter name="commitStatusId" required="true"/></in-parameters>
+        <out-parameters><parameter name="notifiedUserIdList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            notifiedUserIdList = []
+            const status = ec.entity.find('moqui.resource.GitCommitStatus').condition('commitStatusId', commitStatusId).disableAuthz().one()
+            if (status == null || !['failure', 'error'].includes(status.state)) return
+            const repositoryId = status.repositoryId
+            ec.message.pushErrors()
+            try {
+                const found = ec.service.sync().name('org.moqui.impl.GitServices.get#GitCommit').parameters({repositoryId, commitId: status.commitId, stats: false}).disableAuthz().call()
+                const commit = found?.commit || {}
+                const userIds = []
+                if (commit.moquiUserId) userIds.push(commit.moquiUserId)
+                else if (commit.authorEmail) {
+                    for (const account of Array.from(ec.entity.find('moqui.security.UserAccount').condition('emailAddress', commit.authorEmail)
+                            .selectField('userId').disableAuthz().list())) userIds.push(account.userId)
+                }
+                for (const mr of Array.from(ec.entity.find('moqui.resource.GitMergeRequest').condition({repositoryId, headCommitId: status.commitId})
+                        .condition('statusId', 'in', ['GmrDraft', 'GmrOpen']).disableAuthz().list())) userIds.push(mr.authorUserId)
+                const wanted = Array.from(new Set(userIds.filter((id) => id && id !== status.createdByUserId && id !== ec.user.userId)))
+                if (wanted.length) {
+                    ec.makeNotificationMessage().topic('CommitStatusFailed').userIds(wanted).message({repositoryId, commitId: status.commitId,
+                        shortId: commit.shortId || String(status.commitId).substring(0, 10), summary: commit.summary || '', checkContext: status.context || 'default',
+                        state: status.state, stateLabel: status.state === 'error' ? 'errored' : 'failed', description: status.description || null,
+                        targetUrl: status.targetUrl || null}).send()
+                    notifiedUserIdList = wanted
+                }
+            } catch (err) {
+                ec.logger.error(`Commit status ${commitStatusId} of ${repositoryId}: the failure notice not sent: ${err && err.message ? err.message : err}`)
+            } finally { ec.message.clearErrors(); ec.message.popErrors() }
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Review threads (design-projects.md §7 MergeRequestChanges, §15 "Review anchors") ========== -->
+
+    <service verb="create" noun="ReviewComment">
+        <description>A comment on a merge request by the current user, who may view its repository: a CommunicationEvent of type
+            Comment (markdown) filed on the merge request (CommunicationEventRecord), on a line of its diff when path and a
+            line are given (store#ReviewAnchor), or a reply to a thread (parentCommEventId). The author and reviewers are
+            told (MergeRequestUpdate, commented).</description>
+        <in-parameters>
+            <parameter name="mergeRequestId" required="true"/>
+            <parameter name="body" required="true" allow-html="safe"/>
+            <parameter name="path"/>
+            <parameter name="oldLine" type="Integer"/>
+            <parameter name="newLine" type="Integer"/>
+            <parameter name="lineText"/>
+            <parameter name="parentCommEventId"/>
+        </in-parameters>
+        <out-parameters><parameter name="communicationEventId"/></out-parameters>
+        <actions><script><![CDATA[
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            const access = mr ? ec.service.sync().name('org.moqui.impl.GitServices.get#GitRepositoryAccess').parameters({repositoryId: mr.repositoryId}).call() : null
+            // a client contact (PROJECT_CLIENT) only views a shared repository: review comments are the team's notes (impl-projects.md P10b)
+            if (!mr || !access?.canView || !ec.user.userId || ec.user.hasPermission('PROJECT_CLIENT')) {
+                ec.message.addError(ec.resource.expand('Merge request ${mergeRequestId} not found', '', {mergeRequestId})); return }
+            const text = String(body || '').trim()
+            if (!text) { ec.message.addError(ec.l10n.localize('A comment needs some text')); return }
+            let parent = null
+            if (parentCommEventId) {
+                parent = ec.entity.find('mantle.party.communication.CommunicationEvent').condition('communicationEventId', parentCommEventId).disableAuthz().one()
+                const rootId = parent?.rootCommEventId || parent?.communicationEventId
+                const anchored = rootId ? ec.entity.find('mantle.party.communication.CommunicationEventGitAnchor').condition('communicationEventId', rootId).disableAuthz().one() : null
+                const filed = rootId ? ec.entity.find('mantle.party.communication.CommunicationEventRecord').condition({communicationEventId: rootId,
+                    recordEntityName: 'moqui.resource.GitMergeRequest', recordId: mergeRequestId}).disableAuthz().count() : 0
+                if (!parent || (!filed && anchored?.mergeRequestId !== mergeRequestId)) { ec.message.addError(ec.resource.expand('Comment ${parentCommEventId} is not of this merge request', '', {parentCommEventId})); return }
+            }
+            const where = path ? ' ' + path + (newLine != null ? ':' + newLine : oldLine != null ? ':' + oldLine : '') : ''
+            communicationEventId = ec.service.sync().name('create#mantle.party.communication.CommunicationEvent').parameters({communicationEventTypeId: 'Comment',
+                contactMechTypeEnumId: 'CmtWebForm', statusId: 'CeSent', fromPartyId: ec.user.userAccount?.partyId || null, entryDate: ec.user.nowTimestamp,
+                contentType: 'text/markdown', subject: ec.resource.expand('Review of !${num}${where}', '', {num: mr.mergeRequestNum, where}), body: text,
+                parentCommEventId: parent?.communicationEventId || null, rootCommEventId: parent ? (parent.rootCommEventId || parent.communicationEventId) : null}).disableAuthz().call()?.communicationEventId
+            if (ec.message.hasError() || !communicationEventId) return
+            if (!parent) {
+                const wasDisabled = ec.artifactExecution.disableAuthz()
+                try {
+                    ec.service.sync().name('create#mantle.party.communication.CommunicationEventRecord').parameters({communicationEventId,
+                        recordEntityName: 'moqui.resource.GitMergeRequest', recordId: mergeRequestId, linkedByUserId: ec.user.userId, linkedDate: ec.user.nowTimestamp}).call()
+                } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+                if (path) ec.service.sync().name('mantle.work.GitServices.store#ReviewAnchor').parameters({communicationEventId, mergeRequestId, path,
+                    oldLine: oldLine ?? null, newLine: newLine ?? null, lineText: lineText || null}).call()
+                if (ec.message.hasError()) return
+            }
+            ec.message.pushErrors()
+            try {
+                ec.service.sync().name('mantle.work.GitServices.notify#MergeRequest').parameters({mergeRequestId, kind: 'update', change: 'commented'}).disableAuthz().call()
+            } catch (err) { ec.logger.error(`Merge request ${mergeRequestId}: the comment notice not sent: ${err}`) }
+            finally { ec.message.clearErrors(); ec.message.popErrors() }
+        ]]></script></actions>
+    </service>
+    <service verb="store" noun="ReviewAnchor">
+        <description>Put a merge request's comment on a line of its diff (CommunicationEventGitAnchor), at the source's current
+            head unless commitId is given; for a user who may view the repository. The comment must be filed on the merge
+            request.</description>
+        <in-parameters>
+            <parameter name="communicationEventId" required="true"/>
+            <parameter name="mergeRequestId" required="true"/>
+            <parameter name="path" required="true"/>
+            <parameter name="oldLine" type="Integer"/>
+            <parameter name="newLine" type="Integer"/>
+            <parameter name="commitId"/>
+            <parameter name="lineText"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            const access = mr ? ec.service.sync().name('org.moqui.impl.GitServices.get#GitRepositoryAccess').parameters({repositoryId: mr.repositoryId}).call() : null
+            if (!mr || !access?.canView || ec.user.hasPermission('PROJECT_CLIENT')) {
+                ec.message.addError(ec.resource.expand('Merge request ${mergeRequestId} not found', '', {mergeRequestId})); return }
+            if (oldLine == null && newLine == null) { ec.message.addError(ec.l10n.localize('A review comment is on an old or a new line')); return }
+            const filed = ec.entity.find('mantle.party.communication.CommunicationEventRecord').condition({communicationEventId,
+                recordEntityName: 'moqui.resource.GitMergeRequest', recordId: mergeRequestId}).disableAuthz().count()
+            if (!filed) { ec.message.addError(ec.resource.expand('Comment ${communicationEventId} is not filed on the merge request', '', {communicationEventId})); return }
+            const fields = {communicationEventId, mergeRequestId, repositoryId: mr.repositoryId, commitId: commitId || mr.headCommitId || null,
+                path: String(path), oldLine: oldLine ?? null, newLine: newLine ?? null, lineText: lineText ? String(lineText).substring(0, 255) : null, outdated: 'N'}
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const row = ec.entity.find('mantle.party.communication.CommunicationEventGitAnchor').condition('communicationEventId', communicationEventId).one()
+                if (row) { row.setFields(fields, true, null, null); row.update() }
+                else ec.service.sync().name('create#mantle.party.communication.CommunicationEventGitAnchor').parameters(fields).call()
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+    <service verb="resolve" noun="ReviewThread">
+        <description>Resolve a review thread, or reopen it (resolved false): its first comment, the one with the anchor, goes
+            to CeResolved and back to CeSent (a direct change: the Default flow of communication events has neither move from
+            a sent comment). For a user who may view the merge request's repository; given a reply, its thread.</description>
+        <in-parameters>
+            <parameter name="communicationEventId" required="true"/>
+            <parameter name="resolved" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="rootCommEventId"/></out-parameters>
+        <actions><script><![CDATA[
+            const event = ec.entity.find('mantle.party.communication.CommunicationEvent').condition('communicationEventId', communicationEventId).disableAuthz().one()
+            rootCommEventId = event ? (event.rootCommEventId || event.communicationEventId) : null
+            const anchor = rootCommEventId ? ec.entity.find('mantle.party.communication.CommunicationEventGitAnchor').condition('communicationEventId', rootCommEventId).disableAuthz().one() : null
+            const mr = anchor ? ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', anchor.mergeRequestId).disableAuthz().one() : null
+            const access = mr ? ec.service.sync().name('org.moqui.impl.GitServices.get#GitRepositoryAccess').parameters({repositoryId: mr.repositoryId}).call() : null
+            if (!access?.canView || !ec.user.userId || ec.user.hasPermission('PROJECT_CLIENT')) {
+                ec.message.addError(ec.resource.expand('Review thread ${communicationEventId} not found', '', {communicationEventId})); return }
+            const root = ec.entity.find('mantle.party.communication.CommunicationEvent').condition('communicationEventId', rootCommEventId).disableAuthz().one()
+            const statusId = resolved ? 'CeResolved' : 'CeSent'
+            if (root.statusId === statusId) return
+            root.statusId = statusId
+            root.update()
+        ]]></script></actions>
+    </service>
+    <service verb="get" noun="ReviewThreads">
+        <description>The line comments of a merge request, for a user who may view its repository: each thread (its first
+            comment with the anchor) with path, oldLine, newLine, lineText, commitId, outdated, resolved, and its comments in
+            order (communicationEventId, fromPartyId, authorName, entryDate, body). With path, the threads of that file.</description>
+        <in-parameters>
+            <parameter name="mergeRequestId" required="true"/>
+            <parameter name="path"/>
+        </in-parameters>
+        <out-parameters><parameter name="threadList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            threadList = []
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            const access = mr ? ec.service.sync().name('org.moqui.impl.GitServices.get#GitRepositoryAccess').parameters({repositoryId: mr.repositoryId}).call() : null
+            if (!mr || !access?.canView) { ec.message.addError(ec.resource.expand('Merge request ${mergeRequestId} not found', '', {mergeRequestId})); return }
+            // a client contact (PROJECT_CLIENT) who views a shared repository reads its diffs, never the team's review threads
+            // (Comments, as a note; impl-projects.md P10b)
+            if (ec.user.hasPermission('PROJECT_CLIENT')) return
+            let find = ec.entity.find('mantle.party.communication.CommunicationEventGitAnchor').condition('mergeRequestId', mergeRequestId).disableAuthz()
+            if (path) find = find.condition('path', path)
+            const names = {}
+            const nameOf = (partyId) => {
+                if (!partyId) return ''
+                if (!(partyId in names)) {
+                    const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).disableAuthz().one()
+                    names[partyId] = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || partyId) : partyId
+                }
+                return names[partyId]
+            }
+            const entry = (event) => ({communicationEventId: event.communicationEventId, parentCommEventId: event.parentCommEventId || null,
+                fromPartyId: event.fromPartyId, authorName: nameOf(event.fromPartyId), entryDate: event.entryDate, body: event.body || ''})
+            for (const anchor of Array.from(find.orderBy('path').orderBy('newLine').orderBy('oldLine').list())) {
+                const root = ec.entity.find('mantle.party.communication.CommunicationEvent').condition('communicationEventId', anchor.communicationEventId).disableAuthz().one()
+                if (root == null) continue
+                const replies = Array.from(ec.entity.find('mantle.party.communication.CommunicationEvent').condition('rootCommEventId', root.communicationEventId)
+                        .condition('communicationEventId', 'not-equals', root.communicationEventId).orderBy('entryDate').disableAuthz().list())
+                threadList.push({communicationEventId: root.communicationEventId, path: anchor.path, oldLine: anchor.oldLine, newLine: anchor.newLine,
+                    lineText: anchor.lineText, commitId: anchor.commitId, outdated: anchor.outdated === 'Y', resolved: root.statusId === 'CeResolved',
+                    commentList: [entry(root)].concat(replies.map(entry))})
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="refresh" noun="ReviewAnchors">
+        <description>A merge request's source has a new head: each thread on a new line read at an older head is outdated when
+            the line changed since (a deleted or changed line in the diff from its head to the new one, or its file gone).
+            One that cannot be checked is logged and left as it is.</description>
+        <in-parameters><parameter name="mergeRequestId" required="true"/></in-parameters>
+        <out-parameters><parameter name="outdatedCount" type="Integer"/></out-parameters>
+        <actions><script><![CDATA[
+            outdatedCount = 0
+            const mr = ec.entity.find('moqui.resource.GitMergeRequest').condition('mergeRequestId', mergeRequestId).disableAuthz().one()
+            if (mr == null || !mr.headCommitId) return
+            const anchors = Array.from(ec.entity.find('mantle.party.communication.CommunicationEventGitAnchor').condition('mergeRequestId', mergeRequestId)
+                    .condition('outdated', 'not-equals', 'Y').disableAuthz().list()).filter((anchor) => anchor.commitId && anchor.commitId !== mr.headCommitId && anchor.newLine != null)
+            const compares = {}
+            for (const anchor of anchors) {
+                ec.message.pushErrors()
+                try {
+                    if (!(anchor.commitId in compares)) compares[anchor.commitId] = ec.service.sync().name('org.moqui.impl.GitServices.get#GitCompare')
+                            .parameters({repositoryId: mr.repositoryId, base: anchor.commitId, head: mr.headCommitId, withDiffs: true}).disableAuthz().call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    const file = Array.from(compares[anchor.commitId]?.fileList || []).find((one) => one.path === anchor.path)
+                    let changed = false
+                    if (file) changed = file.changeType === 'deleted' || Array.from(file.hunks || []).some((hunk) => Array.from(hunk.lines || [])
+                            .some((line) => line.tag === 'delete' && Number(line.oldNo) === Number(anchor.newLine)))
+                    if (changed) { anchor.outdated = 'Y'; anchor.update(); outdatedCount++ }
+                } catch (err) {
+                    ec.logger.error(`Merge request ${mergeRequestId}: review thread ${anchor.communicationEventId} not checked: ${err && err.message ? err.message : err}`)
+                } finally { ec.message.clearErrors(); ec.message.popErrors() }
+            }
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Task branches and the palette ========== -->
+
+    <service verb="get" noun="TaskBranchName">
+        <description>The branch name for a work item by its project's pattern (WstBranchPattern, else &lt;id&gt;-&lt;words&gt;):
+            &lt;id&gt; the item's ID (PROJ-12), &lt;KEY&gt; and &lt;key&gt; the project's ID as it is and in lower case,
+            &lt;n&gt; the number after the item ID's last '-', &lt;words&gt; up to six words of its name in lower case
+            joined by '-', &lt;type&gt; fix, feature, docs or task by its purpose. Letters, digits, '.', '_', '-' and '/'
+            are kept.</description>
+        <in-parameters><parameter name="workEffortId" required="true"/></in-parameters>
+        <out-parameters><parameter name="branchName"/><parameter name="pattern"/></out-parameters>
+        <actions><script><![CDATA[
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null || task.workEffortTypeEnumId !== 'WetTask') { ec.message.addError(ec.resource.expand('Work item ${workEffortId} not found', '', {workEffortId})); return }
+            const projectId = task.rootWorkEffortId || ''
+            pattern = projectId ? ec.service.sync().name('mantle.work.ProjectServices.get#ProjectSettings').parameters({workEffortId: projectId}).call()?.settings?.WstBranchPattern || null : null
+            if (!pattern) pattern = '<id>-<words>'
+            const words = String(task.workEffortName || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ')
+                    .trim().split(/\s+/).filter((word) => word).slice(0, 6).join('-')
+            const id = String(workEffortId)
+            const type = {WepFix: 'fix', WepNewFeature: 'feature', WepFeatureEnhance: 'feature', WepDocument: 'docs'}[task.purposeEnumId] || 'task'
+            let name = String(pattern).replace(/<id>/g, id).replace(/<KEY>/g, projectId).replace(/<key>/g, projectId.toLowerCase())
+                    .replace(/<n>/g, id.includes('-') ? id.substring(id.lastIndexOf('-') + 1) : id).replace(/<words>/g, words).replace(/<type>/g, type)
+            name = name.replace(/[^A-Za-z0-9._\/-]+/g, '-').replace(/-{2,}/g, '-').replace(/\/{2,}/g, '/').replace(/^[-/.]+|[-/.]+$/g, '')
+            branchName = name.substring(0, 100).replace(/[-/.]+$/, '')
+        ]]></script></actions>
+    </service>
+    <service verb="create" noun="TaskBranch">
+        <description>A branch for a work item (WorkItemDetail's Create branch): named by get#TaskBranchName unless branchName is
+            given, in repositoryId or the one repository of its project, from a ref (the default branch's head when empty),
+            made by org.moqui.impl.GitServices.create#GitRef (the user's create right and the branch rules apply) and linked to
+            the item (store#WorkEffortRef).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="repositoryId"/>
+            <parameter name="fromRef"/>
+            <parameter name="branchName"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="repositoryId"/>
+            <parameter name="branchName"/>
+            <parameter name="refName"/>
+            <parameter name="commitId"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null || task.workEffortTypeEnumId !== 'WetTask') { ec.message.addError(ec.resource.expand('Work item ${workEffortId} not found', '', {workEffortId})); return }
+            const linked = task.rootWorkEffortId ? Array.from(ec.entity.find('mantle.work.effort.WorkEffortGitRepository').condition('workEffortId', task.rootWorkEffortId)
+                    .conditionDate('fromDate', 'thruDate', null).disableAuthz().list()).map((row) => row.repositoryId) : []
+            if (!repositoryId) {
+                const repos = Array.from(new Set(linked))
+                if (repos.length !== 1) { ec.message.addError(repos.length ? ec.l10n.localize('Choose the repository for the branch') : ec.l10n.localize('The project has no repository')); return }
+                repositoryId = repos[0]
+            }
+            if (!branchName) branchName = ec.service.sync().name('mantle.work.GitServices.get#TaskBranchName').parameters({workEffortId}).call()?.branchName
+            if (ec.message.hasError() || !branchName) return
+            const out = ec.service.sync().name('org.moqui.impl.GitServices.create#GitRef').parameters({repositoryId, refName: String(branchName).trim(),
+                refType: 'branch', revision: fromRef || null}).call()
+            if (ec.message.hasError()) return
+            refName = out?.refName || 'refs/heads/' + branchName
+            commitId = out?.commitId || null
+            ec.service.sync().name('mantle.work.GitServices.store#WorkEffortRef').parameters({workEffortId, repositoryId, refName, objectId: commitId,
+                linkSourceEnumId: 'WglsBranchName'}).disableAuthz().call()
+        ]]></script></actions>
+    </service>
+    <service verb="search" noun="Code">
+        <description>The palette's Code group (design-projects.md §1.4): repositories by id or description, and merge requests
+            by number (!12, or #12) or title, of the repositories the user may view; archived repositories are left out.
+            resultList: kind (repository or mergeRequest), repositoryId, description, and for a merge request mergeRequestId,
+            mergeRequestNum, title, statusId, sourceRef, targetRef. The app makes them links.</description>
+        <in-parameters>
+            <parameter name="text"/>
+            <parameter name="limit" type="Integer" default="5"/>
+        </in-parameters>
+        <out-parameters><parameter name="resultList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            resultList = []
+            const term = String(text || '').trim()
+            if (!term) return
+            const max = Math.max(1, Math.min(Number(limit) || 5, 50))
+            const number = /^[!#]?(\d+)$/.exec(term)
+            const bang = term.startsWith('!')
+            const words = bang ? term.substring(1).trim() : term
+            if (!bang) {
+                const repos = ec.service.sync().name('org.moqui.impl.GitServices.find#GitRepositories').parameters({text: words, pageSize: max}).call()
+                for (const repo of Array.from(repos?.repositoryList || [])) resultList.push({kind: 'repository', repositoryId: repo.repositoryId,
+                    description: repo.description || '', repositoryKind: repo.repositoryKind})
+            }
+            if (resultList.length >= max || (!number && !words)) return
+            const visible = Array.from(ec.service.sync().name('org.moqui.impl.GitServices.find#GitRepositories').parameters({pageNoLimit: true}).call()?.repositoryList || [])
+                    .map((repo) => repo.repositoryId)
+            if (!visible.length) return
+            let rows
+            if (number) {
+                rows = Array.from(ec.entity.find('moqui.resource.GitMergeRequest').condition('repositoryId', 'in', visible).condition('mergeRequestNum', Number(number[1]))
+                        .orderBy('-lastUpdatedDate').limit(max - resultList.length).disableAuthz().list())
+            } else {
+                rows = Array.from(ec.entity.find('moqui.resource.GitMergeRequest').condition('repositoryId', 'in', visible)
+                        .condition(ec.entity.conditionFactory.makeCondition('title', 'like', '%' + words + '%').ignoreCase())
+                        .orderBy('-lastUpdatedDate').limit(max - resultList.length).disableAuthz().list())
+            }
+            for (const mr of rows) resultList.push({kind: 'mergeRequest', repositoryId: mr.repositoryId, mergeRequestId: mr.mergeRequestId,
+                mergeRequestNum: mr.mergeRequestNum, title: mr.title, statusId: mr.statusId, sourceRef: mr.sourceRef, targetRef: mr.targetRef, description: ''})
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Access ========== -->
+
+    <service verb="check" noun="GitRepositoryAuthz">
+        <description>The authzServiceName of the ALL_USERS grant on the GitRepositories artifact group (design-projects.md
+            §7, §15 "Repository access by role"), by the user's party's current WorkEffortParty roles on the projects the
+            repository is linked to: an internal member may view it and push new refs and fast-forwards (AUTHZA_VIEW,
+            AUTHZA_CREATE, AUTHZA_UPDATE); a lead of such a project (ProjectManager, Manager, ProgrammerLead, SysArchitect)
+            also force-pushes and deletes refs and changes the settings (AUTHZA_DELETE); a client contact (Customer,
+            CustomerBillTo, ClientManager, ClientBilling) only views it, and only when that project shares its repositories
+            with the client (WorkEffortSetting WstShareRepositories Y). A client contact who signs in (the PROJECT_CLIENT
+            permission, ProjectServices.get#ClientProjectInfo: its party's or its organization's client role on a project that
+            allows client sign-in) only views the repositories of its client projects that share them, whatever other role its
+            party holds (impl-projects.md P10). For anyone else nothing (AUTHZT_NONE), so other grants decide.</description>
+        <in-parameters>
+            <parameter name="userId"/>
+            <parameter name="authzActionEnumId"/>
+            <parameter name="artifactTypeEnumId"/>
+            <parameter name="artifactName"/>
+        </in-parameters>
+        <out-parameters><parameter name="authzTypeEnumId"/></out-parameters>
+        <actions><script><![CDATA[
+            authzTypeEnumId = 'AUTHZT_NONE'
+            const action = authzActionEnumId
+            if (!userId || !['AUTHZA_VIEW', 'AUTHZA_CREATE', 'AUTHZA_UPDATE', 'AUTHZA_DELETE'].includes(action)) return
+            const account = ec.entity.find('moqui.security.UserAccount').condition('userId', userId).useCache(true).disableAuthz().one()
+            if (!account?.partyId) return
+            const projectIds = Array.from(ec.entity.find('mantle.work.effort.WorkEffortGitRepository').condition('repositoryId', artifactName)
+                    .conditionDate('fromDate', 'thruDate', null).disableAuthz().list()).map((link) => link.workEffortId)
+            if (!projectIds.length) return
+            // a client contact who signs in (PROJECT_CLIENT; impl-projects.md P10): only views, and only a repository of one of its
+            // client projects that shares its repositories (its own party's or its organization's client role), whatever other
+            // role its party holds; a failed check gives nothing
+            const client = ec.service.sync().name('mantle.work.ProjectServices.get#ClientProjectInfo').parameter('userId', userId).call()
+            if (ec.message.hasError() || client == null) return
+            if (client.isClient) {
+                if (action === 'AUTHZA_VIEW' && projectIds.some((id) => Array.from(client.shareRepositoryProjectIds || []).includes(id)))
+                    authzTypeEnumId = 'AUTHZT_ALLOW'
+                return
+            }
+            const roles = Array.from(ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', 'in', projectIds)
+                    .condition('partyId', account.partyId).conditionDate('fromDate', 'thruDate', null).disableAuthz().list())
+            if (!roles.length) return
+            const clientRoles = ['Customer', 'CustomerBillTo', 'ClientManager', 'ClientBilling']
+            const leadRoles = ['ProjectManager', 'Manager', 'ProgrammerLead', 'SysArchitect']
+            const internal = roles.filter((row) => !clientRoles.includes(row.roleTypeId))
+            if (internal.length) {
+                if (action !== 'AUTHZA_DELETE' || internal.some((row) => leadRoles.includes(row.roleTypeId))) authzTypeEnumId = 'AUTHZT_ALLOW'
+                return
+            }
+            if (action !== 'AUTHZA_VIEW') return
+            const clientProjectIds = Array.from(new Set(roles.map((row) => row.workEffortId)))
+            const shared = ec.entity.find('mantle.work.effort.WorkEffortSetting').condition('workEffortId', 'in', clientProjectIds)
+                    .condition('settingTypeEnumId', 'WstShareRepositories').condition('settingValue', 'Y').disableAuthz().count()
+            if (shared > 0) authzTypeEnumId = 'AUTHZT_ALLOW'
+        ]]></script></actions>
+    </service>
+</services>

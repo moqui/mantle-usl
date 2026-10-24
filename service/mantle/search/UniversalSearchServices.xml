@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="search" noun="Universal" authenticate="true">
+        <description>
+            One search over the authorized Mantle documents in an index: parties, products, facilities, orders, invoices,
+            shipments, assets, communications, and wiki pages.
+
+            The document types are those whose primary entity the user may view. When the user has an organization
+            filter (MANTLE_USER_ORG or MANTLE_ACTIVE_ORG, whichever of the filter sets on a party find names, MANTLE_USER_ORG
+            first, as get#RecordLinkInfo) each type is limited to records of its organizations, by the type's organization
+            fields: the user's organizations (filterOrgIds) for MANTLE_USER_ORG, and for MANTLE_ACTIVE_ORG the active
+            organization, or all of the user's organizations when none is active (the set's applyCond leaves it off then,
+            but the user still has the filter here); and to records that name the user: a project, task, event or request
+            the user's party owns, filed or is a party to (or one of those organizations is), and a communication event the
+            user's party is from, to or a party to, or a post of a mailbox the user may read. A type with neither is left out
+            under the limit, except wiki pages. A party that is a personal contact (privateOwnerUserId) shows only to its
+            owner, with or without a limit. A mailbox post (contactListId of a MAILBOX list) shows, with or without a
+            limit, to those who may read the mailbox (its members; any user for a public mailbox that is not a help
+            mailbox) and otherwise only to the parties it is from, to or a recipient of. A wiki page shows, with or without
+            a limit and for every user, by the wiki's view rule (org.moqui.impl.WikiServices.get#WikiViewScope, the rule of
+            get#WikiPageAccess that get#RecordLinkInfo asks): its space has no restrictView Y or the user has a
+            WikiSpaceUser row with allowView or allowAdmin Y for it, and the page has no restrictView Y or the user has a
+            WikiPageUser row with allowView Y for it; the ADMIN group sees every page.
+            The limit is a trusted filter: it applies before ranking, totals, facets and highlights, and the query cannot
+            widen it. Each result is checked against the entity database before it is returned.
+
+            mode is lexical (the default; words match as prefixes, quotes make a phrase, field:value searches a field),
+            autocomplete (the title starts with the text, or each word starts a title word), semantic, or hybrid; semantic
+            and hybrid need those search capabilities. near ({terms, distance}) needs the proximity capability. facets
+            may name entityType (counts by document type) and category (counts by the type's category, with one
+            entityType).
+        </description>
+        <in-parameters>
+            <parameter name="q"/>
+            <parameter name="entityType"><description>A DataDocument id, or a comma-separated list of them.</description></parameter>
+            <parameter name="filters" type="Map"><description>Field name to a value, or to a list of values.</description></parameter>
+            <parameter name="mode" default-value="lexical"/>
+            <parameter name="near" type="Map"/>
+            <parameter name="offset" type="Integer" default="0"/>
+            <parameter name="limit" type="Integer" default="20"/>
+            <parameter name="facets" type="List"/>
+            <parameter name="highlight" type="Boolean" default="true"/>
+            <parameter name="indexName" default-value="mantle"/>
+            <parameter name="linkSet" default-value="boss"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="query"/>
+            <parameter name="total" type="Long"/>
+            <parameter name="totalRelation"/>
+            <parameter name="results" type="List"><parameter name="result" type="Map"/></parameter>
+            <parameter name="facetCounts" type="Map"/>
+            <parameter name="capabilities" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            query = q || ''
+            total = 0
+            totalRelation = 'eq'
+            results = []
+            facetCounts = {}
+            capabilities = ec.search.isAvailable() ? ec.search.capabilities() : []
+            if (!ec.search.isAvailable()) { ec.message.addError('Search is not configured'); return }
+
+            // what shows a record of each document type under an organization limit: org fields holding one of the user's
+            // organizations, user fields holding the user's party, and party fields holding either; a type that is not here
+            // shows nothing, and null is not limited
+            // TODO: only current party rows (parties.partyThruDate empty or later than now) once the Postgres backend can
+            //     compare a date in a child list (it casts the stored text, which the feed writes as epoch millis)
+            const scopes = {MantleParty: {org: ['ownerPartyId']}, MantleProduct: {org: ['ownerPartyId']},
+                MantleFacility: {org: ['ownerPartyId']}, MantleAsset: {org: ['ownerPartyId']},
+                MantleOrder: {org: ['parts.vendorPartyId', 'parts.customerPartyId']},
+                MantleInvoice: {org: ['fromPartyId', 'toPartyId']}, MantleShipment: {org: ['fromPartyId', 'toPartyId']},
+                MantleProject: {party: ['ownerPartyId', 'parties.partyId']}, MantleTask: {party: ['ownerPartyId', 'parties.partyId']},
+                MantleEvent: {party: ['ownerPartyId', 'parties.partyId']},
+                MantleRequest: {org: ['storeOrganizationPartyId', 'facilityOwnerPartyId'], user: ['filedByPartyId'], party: ['parties.partyId']},
+                MantleCommunicationEvent: {user: ['fromPartyId', 'toPartyId', 'parties.partyId']},
+                MantleWikiPage: null}
+
+            // the user's organization limit, as get#RecordLinkInfo has it: every filter set on a party find is looked at
+            // (an authorization may carry MANTLE_PRIVATE_CONTACT and others beside the organization set)
+            if (ec.user.context.filterOrgIds === undefined) ec.service.sync().name('mantle.party.PartyServices.setup#UserOrganizationInfo').call()
+            const filterSetIds = () => new Set(Array.from(ec.artifactExecution.getFindFiltersForUser('mantle.party.Party') || [])
+                    .map((filter) => filter.entityFilterSetId))
+            const activeOrgId = ec.user.context.activeOrgId || null
+            const filterOrgIds = Array.from(ec.user.context.filterOrgIds || [])
+            let filterSets = filterSetIds()
+            let orgIds = null
+            if (filterSets.has('MANTLE_USER_ORG')) orgIds = filterOrgIds
+            else if (filterSets.has('MANTLE_ACTIVE_ORG')) orgIds = activeOrgId ? [activeOrgId] : filterOrgIds
+            else if (!activeOrgId) {
+                // MANTLE_ACTIVE_ORG applies only with an active organization (its applyCond): whether the authorization
+                // names it is asked with one in the user context for the moment
+                const hadActive = 'activeOrgId' in ec.user.context
+                const oldActive = ec.user.context.activeOrgId
+                ec.user.context.activeOrgId = '_NA_'
+                try { filterSets = filterSetIds() } finally {
+                    if (hadActive) ec.user.context.activeOrgId = oldActive ?? null
+                    else delete ec.user.context.activeOrgId
+                }
+                if (filterSets.has('MANTLE_ACTIVE_ORG')) orgIds = filterOrgIds
+            }
+
+            // the clauses that show a type's records under the limit, any one of them; none leaves the type out
+            const userPartyId = ec.user.userAccount?.partyId || null
+            // the mailboxes whose every post the user may read, and the others (mantle.marketing.ContactListServices)
+            const mailboxAccess = ec.service.sync().name('mantle.marketing.ContactListServices.get#UserMailboxAccess')
+                    .parameter('partyId', userPartyId).call()
+            const readableMailboxIds = mailboxAccess?.readableContactListIds || []
+            const hiddenMailboxIds = mailboxAccess?.hiddenContactListIds || []
+            const scopeClauses = (type, scope) => {
+                const orgValues = type === 'MantleParty' ? orgIds.concat(['_NA_']) : orgIds
+                const partyValues = userPartyId ? orgIds.concat([userPartyId]) : orgIds
+                const any = []
+                if (orgValues.length) for (const name of scope.org || []) any.push({field: {name: name, op: 'in', values: orgValues}})
+                if (userPartyId) for (const name of scope.user || []) any.push({field: {name: name, op: 'eq', value: userPartyId}})
+                if (partyValues.length) for (const name of scope.party || []) any.push({field: {name: name, op: 'in', values: partyValues}})
+                if (type === 'MantleCommunicationEvent' && readableMailboxIds.length)
+                    any.push({field: {name: 'contactListId', op: 'in', values: readableMailboxIds}})
+                return any
+            }
+
+            // the document types the user may see: view authz on the primary entity, and an organization scope under a limit
+            const requested = entityType ? String(entityType).split(',').map((type) => type.trim()).filter((type) => type) : null
+            const documents = {}
+            for (const documentId of ec.search.documentTypes({indexName: indexName})) {
+                if (requested && !requested.includes(documentId)) continue
+                const document = ec.entity.find('moqui.entity.document.DataDocument').condition('dataDocumentId', documentId)
+                        .useCache(true).one()
+                if (document == null || !ec.artifactExecution.isPermitted(document.primaryEntityName, 'AT_ENTITY', 'view')) continue
+                const scope = Object.prototype.hasOwnProperty.call(scopes, documentId) ? scopes[documentId] : {}
+                const limit = orgIds != null && scope != null ? scopeClauses(documentId, scope) : null
+                if (limit != null && limit.length === 0) continue
+                documents[documentId] = {name: document.documentName, primaryEntityName: document.primaryEntityName,
+                        limit: limit, roles: {}, links: []}
+            }
+            // a wiki page by the wiki's view rule (org.moqui.impl.WikiServices.get#WikiViewScope): a space the user may view,
+            // and not a restricted page hidden from the user; no space the user may view leaves the type out
+            const wikiClauses = []
+            if (documents.MantleWikiPage) {
+                const scope = ec.service.sync().name('org.moqui.impl.WikiServices.get#WikiViewScope').call() || {}
+                const spaceIds = Array.from(scope.viewSpaceIdList || [])
+                const hiddenPageIds = Array.from(scope.hiddenPageIdList || [])
+                if (spaceIds.length === 0) delete documents.MantleWikiPage
+                wikiClauses.push({field: {name: 'wikiSpaceId', op: 'in', values: spaceIds}})
+                if (hiddenPageIds.length) wikiClauses.push({field: {name: 'wikiPageId', op: 'in', values: hiddenPageIds, negate: true}})
+            }
+            const types = Object.keys(documents)
+            if (types.length === 0) return
+
+            // display roles and links of each type
+            for (const type of types) {
+                for (const field of ec.entity.find('moqui.entity.document.DataDocumentField').condition('dataDocumentId', type)
+                        .useCache(true).list()) {
+                    if (!field.searchRole) continue
+                    const path = String(field.fieldPath)
+                    documents[type].roles[field.searchRole] = field.fieldNameAlias || path.substring(path.lastIndexOf(':') + 1)
+                }
+                documents[type].links = Array.from(ec.entity.find('moqui.entity.document.DataDocumentLink').condition('dataDocumentId', type)
+                        .condition('linkSet', linkSet).orderBy('linkSeqId').useCache(true).list())
+            }
+
+            // the trusted filter: per type, the type and its organization and user limit; a party that is a personal
+            // contact (privateOwnerUserId) only for its owner, with or without a limit
+            const notPrivate = {field: {name: 'privateOwnerUserId', op: 'exists', negate: true}}
+            const privateClause = ec.user.userId ? {bool: {any: [notPrivate,
+                    {field: {name: 'privateOwnerUserId', op: 'eq', value: ec.user.userId}}]}} : notPrivate
+            // a post of a mailbox the user may not read only for the parties it is from, to or a recipient of
+            const mailboxClause = hiddenMailboxIds.length ? {bool: {any: [
+                {field: {name: 'contactListId', op: 'exists', negate: true}},
+                {field: {name: 'contactListId', op: 'in', values: hiddenMailboxIds, negate: true}}].concat(userPartyId ? [
+                {field: {name: 'fromPartyId', op: 'eq', value: userPartyId}}, {field: {name: 'toPartyId', op: 'eq', value: userPartyId}},
+                {field: {name: 'parties.partyId', op: 'eq', value: userPartyId}}] : [])}} : null
+            const typeClauses = types.map((type) => {
+                const all = [{field: {name: '_document', op: 'eq', value: type}}]
+                if (documents[type].limit != null) all.push({bool: {any: documents[type].limit}})
+                if (type === 'MantleParty') all.push(privateClause)
+                if (type === 'MantleCommunicationEvent' && mailboxClause) all.push(mailboxClause)
+                if (type === 'MantleWikiPage') all.push(...wikiClauses)
+                return {bool: {all: all}}
+            })
+            const filterClauses = [{bool: {any: typeClauses}}]
+            // the caller's field filters narrow too; they do not score
+            for (const [name, value] of Object.entries(filters || {})) {
+                if (value == null || value === '') continue
+                filterClauses.push(Array.isArray(value) ? {field: {name: name, op: 'in', values: value}} : {field: {name: name, op: 'eq', value: value}})
+            }
+            const filter = {bool: {all: filterClauses}}
+
+            // the query by mode
+            const needs = (capability, what) => {
+                if (capabilities.includes(capability)) return true
+                ec.message.addError(`${what} is not available: the search backend does not have the ${capability} capability`)
+                return false
+            }
+            let lexicalQuery = query.trim() ? ec.search.parseQuery(elasticQueryAutoWildcard(query, false)) : 'match_all'
+            const request = {documentType: types, filter: filter, offset: offset, limit: limit}
+            if (near && near.terms) {
+                if (!needs('proximity', 'A near search')) return
+                lexicalQuery = {near: {terms: Array.isArray(near.terms) ? near.terms.join(' ') : String(near.terms), distance: near.distance || 0}}
+            }
+            if (mode === 'autocomplete') {
+                if (!needs('autocomplete', 'Autocomplete')) return
+                request.query = query.trim() ? {suggest: {text: query}} : 'match_all'
+            } else if (mode === 'semantic' || mode === 'hybrid') {
+                if (!needs(mode, `A ${mode} search`)) return
+                request.query = lexicalQuery
+                request.retrieval = mode
+                request.text = query
+            } else {
+                request.query = lexicalQuery
+            }
+            const highlightFields = new Set()
+            for (const type of types) for (const role of ['title', 'subtitle', 'code']) {
+                if (documents[type].roles[role]) highlightFields.add(documents[type].roles[role])
+            }
+            if (highlight) request.highlight = Array.from(highlightFields)
+
+            const page = ec.search.search(request)
+            total = page.total
+            totalRelation = page.totalRelation || 'eq'
+
+            for (const hit of page.hits) {
+                const document = documents[hit.documentId]
+                const body = hit.body || {}
+                // the entity database decides: a record now gone or outside the user's filters is not returned
+                const keys = ec.entity.makeValue(document.primaryEntityName).getPrimaryKeys()
+                const keyNames = Object.keys(keys)
+                const key = {}
+                const idParts = String(hit.id).split('::')
+                keyNames.forEach((name, index) => { key[name] = body[name] != null ? body[name] : idParts[index] })
+                if (ec.entity.find(document.primaryEntityName).condition(key).one() == null) continue
+
+                const role = (name) => document.roles[name] ? body[document.roles[name]] : null
+                const highlights = hit.highlights || {}
+                const fragments = Object.values(highlights).flat()
+                const link = document.links.find((candidate) => !candidate.linkCondition || ec.resource.condition(candidate.linkCondition, '', body))
+                const roleFields = new Set(Object.values(document.roles))
+                const attributes = {}
+                for (const [name, value] of Object.entries(body)) {
+                    if (value == null || typeof value === 'object' || roleFields.has(name) || keyNames.includes(name)) continue
+                    attributes[name] = value
+                }
+                results.push({entityType: hit.documentId, entityTypeName: document.name, key: key, id: hit.id,
+                    title: role('title') || hit.id, subtitle: role('subtitle'), code: role('code'), category: role('category'),
+                    snippet: fragments.length ? fragments[0] : null, highlights: highlights, score: hit.score,
+                    url: link ? ec.resource.expand(link.linkUrl, '', body) : null, linkLabel: link ? link.label : null,
+                    attributes: attributes})
+            }
+
+            // facets over the whole authorized match, not the page
+            const facetList = facets ?? []
+            if (facetList.length) {
+                const facetFilter = {bool: {all: [request.query === 'match_all' || request.query == null ? 'match_all' : lexicalQuery, filter]}}
+                if (facetList.includes('entityType')) {
+                    const counts = ec.search.aggregate({documentType: types, filter: facetFilter, aggs: {types: {terms: {field: '_document', size: types.length}}}})
+                    facetCounts.entityType = counts.types.buckets.map((bucket) =>
+                            ({value: bucket.key, label: documents[bucket.key] ? documents[bucket.key].name : bucket.key, count: bucket.doc_count}))
+                }
+                const categoryField = types.length === 1 ? documents[types[0]].roles.category : null
+                if (facetList.includes('category') && categoryField) {
+                    const counts = ec.search.aggregate({documentType: types[0], filter: facetFilter, aggs: {categories: {terms: {field: categoryField, size: 50}}}})
+                    facetCounts.category = counts.categories.buckets.map((bucket) => ({value: bucket.key, label: bucket.key, count: bucket.doc_count}))
+                }
+            }
+        ]]></script></actions>
+    </service>
+</services>

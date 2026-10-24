@@ -1,0 +1,1350 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<!-- Weekly timesheets and the timer (IronStone Projects, design-projects.md §8 and §15 Timesheet services; impl-projects.md P6).
+
+    Each person has one Timesheet a week (fromDate the start of the week's first day, thruDate the start of the next week's,
+    exclusive), made with the week's first time entry: mantle.work.TimeServices.store#TimeEntry and create#TimeEntryClockIn set
+    the entry's timesheetId (get#PartyTimesheet). The flow: In-Process (TmshInProcess) to Completed (TmshCompleted, submitted
+    by its person) to Approved (TmshApproved, by an approver); an approver returns a submitted one with a reason, or reopens
+    an approved one until any of its entries is invoiced, both back to In-Process. With the policy's lock (the default) the
+    entries of a submitted or approved week are locked: store#TimeEntry and delete#TimeEntry refuse to change them.
+
+    The policy is an organization's PartySetting ProjTimesheetPolicy, a JSON object with short keys to fit settingValue's 255
+    characters (impl-projects.md F9): ws the week's first day (ISO, 1 Monday to 7 Sunday; 1), ap the approvers (project: the
+    managers of the projects the week's time is on; line: the person's managers by PrtManager relationship, else as project;
+    any: the holders of the TIMESHEET_APPROVE permission; project), lk lock on submit (Y), ri a work item required on submit
+    (N), rc a comment required (N; an approver's flag, not a refusal), mh the smallest entry in hours (0.25), fu entries on
+    future days (Y), dh the hours of a working day (8), wd the working days (12345), rd and rh the missing-time reminder's day
+    (1) and hour (10). A person's organization is their first organization (PartyServices.get#PartyOrganizationInfo), else the
+    owner of the first open project they are on.
+
+    Days are those of the session's time zone (the signed-in user's). Nobody approves their own timesheet; ADMIN may do the
+    rest for anyone. The topics: TimesheetApproval (to the approvers when submitted; its approve and refuse services decide it
+    from the tray), TimesheetReturned (to the person, returned or reopened with the reason), TimesheetApproved (to the
+    person) and TimesheetMissing (the reminder of send#MissingTimeReminders). -->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- ========== The policy and the week ========== -->
+
+    <service verb="get" noun="TimesheetPolicy">
+        <description>The timesheet policy of a person's organization (or of organizationPartyId), each key with its default
+            filled in (see the file's comment): {weekStart, approvers, lock, needItem, needComment, minHours, future, dayHours,
+            workDays (ISO day numbers), remindDay, remindHour}. A setting that is not JSON is logged and the defaults apply.</description>
+        <in-parameters>
+            <parameter name="partyId"><description>The person; default the user's party</description></parameter>
+            <parameter name="organizationPartyId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="policy" type="Map"/>
+            <parameter name="organizationPartyId"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            policy = {weekStart: 1, approvers: 'project', lock: true, needItem: false, needComment: false, minHours: 0.25, future: true,
+                dayHours: 8, workDays: [1, 2, 3, 4, 5], remindDay: 1, remindHour: 10}
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                if (!organizationPartyId) {
+                    const person = partyId || ec.user.userAccount?.partyId || null
+                    if (person) {
+                        const orgInfo = ec.service.sync().name('mantle.party.PartyServices.get#PartyOrganizationInfo').parameters({partyId: person}).call() || {}
+                        organizationPartyId = Array.from(orgInfo.filterOrgIds || [])[0] || null
+                        if (!organizationPartyId) {
+                            const projectIds = Array.from(ec.entity.find('mantle.work.effort.WorkEffortAndParty').condition('partyId', person)
+                                    .condition('workEffortTypeEnumId', 'WetProject').conditionDate('fromDate', 'thruDate', null)
+                                    .condition('statusId', 'not-in', ['WeClosed', 'WeCancelled']).selectField('workEffortId').orderBy('workEffortId').list())
+                                    .map((row) => row.workEffortId)
+                            if (projectIds.length) organizationPartyId = ec.entity.find('mantle.work.effort.WorkEffort')
+                                    .condition('workEffortId', projectIds[0]).one()?.ownerPartyId || null
+                        }
+                    }
+                }
+                if (!organizationPartyId) return
+                const row = ec.entity.find('mantle.party.PartySetting').condition('partyId', organizationPartyId)
+                        .condition('partySettingTypeId', 'ProjTimesheetPolicy').one()
+                if (!row || !row.settingValue) return
+                let stored = {}
+                try { stored = JSON.parse(row.settingValue) || {} } catch (err) {
+                    ec.logger.error(`Timesheet policy of ${organizationPartyId}: ProjTimesheetPolicy is not JSON, the defaults apply: ${err}`)
+                    return
+                }
+                const intIn = (value, low, high, fallback) => { const n = Number(value); return Number.isInteger(n) && n >= low && n <= high ? n : fallback }
+                const yes = (value, fallback) => value === 'Y' ? true : value === 'N' ? false : fallback
+                policy.weekStart = intIn(stored.ws, 1, 7, policy.weekStart)
+                if (['project', 'line', 'any'].includes(stored.ap)) policy.approvers = stored.ap
+                policy.lock = yes(stored.lk, policy.lock)
+                policy.needItem = yes(stored.ri, policy.needItem)
+                policy.needComment = yes(stored.rc, policy.needComment)
+                const minHours = Number(stored.mh)
+                if (minHours > 0 && minHours <= 8) policy.minHours = minHours
+                policy.future = yes(stored.fu, policy.future)
+                const dayHours = Number(stored.dh)
+                if (dayHours > 0 && dayHours <= 24) policy.dayHours = dayHours
+                if (typeof stored.wd === 'string' && /^[1-7]{0,7}$/.test(stored.wd)) policy.workDays = Array.from(new Set(stored.wd.split('').map(Number))).sort()
+                policy.remindDay = intIn(stored.rd, 1, 7, policy.remindDay)
+                policy.remindHour = intIn(stored.rh, 0, 23, policy.remindHour)
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+    <service verb="store" noun="TimesheetPolicy">
+        <description>Stores an organization's timesheet policy (the setting's short keys; see the file's comment). A value not
+            given keeps the stored one; an invalid one is an error.</description>
+        <in-parameters>
+            <parameter name="organizationPartyId" required="true"/>
+            <parameter name="weekStart" type="Integer"/>
+            <parameter name="approvers"/>
+            <parameter name="lock" type="Boolean"/>
+            <parameter name="needItem" type="Boolean"/>
+            <parameter name="needComment" type="Boolean"/>
+            <parameter name="minHours" type="BigDecimal"/>
+            <parameter name="future" type="Boolean"/>
+            <parameter name="dayHours" type="BigDecimal"/>
+            <parameter name="workDays"><description>ISO day numbers, such as 12345</description></parameter>
+            <parameter name="remindDay" type="Integer"/>
+            <parameter name="remindHour" type="Integer"/>
+        </in-parameters>
+        <out-parameters><parameter name="settingValue"/></out-parameters>
+        <actions><script><![CDATA[
+            const row = ec.entity.find('mantle.party.PartySetting').condition('partyId', organizationPartyId).condition('partySettingTypeId', 'ProjTimesheetPolicy').one()
+            let stored = {}
+            if (row?.settingValue) { try { stored = JSON.parse(row.settingValue) || {} } catch (err) { stored = {} } }
+            const L = (text) => ec.l10n.localize(text)
+            const yn = (value) => value ? 'Y' : 'N'
+            if (weekStart != null) { if (weekStart < 1 || weekStart > 7) { ec.message.addError(L('The week starts on a day from 1 (Monday) to 7 (Sunday)')); return } stored.ws = Number(weekStart) }
+            if (approvers != null) { if (!['project', 'line', 'any'].includes(approvers)) { ec.message.addError(L('Approvers are project, line or any')); return } stored.ap = approvers }
+            if (lock != null) stored.lk = yn(lock)
+            if (needItem != null) stored.ri = yn(needItem)
+            if (needComment != null) stored.rc = yn(needComment)
+            if (minHours != null) { const n = Number(String(minHours)); if (!(n > 0 && n <= 8)) { ec.message.addError(L('The smallest entry is more than 0 and at most 8 hours')); return } stored.mh = n }
+            if (future != null) stored.fu = yn(future)
+            if (dayHours != null) { const n = Number(String(dayHours)); if (!(n > 0 && n <= 24)) { ec.message.addError(L('A working day is more than 0 and at most 24 hours')); return } stored.dh = n }
+            if (workDays != null) { const text = String(workDays).replace(/[^1-7]/g, ''); stored.wd = Array.from(new Set(text.split(''))).sort().join('') }
+            if (remindDay != null) { if (remindDay < 1 || remindDay > 7) { ec.message.addError(L('The reminder day is from 1 (Monday) to 7 (Sunday)')); return } stored.rd = Number(remindDay) }
+            if (remindHour != null) { if (remindHour < 0 || remindHour > 23) { ec.message.addError(L('The reminder hour is from 0 to 23')); return } stored.rh = Number(remindHour) }
+            settingValue = JSON.stringify(stored)
+            if (settingValue.length > 255) { ec.message.addError(L('The timesheet policy is too long to store')); return }
+            ec.service.sync().name('store#mantle.party.PartySetting').parameters({partyId: organizationPartyId, partySettingTypeId: 'ProjTimesheetPolicy',
+                settingValue: settingValue}).call()
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="WorkTypes">
+        <description>The work types a person's organization (or organizationPartyId) offers for time, in order: the PartySetting
+            ProjWorkTypes, a JSON object whose offered is a comma list of WorkType enumIds; with no setting (or one that does not
+            read) the services work types Development, Design, Testing, Meeting, Support, Project Management, Consulting and
+            Travel. offeredList: [{enumId, label}] of those that exist; typeList: every WorkType with its label, whether it is
+            offered and its place (sequence).</description>
+        <in-parameters>
+            <parameter name="partyId"><description>The person; default the user's party</description></parameter>
+            <parameter name="organizationPartyId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="offeredList" type="List"/>
+            <parameter name="typeList" type="List"/>
+            <parameter name="organizationPartyId"/>
+            <parameter name="isSet" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const defaults = ['WktpDevelopment', 'WktpDesign', 'WktpTesting', 'WktpMeeting', 'WktpSupport', 'WktpProjectMgmt', 'WktpConsulting', 'WktpTravel']
+            offeredList = []; typeList = []; isSet = false
+            if (!organizationPartyId) organizationPartyId = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy')
+                    .parameters({partyId: partyId || null}).call()?.organizationPartyId || null
+            let offered = null
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                if (organizationPartyId) {
+                    const row = ec.entity.find('mantle.party.PartySetting').condition('partyId', organizationPartyId).condition('partySettingTypeId', 'ProjWorkTypes').one()
+                    if (row?.settingValue) {
+                        try {
+                            const parsed = JSON.parse(row.settingValue)
+                            if (parsed && typeof parsed.offered === 'string') { offered = parsed.offered.split(',').map((id) => id.trim()).filter((id) => id); isSet = true }
+                        } catch (err) { ec.logger.error(`Work types of ${organizationPartyId}: ProjWorkTypes is not JSON, the defaults apply: ${err}`) }
+                    }
+                }
+                if (!offered || !offered.length) offered = defaults
+                const types = Array.from(ec.entity.find('moqui.basic.Enumeration').condition('enumTypeId', 'WorkType').useCache(true).list())
+                const labels = {}
+                for (const type of types) labels[type.enumId] = type.description || type.enumId
+                offeredList = offered.filter((id) => labels[id]).map((id) => ({enumId: id, label: labels[id]}))
+                typeList = types.map((type) => {
+                    const at = offered.indexOf(type.enumId)
+                    return {enumId: type.enumId, label: labels[type.enumId], offered: at >= 0, sequence: at >= 0 ? at + 1 : null,
+                        isOwn: String(type.enumId).startsWith('WktpOrg')}
+                })
+                typeList.sort((a, b) => (a.offered === b.offered ? 0 : a.offered ? -1 : 1) || (a.sequence ?? 0) - (b.sequence ?? 0) || String(a.label).localeCompare(String(b.label)))
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+    <service verb="store" noun="WorkTypes">
+        <description>Stores the work types an organization offers for time (PartySetting ProjWorkTypes, see get#WorkTypes): offered,
+            a list or comma text of WorkType enumIds in order. At least one; each a WorkType; the setting at most 255 characters.</description>
+        <in-parameters>
+            <parameter name="organizationPartyId" required="true"/>
+            <parameter name="offered" type="Object" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="settingValue"/></out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const list = Array.from(new Set((Array.isArray(offered) ? offered : (typeof offered === 'object' && offered.length != null ? Array.from(offered)
+                    : String(offered).split(','))).map((id) => String(id).trim()).filter((id) => id)))
+            if (!list.length) { ec.message.addError(L('Offer at least one work type')); return }
+            const known = new Set(Array.from(ec.entity.find('moqui.basic.Enumeration').condition('enumTypeId', 'WorkType').useCache(true).list()).map((row) => row.enumId))
+            const unknown = list.filter((id) => !known.has(id))
+            if (unknown.length) { ec.message.addError(ec.resource.expand('Not a work type: ${ids}', '', {ids: unknown.join(', ')})); return }
+            settingValue = JSON.stringify({offered: list.join(',')})
+            if (settingValue.length > 255) { ec.message.addError(L('Too many work types offered to store; offer fewer')); return }
+            ec.service.sync().name('store#mantle.party.PartySetting').parameters({partyId: organizationPartyId, partySettingTypeId: 'ProjWorkTypes',
+                settingValue: settingValue}).call()
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="WeekRange">
+        <description>The week of a day by the policy's first day, in the session's time zone: weekStartDay (yyyy-MM-dd), fromDate
+            (the start of that day) and thruDate (the start of the next week's first day, exclusive), and dayList, its seven days.</description>
+        <in-parameters>
+            <parameter name="date"><description>A day (yyyy-MM-dd) or a timestamp; default now</description></parameter>
+            <parameter name="weekStart" type="Integer" default="1"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="weekStartDay"/>
+            <parameter name="fromDate" type="Timestamp"/>
+            <parameter name="thruDate" type="Timestamp"/>
+            <parameter name="dayList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                const text = String(value)
+                if (/^-?\d+$/.test(text)) return Number(text)
+                const parsed = Date.parse(text)
+                return Number.isNaN(parsed) ? null : parsed
+            }
+            const dayStart = (text) => toMillis(ec.l10n.parseTimestamp(text + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'))
+            const addDays = (text, days) => { const d = new Date(text + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().substring(0, 10) }
+            const text = date == null ? '' : String(date)
+            const day = /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ec.l10n.format(String(toMillis(text) ?? toMillis(ec.user.nowTimestamp)), 'yyyy-MM-dd')
+            const isoDay = (dayText) => { const js = new Date(dayText + 'T12:00:00Z').getUTCDay(); return js === 0 ? 7 : js }
+            const first = Number(weekStart) >= 1 && Number(weekStart) <= 7 ? Number(weekStart) : 1
+            const back = (isoDay(day) - first + 7) % 7
+            weekStartDay = addDays(day, -back)
+            dayList = []
+            for (let i = 0; i < 7; i++) dayList.push(addDays(weekStartDay, i))
+            fromDate = new Date(dayStart(weekStartDay))
+            thruDate = new Date(dayStart(addDays(weekStartDay, 7)))
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="WeekDays">
+        <description>The days of a week with what a person should work on each: with partyId the person's capacity
+            (mantle.work.ResourceServices.get#PartyCapacity: their working hours, else the policy's, less holidays and leave;
+            impl-projects.md P7), else the policy's working days at its day hours less the holidays of the policy's organization
+            (WorkEffort purpose WepHoliday, allDayStart the day, owned by the organization); each {day, isoDay, isWorkday,
+            expected, holiday (its name or null), leave (hours)}; and expectedTotal. A capacity that does not read is logged and
+            the policy's days apply.</description>
+        <in-parameters>
+            <parameter name="dayList" type="List" required="true"/>
+            <parameter name="policy" type="Map" required="true"/>
+            <parameter name="organizationPartyId"/>
+            <parameter name="partyId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="weekDayList" type="List"/>
+            <parameter name="expectedTotal" type="BigDecimal"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const dayOf = (value) => { if (value == null || value === '') return ''; const text = String(value); return /^-?\d+$/.test(text) ? new Date(Number(text)).toISOString().slice(0, 10) : text.slice(0, 10) }
+const days = Array.from(dayList || []).map(String)
+            if (partyId && days.length) {
+                ec.message.pushErrors()
+                try {
+                    const sorted = days.slice().sort()
+                    const entry = Array.from(ec.service.sync().name('mantle.work.ResourceServices.get#PartyCapacity').parameters({partyId: partyId,
+                        fromDate: sorted[0], thruDate: sorted[sorted.length - 1], policy: policy, organizationPartyId: organizationPartyId || null})
+                        .call()?.capacityList || [])[0]
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    if (entry) {
+                        const byDay = {}
+                        for (const day of Array.from(entry.dayList || [])) byDay[day.day] = day
+                        let sum = 0
+                        weekDayList = days.map((day) => {
+                            const one = byDay[day] || {}
+                            const js = new Date(day + 'T12:00:00Z').getUTCDay()
+                            const expected = Number(one.capacity || 0)
+                            sum += expected
+                            return {day: day, isoDay: js === 0 ? 7 : js, isWorkday: Number(one.base || 0) > 0 && !one.holiday, expected: expected,
+                                holiday: one.holiday || null, leave: Number(one.leave || 0)}
+                        })
+                        expectedTotal = Math.round(sum * 100) / 100
+                        return
+                    }
+                } catch (err) {
+                    ec.logger.error(`Week days: the capacity of ${partyId} was not read, the policy's days apply: ${err && err.message ? err.message : err}`)
+                } finally { ec.message.clearErrors(); ec.message.popErrors() }
+            }
+            const holidays = {}
+            if (organizationPartyId && days.length) {
+                try {
+                    for (const row of ec.entity.find('mantle.work.effort.WorkEffort').condition('purposeEnumId', 'WepHoliday')
+                            .condition('ownerPartyId', organizationPartyId).condition('allDayStart', 'in', days).disableAuthz().list())
+                        holidays[dayOf(row.allDayStart)] = row.workEffortName || ec.l10n.localize('Holiday')
+                } catch (err) { ec.logger.error(`Week days: the holidays of ${organizationPartyId} were not read, none marked: ${err}`) }
+            }
+            const workDays = Array.from(policy.workDays || [1, 2, 3, 4, 5]).map(Number)
+            const dayHours = Number(policy.dayHours || 8)
+            let total = 0
+            weekDayList = days.map((day) => {
+                const js = new Date(day + 'T12:00:00Z').getUTCDay()
+                const isoDay = js === 0 ? 7 : js
+                const holiday = holidays[day] || null
+                const isWorkday = workDays.includes(isoDay) && !holiday
+                const expected = isWorkday ? dayHours : 0
+                total += expected
+                return {day: day, isoDay: isoDay, isWorkday: isWorkday, expected: expected, holiday: holiday, leave: 0}
+            })
+            expectedTotal = total
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="PartyTimesheet">
+        <description>A person's timesheet of the week a date is in (by the person's policy), made In-Process when there is none
+            and make is true (store#TimeEntry calls it for each entry); a new one has no status, read as In-Process everywhere. The
+            week of an existing timesheet is its own fromDate and thruDate, so a timesheet is found by the date being in it (a day:
+            the middle of its week, so a timesheet made in another time zone's week is found).</description>
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="date"><description>A day (yyyy-MM-dd) or a timestamp; default now</description></parameter>
+            <parameter name="make" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="timesheetId"/>
+            <parameter name="timesheet" type="Map"/>
+            <parameter name="isNew" type="Boolean"/>
+            <parameter name="weekStartDay"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            timesheetId = null; timesheet = null; isNew = false
+            const policy = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').parameters({partyId: partyId}).call()?.policy || {}
+            const range = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({date: date ?? null, weekStart: policy.weekStart || 1}).call()
+            weekStartDay = range.weekStartDay
+            // the instant to look for: the middle of the week for a day (a timesheet made in another time zone is hours off), else
+            // the timestamp itself
+            const text = date == null ? '' : String(date)
+            const asMillis = /^-?\d+$/.test(text) ? Number(text) : (text && !/^\d{4}-\d{2}-\d{2}$/.test(text) ? Date.parse(text) : NaN)
+            const at = new Date(Number.isNaN(asMillis) ? (text ? Number(String(range.fromDate)) + 3.5 * 86400000 : Number(String(ec.user.nowTimestamp))) : asMillis)
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                let found = Array.from(ec.entity.find('mantle.work.time.Timesheet').condition('partyId', partyId)
+                        .condition('fromDate', 'less-equals', at).condition('thruDate', 'greater-than', at).orderBy('fromDate').limit(1).list())[0]
+                if (!found) found = Array.from(ec.entity.find('mantle.work.time.Timesheet').condition('partyId', partyId)
+                        .condition('fromDate', range.fromDate).limit(1).list())[0]
+                if (found) { timesheetId = found.timesheetId; timesheet = found.getMap(); return }
+                if (!make) return
+                // made with no status, which reads as In-Process: a status on create would write a status audit row with every week's first
+                // entry, shifting the audit rows the flow specs check (as impl-projects.md P2 found for WorkEffort.parentWorkEffortId)
+                const out = ec.service.sync().name('create#mantle.work.time.Timesheet').parameters({partyId: partyId, fromDate: range.fromDate,
+                    thruDate: range.thruDate}).call()
+                timesheetId = out?.timesheetId || null
+                if (timesheetId) {
+                    isNew = true
+                    timesheet = ec.entity.find('mantle.work.time.Timesheet').condition('timesheetId', timesheetId).one()?.getMap() || null
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Who may do what ========== -->
+
+    <service verb="get" noun="TimesheetApprovers">
+        <description>The parties who approve a person's week (see the file's comment for the policy's approvers): by timesheetId,
+            or partyId with fromDate and thruDate for a week with no timesheet yet. projectIds: the projects the week's time is on
+            (else the open projects the person is on), whose ProjectManager and Manager parties approve under the project rule.
+            The person is never one of their approvers. anyPermission: the policy is any, so every holder of TIMESHEET_APPROVE
+            approves (approverPartyIds lists up to 200 of them).</description>
+        <in-parameters>
+            <parameter name="timesheetId"/>
+            <parameter name="partyId"/>
+            <parameter name="fromDate" type="Timestamp"/>
+            <parameter name="thruDate" type="Timestamp"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="approverPartyIds" type="List"/>
+            <parameter name="projectIds" type="List"/>
+            <parameter name="anyPermission" type="Boolean"/>
+            <parameter name="policy" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            approverPartyIds = []; projectIds = []; anyPermission = false
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                let person = partyId, from = fromDate, thru = thruDate
+                if (timesheetId) {
+                    const sheet = ec.entity.find('mantle.work.time.Timesheet').condition('timesheetId', timesheetId).one()
+                    if (!sheet) return
+                    person = sheet.partyId; from = sheet.fromDate; thru = sheet.thruDate
+                }
+                if (!person) return
+                policy = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').parameters({partyId: person}).call()?.policy || {}
+                const cf = ec.entity.conditionFactory
+                const found = new Set()
+                const projectsOfWeek = () => {
+                    const ids = new Set()
+                    let find = ec.entity.find('mantle.work.time.TimeEntry').condition('partyId', person).condition('workEffortId', 'is-not-null', null)
+                    if (timesheetId) find = find.condition(cf.makeCondition([cf.makeCondition('timesheetId', 'equals', timesheetId),
+                        cf.makeCondition([cf.makeCondition('fromDate', 'greater-equals', from), cf.makeCondition('fromDate', 'less-than', thru)], 'and')], 'or'))
+                    else find = find.condition('fromDate', 'greater-equals', from).condition('fromDate', 'less-than', thru)
+                    const itemIds = Array.from(new Set(Array.from(find.selectField('workEffortId').list()).map((row) => row.workEffortId)))
+                    if (itemIds.length) for (const item of ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', 'in', itemIds)
+                            .selectField('workEffortId').selectField('rootWorkEffortId').selectField('workEffortTypeEnumId').list())
+                        ids.add(item.workEffortTypeEnumId === 'WetProject' ? item.workEffortId : (item.rootWorkEffortId || item.workEffortId))
+                    if (!ids.size) for (const row of ec.entity.find('mantle.work.effort.WorkEffortAndParty').condition('partyId', person)
+                            .condition('workEffortTypeEnumId', 'WetProject').conditionDate('fromDate', 'thruDate', null)
+                            .condition('statusId', 'not-in', ['WeClosed', 'WeCancelled']).selectField('workEffortId').list()) ids.add(row.workEffortId)
+                    return Array.from(ids).sort()
+                }
+                projectIds = projectsOfWeek()
+                const projectManagers = () => {
+                    if (!projectIds.length) return
+                    for (const row of ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', 'in', projectIds)
+                            .condition('roleTypeId', 'in', ['ProjectManager', 'Manager']).conditionDate('fromDate', 'thruDate', null).list()) found.add(row.partyId)
+                }
+                if (policy.approvers === 'any') {
+                    anyPermission = true
+                    const groupIds = Array.from(ec.entity.find('moqui.security.UserGroupPermission').condition('userPermissionId', 'TIMESHEET_APPROVE')
+                            .conditionDate('fromDate', 'thruDate', null).list()).map((row) => row.userGroupId)
+                    const userIds = groupIds.length ? Array.from(new Set(Array.from(ec.entity.find('moqui.security.UserGroupMember').condition('userGroupId', 'in', groupIds)
+                            .conditionDate('fromDate', 'thruDate', null).list()).map((row) => row.userId))) : []
+                    if (userIds.length) for (const account of ec.entity.find('moqui.security.UserAccount').condition('userId', 'in', userIds).limit(200).list())
+                        if (account.partyId) found.add(account.partyId)
+                } else if (policy.approvers === 'line') {
+                    for (const row of ec.entity.find('mantle.party.PartyRelationship').condition('relationshipTypeEnumId', 'PrtManager')
+                            .condition('toPartyId', person).conditionDate('fromDate', 'thruDate', null).list()) found.add(row.fromPartyId)
+                    if (!found.size) projectManagers()
+                } else projectManagers()
+                found.delete(person)
+                approverPartyIds = Array.from(found).sort()
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="TimesheetAccess">
+        <description>What the user may do with a timesheet (timesheetId), or with a person's week that has none yet (partyId and
+            date): canView (its person, an approver, ADMIN), canEdit (its entries: the person or an approver while In-Process, or
+            any time when the policy does not lock), canSubmit (only the person, In-Process), canApprove and canReturn (an
+            approver or ADMIN, not the person, Completed), canReopen (as approve, Approved, with no invoiced entry). Never an
+            error: a timesheet not found answers all false.</description>
+        <in-parameters>
+            <parameter name="timesheetId"/>
+            <parameter name="partyId"/>
+            <parameter name="date"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="timesheet" type="Map"/>
+            <parameter name="statusId"/>
+            <parameter name="isOwner" type="Boolean"/>
+            <parameter name="isApprover" type="Boolean"/>
+            <parameter name="canView" type="Boolean"/>
+            <parameter name="canEdit" type="Boolean"/>
+            <parameter name="canSubmit" type="Boolean"/>
+            <parameter name="canApprove" type="Boolean"/>
+            <parameter name="canReturn" type="Boolean"/>
+            <parameter name="canReopen" type="Boolean"/>
+            <parameter name="invoiced" type="Boolean"/>
+            <parameter name="locked" type="Boolean"/>
+            <parameter name="policy" type="Map"/>
+            <parameter name="approverPartyIds" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            isOwner = false; isApprover = false; canView = false; canEdit = false; canSubmit = false; canApprove = false; canReturn = false
+            canReopen = false; invoiced = false; locked = false; timesheet = null; statusId = null; approverPartyIds = []
+            const me = ec.user.userAccount?.partyId || null
+            const isAdmin = !!ec.user.userId && ec.user.isInGroup('ADMIN')
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                let person = partyId || null, approverParams = null
+                if (timesheetId) {
+                    const sheet = ec.entity.find('mantle.work.time.Timesheet').condition('timesheetId', timesheetId).one()
+                    if (!sheet) return
+                    timesheet = sheet.getMap()
+                    person = sheet.partyId
+                    statusId = sheet.statusId || 'TmshInProcess'
+                    approverParams = {timesheetId: timesheetId}
+                    invoiced = ec.entity.find('mantle.work.time.TimeEntry').condition('timesheetId', timesheetId)
+                            .condition(ec.entity.conditionFactory.makeCondition([ec.entity.conditionFactory.makeCondition('invoiceId', 'is-not-null', null),
+                                ec.entity.conditionFactory.makeCondition('vendorInvoiceId', 'is-not-null', null)], 'or')).count() > 0
+                } else {
+                    if (!person) return
+                    const pol = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').parameters({partyId: person}).call()?.policy || {}
+                    const range = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({date: date ?? null, weekStart: pol.weekStart || 1}).call()
+                    statusId = 'TmshInProcess'
+                    approverParams = {partyId: person, fromDate: range.fromDate, thruDate: range.thruDate}
+                }
+                const approverOut = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetApprovers').parameters(approverParams).call() || {}
+                policy = approverOut.policy || {}
+                approverPartyIds = Array.from(approverOut.approverPartyIds || [])
+                isOwner = !!me && me === person
+                isApprover = !isOwner && !!me && (isAdmin || approverPartyIds.includes(me) || (!!approverOut.anyPermission && ec.user.hasPermission('TIMESHEET_APPROVE')))
+                canView = isOwner || isApprover || isAdmin
+                locked = policy.lock !== false && (statusId === 'TmshCompleted' || statusId === 'TmshApproved')
+                canEdit = (isOwner || isApprover || isAdmin) && !locked
+                canSubmit = isOwner && statusId === 'TmshInProcess'
+                canApprove = isApprover && statusId === 'TmshCompleted'
+                canReturn = canApprove
+                canReopen = isApprover && statusId === 'TmshApproved' && !invoiced
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== The flow ========== -->
+
+    <service verb="submit" noun="Timesheet">
+        <description>Submits a week (In-Process to Completed), only by its person: the timesheet by timesheetId, or the person's
+            week of a date (made when it has no entries yet). Refused while the timer runs in that week, and when the policy
+            requires a work item and an entry has none. The return reason is cleared, and the approvers get TimesheetApproval.</description>
+        <in-parameters>
+            <parameter name="timesheetId"/>
+            <parameter name="partyId"><description>With date, when there is no timesheetId; default the user's party</description></parameter>
+            <parameter name="date"/>
+        </in-parameters>
+        <out-parameters><parameter name="timesheetId"/><parameter name="message"/><parameter name="notifiedUserIds" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            if (!timesheetId) {
+                const person = partyId || ec.user.userAccount?.partyId
+                if (!person) { ec.message.addError(L('Submit a week of a person')); return }
+                if (person !== ec.user.userAccount?.partyId) { ec.message.addError(L('Only the person submits their week')); return }
+                timesheetId = ec.service.sync().name('mantle.work.TimesheetServices.get#PartyTimesheet').parameters({partyId: person, date: date ?? null}).call()?.timesheetId
+                if (ec.message.hasError()) return
+            }
+            const access = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters({timesheetId: timesheetId}).call() || {}
+            if (!access.timesheet) { ec.message.addError(ec.resource.expand('Timesheet ${timesheetId} not found', '', {timesheetId})); return }
+            if (!access.canSubmit) {
+                ec.message.addError(access.isOwner ? L('This week is already submitted') : L('Only the person submits their week'))
+                return
+            }
+            const cf = ec.entity.conditionFactory
+            const entries = Array.from(ec.entity.find('mantle.work.time.TimeEntry').condition('timesheetId', timesheetId).disableAuthz().list())
+            if (entries.some((entry) => entry.thruDate == null && entry.fromDate != null)) { ec.message.addError(L('Stop the timer first: it runs in this week')); return }
+            if (access.policy?.needItem) {
+                const without = entries.filter((entry) => !entry.workEffortId).length
+                if (without) { ec.message.addError(ec.resource.expand('${count} entries have no work item, which the policy requires', '', {count: without})); return }
+            }
+            ec.service.sync().name('update#mantle.work.time.Timesheet').parameters({timesheetId: timesheetId, statusId: 'TmshCompleted', comments: null}).call()
+            if (ec.message.hasError()) return
+            const out = ec.service.sync().name('mantle.work.TimesheetServices.notify#Timesheet').parameters({timesheetId: timesheetId, change: 'submitted'}).call() || {}
+            notifiedUserIds = out.userIdList || []
+            message = L('Week submitted for approval')
+        ]]></script></actions>
+    </service>
+
+    <service verb="approve" noun="Timesheet">
+        <description>Approves a submitted timesheet (Completed to Approved), for an approver who is not its person (or ADMIN).
+            Its approval notices are decided, and the person gets TimesheetApproved.</description>
+        <in-parameters><parameter name="timesheetId" required="true"/></in-parameters>
+        <out-parameters><parameter name="message"/></out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const access = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters({timesheetId: timesheetId}).call() || {}
+            if (!access.timesheet) { ec.message.addError(ec.resource.expand('Timesheet ${timesheetId} not found', '', {timesheetId})); return }
+            if (!access.canApprove) {
+                ec.message.addError(access.isOwner ? L('You do not approve your own week') : access.statusId !== 'TmshCompleted' ? L('Only a submitted week is approved')
+                        : L('You are not an approver of this week'))
+                return
+            }
+            ec.service.sync().name('update#mantle.work.time.Timesheet').parameters({timesheetId: timesheetId, statusId: 'TmshApproved', comments: null}).call()
+            if (ec.message.hasError()) return
+            ec.service.sync().name('mantle.work.TimesheetServices.notify#Timesheet').parameters({timesheetId: timesheetId, change: 'approved'}).call()
+            message = L('Week approved')
+        ]]></script></actions>
+    </service>
+
+    <service verb="return" noun="Timesheet">
+        <description>Returns a submitted timesheet to its person with a reason (Completed to In-Process), for an approver: the
+            reason is the timesheet's comments (to 255 characters) and a Chatter note on it in full; its approval notices are
+            decided, and the person gets TimesheetReturned.</description>
+        <in-parameters>
+            <parameter name="timesheetId" required="true"/>
+            <parameter name="reason" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="message"/></out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const text = String(reason || '').trim()
+            if (!text) { ec.message.addError(L('Say why the week is returned')); return }
+            const access = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters({timesheetId: timesheetId}).call() || {}
+            if (!access.timesheet) { ec.message.addError(ec.resource.expand('Timesheet ${timesheetId} not found', '', {timesheetId})); return }
+            if (!access.canReturn) {
+                ec.message.addError(access.isOwner ? L('You do not return your own week') : access.statusId !== 'TmshCompleted' ? L('Only a submitted week is returned')
+                        : L('You are not an approver of this week'))
+                return
+            }
+            ec.service.sync().name('update#mantle.work.time.Timesheet').parameters({timesheetId: timesheetId, statusId: 'TmshInProcess',
+                comments: text.length > 255 ? text.substring(0, 254) + '…' : text}).call()
+            if (ec.message.hasError()) return
+            ec.service.sync().name('mantle.work.TimesheetServices.note#TimesheetDecision').parameters({timesheetId: timesheetId, subject: L('Returned'), body: text}).call()
+            ec.service.sync().name('mantle.work.TimesheetServices.notify#Timesheet').parameters({timesheetId: timesheetId, change: 'returned', reason: text}).call()
+            message = L('Week returned')
+        ]]></script></actions>
+    </service>
+
+    <service verb="reopen" noun="Timesheet">
+        <description>Reopens an approved timesheet (Approved to In-Process) for an approver, until any of its entries is invoiced;
+            the reason as for return#Timesheet, and the person gets TimesheetReturned.</description>
+        <in-parameters>
+            <parameter name="timesheetId" required="true"/>
+            <parameter name="reason"/>
+        </in-parameters>
+        <out-parameters><parameter name="message"/></out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const access = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters({timesheetId: timesheetId}).call() || {}
+            if (!access.timesheet) { ec.message.addError(ec.resource.expand('Timesheet ${timesheetId} not found', '', {timesheetId})); return }
+            if (!access.canReopen) {
+                ec.message.addError(access.invoiced ? L('Some of this week is invoiced: it stays approved') : access.statusId !== 'TmshApproved'
+                        ? L('Only an approved week is reopened') : L('You are not an approver of this week'))
+                return
+            }
+            const text = String(reason || '').trim() || L('Reopened for changes')
+            ec.service.sync().name('update#mantle.work.time.Timesheet').parameters({timesheetId: timesheetId, statusId: 'TmshInProcess',
+                comments: text.length > 255 ? text.substring(0, 254) + '…' : text}).call()
+            if (ec.message.hasError()) return
+            ec.service.sync().name('mantle.work.TimesheetServices.note#TimesheetDecision').parameters({timesheetId: timesheetId, subject: L('Reopened'), body: text}).call()
+            ec.service.sync().name('mantle.work.TimesheetServices.notify#Timesheet').parameters({timesheetId: timesheetId, change: 'reopened', reason: text}).call()
+            message = L('Week reopened')
+        ]]></script></actions>
+    </service>
+
+    <!-- the decision services of the TimesheetApproval topic (org.moqui.impl.NotificationServices approve# and refuse#NotificationMessage) -->
+    <service verb="approve" noun="TimesheetNotice">
+        <in-parameters>
+            <parameter name="recordEntityName"/><parameter name="recordId" required="true"/>
+            <parameter name="message" type="Map"/><parameter name="notificationMessageId"/>
+        </in-parameters>
+        <out-parameters><parameter name="decision"/></out-parameters>
+        <actions>
+            <service-call name="mantle.work.TimesheetServices.approve#Timesheet" in-map="{timesheetId:recordId}"/>
+            <set field="decision" value="approved"/>
+        </actions>
+    </service>
+    <service verb="return" noun="TimesheetNotice">
+        <in-parameters>
+            <parameter name="recordEntityName"/><parameter name="recordId" required="true"/>
+            <parameter name="message" type="Map"/><parameter name="notificationMessageId"/><parameter name="reason"/>
+        </in-parameters>
+        <out-parameters><parameter name="decision"/></out-parameters>
+        <actions>
+            <service-call name="mantle.work.TimesheetServices.return#Timesheet" in-map="{timesheetId:recordId, reason:reason}"/>
+            <set field="decision" value="returned"/>
+        </actions>
+    </service>
+
+    <service verb="note" noun="TimesheetDecision" allow-remote="false">
+        <description>A return or reopen reason as a Chatter note on the timesheet (CommunicationServices.log#RecordNote); a
+            failure is logged, the decision stays.</description>
+        <in-parameters>
+            <parameter name="timesheetId" required="true"/>
+            <parameter name="subject"/>
+            <parameter name="body" required="true"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            ec.message.pushErrors()
+            try {
+                ec.service.sync().name('mantle.party.CommunicationServices.log#RecordNote').parameters({recordEntityName: 'mantle.work.time.Timesheet',
+                    recordId: timesheetId, subject: subject || null, body: body}).call()
+                if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+            } catch (err) {
+                ec.logger.error(`Timesheet ${timesheetId}: the decision note was not logged: ${err && err.message ? err.message : err}`)
+            } finally { ec.message.clearErrors(); ec.message.popErrors() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="notify" noun="Timesheet" allow-remote="false">
+        <description>The notices of a change (submitted: TimesheetApproval to the approvers' users; approved: TimesheetApproved to
+            the person's; returned and reopened: TimesheetReturned with the reason), with personName, weekText, hoursText, change,
+            actorName and reason; approved and returned decide the open approval notices of the timesheet. A failure is logged and
+            the change stays.</description>
+        <in-parameters>
+            <parameter name="timesheetId" required="true"/>
+            <parameter name="change" required="true"/>
+            <parameter name="reason"/>
+        </in-parameters>
+        <out-parameters><parameter name="userIdList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            userIdList = []
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const sheet = ec.entity.find('mantle.work.time.Timesheet').condition('timesheetId', timesheetId).one()
+                if (!sheet) return
+                // the approval notices are decided by the decision, wherever it was made
+                if (change === 'approved' || change === 'returned') {
+                    const messageIds = Array.from(ec.entity.find('moqui.security.user.NotificationMessage').condition('topic', 'TimesheetApproval')
+                            .condition('recordEntityName', 'mantle.work.time.Timesheet').condition('recordId', timesheetId).selectField('notificationMessageId').list())
+                            .map((row) => row.notificationMessageId)
+                    if (messageIds.length) for (const row of ec.entity.find('moqui.security.user.NotificationMessageUser').condition('notificationMessageId', 'in', messageIds)
+                            .condition('viewedDate', 'is-null', null).list()) { row.viewedDate = ec.user.nowTimestamp; row.update() }
+                }
+                const nameOf = (partyId) => {
+                    const party = partyId ? ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one() : null
+                    return party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || partyId) : (partyId || '')
+                }
+                // a timesheet made in another time zone starts hours off a day: its days are read at their middle
+                const fromMillis = Number(String(sheet.fromDate)) + 43200000
+                const lastMillis = Number(String(sheet.thruDate)) - 43200000
+                const weekText = ec.l10n.format(String(fromMillis), 'MMM d') + ' – ' + ec.l10n.format(String(lastMillis), 'MMM d, yyyy')
+                let hours = 0
+                for (const entry of ec.entity.find('mantle.work.time.TimeEntry').condition('timesheetId', timesheetId).selectField('hours').list()) hours += Number(String(entry.hours ?? 0))
+                const message = {timesheetId: timesheetId, partyId: sheet.partyId, personName: nameOf(sheet.partyId), weekText: weekText,
+                    weekStart: ec.l10n.format(String(fromMillis), 'yyyy-MM-dd'), hoursText: ec.l10n.format(Math.round(hours * 100) / 100, '#,##0.##'), change: change,
+                    actorName: ec.user.userAccount?.userFullName || ec.user.username || '', reason: reason || ''}
+                let topic, userIds = []
+                const usersOf = (partyIds) => partyIds.length ? Array.from(ec.entity.find('moqui.security.UserAccount').condition('partyId', 'in', partyIds)
+                        .selectField('userId').list()).map((row) => row.userId).filter((userId) => userId && userId !== ec.user.userId) : []
+                if (change === 'submitted') {
+                    topic = 'TimesheetApproval'
+                    const approvers = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetApprovers').parameters({timesheetId: timesheetId}).call() || {}
+                    userIds = usersOf(Array.from(approvers.approverPartyIds || []))
+                } else {
+                    topic = change === 'approved' ? 'TimesheetApproved' : 'TimesheetReturned'
+                    userIds = usersOf([sheet.partyId])
+                }
+                if (!userIds.length) return
+                const nm = ec.makeNotificationMessage().topic(topic).userIds(userIds).message(message)
+                nm.record('mantle.work.time.Timesheet', timesheetId)
+                nm.send()
+                userIdList = userIds
+            } catch (err) {
+                ec.logger.error(`Timesheet ${timesheetId}: the ${change} notice was not sent: ${err && err.message ? err.message : err}`)
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Reading a week ========== -->
+
+    <service verb="get" noun="PartyWeek">
+        <description>
+            A person's week for MyTime (design-projects.md §8 WeekGrid), for the person, an approver of the week or ADMIN (others get
+            an error): week {partyId, personName, weekStart, prevWeek, nextWeek, isThisWeek, label, fromDate, thruDate (millis),
+            dayList [{day, label, dateLabel, isWorkday, expected, holiday, isToday, isPast, isFuture, total, below (a past working
+            day under its hours)}], rowList [{workEffortId (null for time on no work item), workEffortName, rootWorkEffortId,
+            projectName, isOpen, cells {day: {hours, entryIds}}, total, added}], entryList [{timeEntryId, workEffortId, day,
+            fromDate, thruDate, fromTime and thruTime (HH:mm in the session's time zone), hours, breakHours, comments, workTypeEnumId,
+            workTypeLabel, billable, running, invoiced}], total,
+            billableTotal, expectedTotal, difference, timesheet {timesheetId, statusId, statusLabel, returned, reason,
+            submittedDate, approvedByName, approvedDate}, access (get#TimesheetAccess), policy}. extraWorkEffortIds: the rows
+            added to the week without time (MyTime's Add row and Copy last week's rows).
+        </description>
+        <in-parameters>
+            <parameter name="partyId"><description>Default the user's party</description></parameter>
+            <parameter name="date"><description>A day of the week; default today</description></parameter>
+            <parameter name="extraWorkEffortIds" type="List"/>
+        </in-parameters>
+        <out-parameters><parameter name="week" type="Map"/></out-parameters>
+        <actions><script><![CDATA[
+            week = null
+            const L = (text) => ec.l10n.localize(text)
+            const me = ec.user.userAccount?.partyId || null
+            const person = partyId || me
+            if (!person) { ec.message.addError(L('A week is of a person')); return }
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                const text = String(value)
+                if (/^-?\d+$/.test(text)) return Number(text)
+                const parsed = Date.parse(text)
+                return Number.isNaN(parsed) ? null : parsed
+            }
+            const round = (value) => Math.round(value * 100) / 100
+            const dayText = (millis) => ec.l10n.format(String(millis), 'yyyy-MM-dd')
+            const addDays = (text, days) => { const d = new Date(text + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().substring(0, 10) }
+            const policyOut = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').parameters({partyId: person}).call() || {}
+            const policy = policyOut.policy || {}
+            const range = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({date: date ?? null, weekStart: policy.weekStart || 1}).call()
+            const fromMs = toMillis(range.fromDate), thruMs = toMillis(range.thruDate)
+            const sheetOut = ec.service.sync().name('mantle.work.TimesheetServices.get#PartyTimesheet').parameters({partyId: person, date: range.weekStartDay, make: false}).call() || {}
+            const access = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters(sheetOut.timesheetId
+                    ? {timesheetId: sheetOut.timesheetId} : {partyId: person, date: range.weekStartDay}).call() || {}
+            if (!access.canView) { ec.message.addError(L('This week is not available')); return }
+
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const cf = ec.entity.conditionFactory
+                const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', person).one()
+                const personName = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || person) : person
+                // the entries: of the timesheet, and of the person in the week's dates on no timesheet (made before timesheets)
+                const inWeek = [cf.makeCondition('fromDate', 'greater-equals', new Date(fromMs)), cf.makeCondition('fromDate', 'less-than', new Date(thruMs))]
+                const conds = [cf.makeCondition(sheetOut.timesheetId ? inWeek.concat([cf.makeCondition('timesheetId', 'is-null', null)]) : inWeek, 'and')]
+                if (sheetOut.timesheetId) conds.push(cf.makeCondition('timesheetId', 'equals', sheetOut.timesheetId))
+                const entries = Array.from(ec.entity.find('mantle.work.time.TimeEntry').condition('partyId', person).condition(cf.makeCondition(conds, 'or'))
+                        .orderBy('fromDate').list())
+                const workTypes = {}
+                const workTypeLabel = (enumId) => {
+                    if (!enumId) return ''
+                    if (!(enumId in workTypes)) workTypes[enumId] = ec.entity.find('moqui.basic.Enumeration').condition('enumId', enumId).useCache(true).one()?.description || enumId
+                    return workTypes[enumId]
+                }
+                const nowMs = toMillis(ec.user.nowTimestamp)
+                const today = dayText(nowMs)
+                const entryList = entries.map((entry) => {
+                    const from = toMillis(entry.fromDate), thru = toMillis(entry.thruDate)
+                    const running = thru == null && from != null
+                    let hours = entry.hours != null ? Number(String(entry.hours)) : null
+                    if (running) hours = round((nowMs - from) / 3600000)
+                    return {timeEntryId: entry.timeEntryId, workEffortId: entry.workEffortId || null, day: from != null ? dayText(from) : range.weekStartDay,
+                        fromDate: from, thruDate: thru, fromTime: from != null ? ec.l10n.format(String(from), 'HH:mm') : null,
+                        thruTime: thru != null ? ec.l10n.format(String(thru), 'HH:mm') : null, hours: hours ?? 0, breakHours: entry.breakHours != null ? Number(String(entry.breakHours)) : null,
+                        comments: entry.comments || '', workTypeEnumId: entry.workTypeEnumId || null, workTypeLabel: workTypeLabel(entry.workTypeEnumId),
+                        rateTypeEnumId: entry.rateTypeEnumId || null, billable: entry.rateTypeEnumId !== 'RatpNoCharge', running: running,
+                        invoiced: !!(entry.invoiceId || entry.vendorInvoiceId)}
+                })
+                // the rows: the items with time, then those added to the week
+                const itemIds = Array.from(new Set(entryList.map((entry) => entry.workEffortId).filter((id) => id).concat(Array.from(extraWorkEffortIds || []).map(String))))
+                const items = {}
+                if (itemIds.length) for (const item of ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', 'in', itemIds).list()) items[item.workEffortId] = item
+                const projectIds = Array.from(new Set(Object.values(items).map((item) => item.workEffortTypeEnumId === 'WetProject' ? item.workEffortId : item.rootWorkEffortId).filter((id) => id)))
+                const projects = {}
+                if (projectIds.length) for (const project of ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', 'in', projectIds).list()) projects[project.workEffortId] = project
+                const days = range.dayList.map(String)
+                const rowOf = {}
+                const rowList = []
+                const makeRow = (itemId, added) => {
+                    const item = itemId ? items[itemId] : null
+                    if (itemId && !item) return null
+                    const rootId = item ? (item.workEffortTypeEnumId === 'WetProject' ? item.workEffortId : item.rootWorkEffortId) : null
+                    const cells = {}
+                    for (const day of days) cells[day] = {hours: 0, entryIds: []}
+                    const row = {workEffortId: itemId || null, workEffortName: item ? (item.workEffortName || itemId) : L('No work item'), rootWorkEffortId: rootId || null,
+                        projectName: rootId && projects[rootId] ? (projects[rootId].workEffortName || rootId) : '', purposeEnumId: item?.purposeEnumId || null,
+                        isOpen: !item || !['WeComplete', 'WeClosed', 'WeCancelled'].includes(item.statusId), cells: cells, total: 0, added: !!added}
+                    rowOf[itemId || ''] = row
+                    rowList.push(row)
+                    return row
+                }
+                for (const entry of entryList) {
+                    const row = rowOf[entry.workEffortId || ''] || makeRow(entry.workEffortId, false)
+                    if (!row || !row.cells[entry.day]) continue
+                    row.cells[entry.day].hours = round(row.cells[entry.day].hours + entry.hours)
+                    row.cells[entry.day].entryIds.push(entry.timeEntryId)
+                    row.total = round(row.total + entry.hours)
+                }
+                for (const itemId of Array.from(extraWorkEffortIds || []).map(String)) if (itemId && !rowOf[itemId]) makeRow(itemId, true)
+                rowList.sort((a, b) => (a.workEffortId ? 0 : 1) - (b.workEffortId ? 0 : 1) || String(a.projectName).localeCompare(String(b.projectName))
+                        || String(a.workEffortId).localeCompare(String(b.workEffortId), undefined, {numeric: true}))
+
+                const weekDays = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekDays').parameters({dayList: days, policy: policy,
+                    organizationPartyId: policyOut.organizationPartyId || null, partyId: person}).call() || {}
+                let total = 0, billableTotal = 0
+                for (const entry of entryList) { total += entry.hours; if (entry.billable) billableTotal += entry.hours }
+                const dayList = Array.from(weekDays.weekDayList || []).map((info) => {
+                    let dayTotal = 0
+                    for (const entry of entryList) if (entry.day === info.day) dayTotal += entry.hours
+                    const millis = toMillis(ec.l10n.parseTimestamp(info.day + ' 12:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'))
+                    const isPast = info.day < today
+                    return Object.assign({}, info, {label: ec.l10n.format(String(millis), 'EEE'), dateLabel: ec.l10n.format(String(millis), 'MMM d'),
+                        isToday: info.day === today, isPast: isPast, isFuture: info.day > today, total: round(dayTotal),
+                        below: isPast && info.isWorkday && dayTotal < Number(info.expected) - 0.001})
+                })
+                // the timesheet: status, the return reason, who approved and when (the status audit)
+                const sheet = sheetOut.timesheet
+                const statusId = sheet?.statusId || 'TmshInProcess'
+                const statusLabel = ec.entity.find('moqui.basic.StatusItem').condition('statusId', statusId).useCache(true).one()?.description || statusId
+                let submittedDate = null, approvedByName = null, approvedDate = null
+                if (sheet) {
+                    for (const log of ec.entity.find('moqui.entity.EntityAuditLog').condition('changedEntityName', 'mantle.work.time.Timesheet')
+                            .condition('changedFieldName', 'statusId').condition('pkPrimaryValue', sheet.timesheetId).orderBy('changedDate').list()) {
+                        if (log.newValueText === 'TmshCompleted') submittedDate = toMillis(log.changedDate)
+                        if (log.newValueText === 'TmshApproved') {
+                            approvedDate = toMillis(log.changedDate)
+                            const account = log.changedByUserId ? ec.entity.find('moqui.security.UserAccount').condition('userId', log.changedByUserId).one() : null
+                            approvedByName = account ? (account.userFullName || account.username) : (log.changedByUserId || null)
+                        }
+                    }
+                }
+                const thisRange = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({weekStart: policy.weekStart || 1}).call()
+                const lastDay = addDays(range.weekStartDay, 6)
+                const label = ec.l10n.format(String(fromMs), 'MMM d') + ' – ' + (range.weekStartDay.substring(0, 7) === lastDay.substring(0, 7)
+                        ? ec.l10n.format(String(fromMs + 6 * 86400000 + 3600000), 'd, yyyy') : ec.l10n.format(String(fromMs + 6 * 86400000 + 3600000), 'MMM d, yyyy'))
+                const expectedTotal = Number(String(weekDays.expectedTotal ?? 0))
+                week = {partyId: person, personName: personName, isMine: person === me, weekStart: range.weekStartDay, prevWeek: addDays(range.weekStartDay, -7),
+                    nextWeek: addDays(range.weekStartDay, 7), isThisWeek: thisRange.weekStartDay === range.weekStartDay, label: label, fromDate: fromMs, thruDate: thruMs,
+                    dayList: dayList, rowList: rowList, entryList: entryList, total: round(total), billableTotal: round(billableTotal), expectedTotal: round(expectedTotal),
+                    difference: round(total - expectedTotal),
+                    timesheet: {timesheetId: sheet?.timesheetId || null, statusId: statusId, statusLabel: statusId === 'TmshCompleted' ? L('Submitted') : statusLabel,
+                        returned: statusId === 'TmshInProcess' && !!sheet?.comments, reason: sheet?.comments || null, submittedDate: submittedDate,
+                        approvedByName: approvedByName, approvedDate: approvedDate},
+                    access: {canView: !!access.canView, canEdit: !!access.canEdit, canSubmit: !!access.canSubmit, canApprove: !!access.canApprove,
+                        canReturn: !!access.canReturn, canReopen: !!access.canReopen, isOwner: !!access.isOwner, isApprover: !!access.isApprover, locked: !!access.locked},
+                    policy: policy}
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="TimesheetSummary">
+        <description>A timesheet's numbers for Timesheets and TimesheetDetail, for one who may view it: hours, billable, the working
+            hours (get#WeekDays), the difference; byProject [{rootWorkEffortId, projectName, workEffortId, workEffortName, hours,
+            billable}] by project and item; flagList [{kind, day, timeEntryId, workEffortId, text}]: entries with no comment where
+            the policy requires one, days over 12 hours, entries on days that are not working days, entries on closed items, and
+            entries with no work item.</description>
+        <in-parameters><parameter name="timesheetId" required="true"/></in-parameters>
+        <out-parameters><parameter name="summary" type="Map"/></out-parameters>
+        <actions><script><![CDATA[
+            summary = null
+            const L = (text) => ec.l10n.localize(text)
+            const access = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters({timesheetId: timesheetId}).call() || {}
+            if (!access.canView) { ec.message.addError(ec.resource.expand('Timesheet ${timesheetId} not found', '', {timesheetId})); return }
+            const sheet = access.timesheet
+            const week = ec.service.sync().name('mantle.work.TimesheetServices.get#PartyWeek').parameters({partyId: sheet.partyId,
+                date: ec.l10n.format(String(Number(String(sheet.fromDate)) + 3.5 * 86400000), 'yyyy-MM-dd')}).call()?.week
+            if (!week) return
+            const round = (value) => Math.round(value * 100) / 100
+            const byKey = {}
+            const byProject = []
+            for (const entry of week.entryList) {
+                const row = week.rowList.find((one) => (one.workEffortId || null) === (entry.workEffortId || null))
+                const key = entry.workEffortId || ''
+                let line = byKey[key]
+                if (!line) {
+                    line = byKey[key] = {rootWorkEffortId: row?.rootWorkEffortId || null, projectName: row?.projectName || '', workEffortId: entry.workEffortId || null,
+                        workEffortName: row?.workEffortName || L('No work item'), hours: 0, billable: 0}
+                    byProject.push(line)
+                }
+                line.hours = round(line.hours + entry.hours)
+                if (entry.billable) line.billable = round(line.billable + entry.hours)
+            }
+            byProject.sort((a, b) => String(a.projectName).localeCompare(String(b.projectName)) || String(a.workEffortId).localeCompare(String(b.workEffortId), undefined, {numeric: true}))
+            const flagList = []
+            const dayInfo = {}
+            for (const day of week.dayList) dayInfo[day.day] = day
+            for (const entry of week.entryList) {
+                const row = week.rowList.find((one) => (one.workEffortId || null) === (entry.workEffortId || null))
+                const what = entry.workEffortId ? entry.workEffortId + ' ' + (row?.workEffortName || '') : L('No work item')
+                if (week.policy.needComment && !String(entry.comments || '').trim())
+                    flagList.push({kind: 'noComment', day: entry.day, timeEntryId: entry.timeEntryId, workEffortId: entry.workEffortId, text: ec.resource.expand('No comment on ${what}', '', {what})})
+                if (!entry.workEffortId)
+                    flagList.push({kind: 'noItem', day: entry.day, timeEntryId: entry.timeEntryId, workEffortId: null, text: L('Time on no work item')})
+                if (dayInfo[entry.day] && !dayInfo[entry.day].isWorkday)
+                    flagList.push({kind: 'offDay', day: entry.day, timeEntryId: entry.timeEntryId, workEffortId: entry.workEffortId,
+                        text: ec.resource.expand('${what} on a day off', '', {what})})
+                if (row && entry.workEffortId && !row.isOpen)
+                    flagList.push({kind: 'closedItem', day: entry.day, timeEntryId: entry.timeEntryId, workEffortId: entry.workEffortId,
+                        text: ec.resource.expand('${what} is closed', '', {what})})
+            }
+            for (const day of week.dayList) if (day.total > 12)
+                flagList.push({kind: 'longDay', day: day.day, timeEntryId: null, workEffortId: null, text: ec.resource.expand('${hours} h in one day', '', {hours: day.total})})
+            summary = {timesheetId: timesheetId, week: week, hours: week.total, billable: week.billableTotal, expected: week.expectedTotal,
+                difference: week.difference, byProject: byProject, flagList: flagList}
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="TimeKeepers">
+        <description>The people who keep time (the missing-time reminders and Timesheets' Missing): persons with a current role on
+            an open project that is not a template, other than the client and vendor roles (Customer, CustomerBillTo,
+            ClientManager, ClientBilling, Vendor, VendorBillFrom); with projectIds, only on those projects.</description>
+        <in-parameters><parameter name="projectIds" type="List"/></in-parameters>
+        <out-parameters><parameter name="partyIdList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            partyIdList = []
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const outsideRoles = ['Customer', 'CustomerBillTo', 'ClientManager', 'ClientBilling', 'Vendor', 'VendorBillFrom']
+                let find = ec.entity.find('mantle.work.effort.WorkEffortAndParty').condition('workEffortTypeEnumId', 'WetProject')
+                        .condition('statusId', 'not-in', ['WeClosed', 'WeCancelled']).conditionDate('fromDate', 'thruDate', null)
+                        .condition('roleTypeId', 'not-in', outsideRoles)
+                if (projectIds != null) {
+                    const ids = Array.from(projectIds)
+                    if (!ids.length) return
+                    find = find.condition('workEffortId', 'in', ids)
+                }
+                const rows = Array.from(find.selectField('partyId').selectField('workEffortId').selectField('isTemplate').list()).filter((row) => row.isTemplate !== 'Y')
+                const partyIds = Array.from(new Set(rows.map((row) => row.partyId)))
+                if (!partyIds.length) return
+                for (const person of ec.entity.find('mantle.party.Person').condition('partyId', 'in', partyIds).selectField('partyId').list()) partyIdList.push(person.partyId)
+                partyIdList.sort()
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="find" noun="Timesheets">
+        <description>
+            The timesheets the user may see (get#TimesheetAccess canView), for Timesheets (design-projects.md §8). list: toApprove
+            (submitted ones the user approves), mine, returned (In-Process with a return or reopen reason), approved, all, or
+            missing (the time keepers of the user's managed projects, all for ADMIN, whose week has no submitted or approved
+            timesheet; a row per person, timesheetId null when there is none). partyId and statusId narrow; the week is
+            weekDate's (missing: default last week), or every week from fromDate to thruDate (default the last 8 weeks).
+            A row: {timesheetId, partyId, personName, weekStart, weekText, statusId, statusLabel, returned, hours, billable,
+            expected, difference, submittedDate, approverNames, canApprove, canReturn, canReopen}. counts: the rows of each list
+            (toApprove, mine, returned, approved, all, missing).
+        </description>
+        <in-parameters>
+            <parameter name="list" default-value="all"/>
+            <parameter name="partyId"/>
+            <parameter name="statusId"/>
+            <parameter name="weekDate"/>
+            <parameter name="fromDate" type="Timestamp"/>
+            <parameter name="thruDate" type="Timestamp"/>
+            <parameter name="withCounts" type="Boolean" default="true"/>
+            <parameter name="limit" type="Integer" default="200"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="rowList" type="List"/>
+            <parameter name="counts" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            rowList = []; counts = {}
+            const L = (text) => ec.l10n.localize(text)
+            const me = ec.user.userAccount?.partyId || null
+            const isAdmin = !!ec.user.userId && ec.user.isInGroup('ADMIN')
+            const toMillis = (value) => value == null || value === '' ? null : (/^-?\d+$/.test(String(value)) ? Number(String(value)) : Date.parse(String(value)))
+            const round = (value) => Math.round(value * 100) / 100
+            const policy = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').call()?.policy || {}
+            const weekOf = (date) => ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({date: date ?? null, weekStart: policy.weekStart || 1}).call()
+            const thisWeek = weekOf(null)
+            const lastWeek = weekOf(Number(String(thisWeek.fromDate)) - 86400000)
+            let from = fromDate, thru = thruDate
+            if (weekDate) { const w = weekOf(weekDate); from = w.fromDate; thru = w.thruDate }
+            // a decision list with no period is every week; another list the last eight weeks
+            const decision = list === 'toApprove' || list === 'returned'
+            if (!from && !thru && !decision) { from = new Date(Number(String(thisWeek.fromDate)) - 8 * 7 * 86400000); thru = thisWeek.thruDate }
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const nameCache = {}
+                const nameOf = (partyId) => {
+                    if (!partyId) return ''
+                    if (!(partyId in nameCache)) {
+                        const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one()
+                        nameCache[partyId] = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || partyId) : partyId
+                    }
+                    return nameCache[partyId]
+                }
+                const statusLabels = {TmshInProcess: L('In progress'), TmshCompleted: L('Submitted'), TmshApproved: L('Approved')}
+                // the candidate timesheets of the period, each checked
+                // a week's timesheet holds the middle of the week (one made in another time zone starts hours off)
+                const ms = (value) => value instanceof Date ? value.getTime() : toMillis(value)
+                let find = ec.entity.find('mantle.work.time.Timesheet')
+                if (weekDate) {
+                    const middle = new Date(ms(from) + 3.5 * 86400000)
+                    find = find.condition('fromDate', 'less-equals', middle).condition('thruDate', 'greater-than', middle)
+                } else {
+                    if (from) find = find.condition('fromDate', 'greater-equals', new Date(ms(from) - 86400000))
+                    if (thru) find = find.condition('fromDate', 'less-than', new Date(ms(thru) - 86400000))
+                }
+                if (partyId) find = find.condition('partyId', partyId)
+                if (list === 'toApprove') find = find.condition('statusId', 'TmshCompleted')
+                if (list === 'returned') find = find.condition('statusId', 'TmshInProcess').condition('comments', 'is-not-null', null)
+                if (list === 'approved') find = find.condition('statusId', 'TmshApproved')
+                const sheets = Array.from(find.orderBy('-fromDate').orderBy('partyId').limit(1000).list())
+                const sheetIds = sheets.map((sheet) => sheet.timesheetId)
+                const hoursOf = {}, billableOf = {}
+                if (sheetIds.length) for (const entry of ec.entity.find('mantle.work.time.TimeEntry').condition('timesheetId', 'in', sheetIds)
+                        .selectField('timesheetId').selectField('hours').selectField('rateTypeEnumId').list()) {
+                    const hours = Number(String(entry.hours ?? 0))
+                    hoursOf[entry.timesheetId] = (hoursOf[entry.timesheetId] || 0) + hours
+                    if (entry.rateTypeEnumId !== 'RatpNoCharge') billableOf[entry.timesheetId] = (billableOf[entry.timesheetId] || 0) + hours
+                }
+                const submittedOf = {}
+                if (sheetIds.length) for (const log of ec.entity.find('moqui.entity.EntityAuditLog').condition('changedEntityName', 'mantle.work.time.Timesheet')
+                        .condition('changedFieldName', 'statusId').condition('pkPrimaryValue', 'in', sheetIds).condition('newValueText', 'TmshCompleted')
+                        .orderBy('changedDate').list()) submittedOf[log.pkPrimaryValue] = toMillis(log.changedDate)
+                const expectedCache = {}
+                const expectedOf = (personId, weekStart) => {
+                    const key = personId + '|' + weekStart
+                    if (!(key in expectedCache)) {
+                        const pOut = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').parameters({partyId: personId}).call() || {}
+                        const w = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({date: weekStart, weekStart: pOut.policy?.weekStart || 1}).call()
+                        expectedCache[key] = Number(String(ec.service.sync().name('mantle.work.TimesheetServices.get#WeekDays').parameters({dayList: w.dayList,
+                            policy: pOut.policy || {}, organizationPartyId: pOut.organizationPartyId || null, partyId: personId}).call()?.expectedTotal ?? 0))
+                    }
+                    return expectedCache[key]
+                }
+                // a timesheet made in another time zone starts hours off a day: its days are read at their middle
+                const weekTextOf = (fromMs) => ec.l10n.format(String(fromMs + 43200000), 'MMM d') + ' – ' + ec.l10n.format(String(fromMs + 6 * 86400000 + 43200000), 'MMM d, yyyy')
+                const all = []
+                for (const sheet of sheets) {
+                    const access = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters({timesheetId: sheet.timesheetId}).call() || {}
+                    if (!access.canView) continue
+                    const fromMs = toMillis(sheet.fromDate)
+                    const weekStart = ec.l10n.format(String(fromMs + 43200000), 'yyyy-MM-dd')
+                    const hours = round(hoursOf[sheet.timesheetId] || 0)
+                    const expected = expectedOf(sheet.partyId, weekStart)
+                    const status = sheet.statusId || 'TmshInProcess'
+                    all.push({timesheetId: sheet.timesheetId, partyId: sheet.partyId, personName: nameOf(sheet.partyId), weekStart: weekStart, weekText: weekTextOf(fromMs),
+                        statusId: status, statusLabel: status === 'TmshInProcess' && sheet.comments ? L('Returned') : (statusLabels[status] || status),
+                        returned: status === 'TmshInProcess' && !!sheet.comments, reason: sheet.comments || null, hours: hours,
+                        billable: round(billableOf[sheet.timesheetId] || 0), expected: expected, difference: round(hours - expected), submittedDate: submittedOf[sheet.timesheetId] || null,
+                        approverNames: Array.from(access.approverPartyIds || []).slice(0, 3).map(nameOf).join(', '), isMine: !!access.isOwner,
+                        canApprove: !!access.canApprove, canReturn: !!access.canReturn, canReopen: !!access.canReopen, isApprover: !!access.isApprover})
+                }
+                const lists = {
+                    toApprove: (row) => row.canApprove,
+                    mine: (row) => row.isMine,
+                    returned: (row) => row.returned,
+                    approved: (row) => row.statusId === 'TmshApproved',
+                    all: () => true}
+                // missing: the time keepers whose week (weekDate's, else last week) has no submitted or approved timesheet
+                const missingRows = () => {
+                    const w = weekDate ? weekOf(weekDate) : lastWeek
+                    let projectIds = null
+                    if (!isAdmin) {
+                        const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+                        projectIds = Array.from(vis.managedProjectIds || [])
+                    }
+                    const keepers = Array.from(ec.service.sync().name('mantle.work.TimesheetServices.get#TimeKeepers').parameters(projectIds == null ? {} : {projectIds: projectIds})
+                            .call()?.partyIdList || []).filter((id) => !partyId || id === partyId)
+                    if (!keepers.length) return []
+                    const middle = new Date(Number(String(w.fromDate)) + 3.5 * 86400000)
+                    const done = new Set(Array.from(ec.entity.find('mantle.work.time.Timesheet').condition('partyId', 'in', keepers)
+                            .condition('fromDate', 'less-equals', middle).condition('thruDate', 'greater-than', middle)
+                            .condition('statusId', 'in', ['TmshCompleted', 'TmshApproved']).list()).map((sheet) => sheet.partyId))
+                    const rows = []
+                    for (const keeper of keepers) {
+                        if (done.has(keeper)) continue
+                        const sheet = ec.service.sync().name('mantle.work.TimesheetServices.get#PartyTimesheet').parameters({partyId: keeper, date: w.weekStartDay, make: false}).call() || {}
+                        const hours = sheet.timesheetId ? round(hoursOf[sheet.timesheetId] ?? Array.from(ec.entity.find('mantle.work.time.TimeEntry')
+                                .condition('timesheetId', sheet.timesheetId).selectField('hours').list()).reduce((sum, entry) => sum + Number(String(entry.hours ?? 0)), 0)) : 0
+                        const expected = expectedOf(keeper, w.weekStartDay)
+                        rows.push({timesheetId: sheet.timesheetId || null, partyId: keeper, personName: nameOf(keeper), weekStart: w.weekStartDay,
+                            weekText: weekTextOf(Number(String(w.fromDate))), statusId: sheet.timesheet?.statusId || null, statusLabel: L('Missing'), returned: !!sheet.timesheet?.comments,
+                            reason: null, hours: hours, billable: null, expected: expected, difference: round(hours - expected), submittedDate: null, approverNames: '',
+                            isMine: keeper === me, canApprove: false, canReturn: false, canReopen: false, missing: true})
+                    }
+                    rows.sort((a, b) => String(a.personName).localeCompare(String(b.personName)))
+                    return rows
+                }
+                const chosen = list === 'missing' ? null : (lists[list] || lists.all)
+                let rows = chosen ? all.filter(chosen) : missingRows()
+                if (statusId && list !== 'missing') rows = rows.filter((row) => row.statusId === statusId)
+                rowList = rows.slice(0, Number(limit) || 200)
+                if (withCounts) {
+                    // each list's count over the same period: a decision list's own find is filtered by status, so the others count from all
+                    const pool = list === 'all' || list === 'mine' ? all : Array.from(ec.service.sync().name('mantle.work.TimesheetServices.find#Timesheets')
+                            .parameters({list: 'all', partyId: partyId || null, weekDate: weekDate || null, fromDate: fromDate || null, thruDate: thruDate || null,
+                                withCounts: false, limit: 1000}).call()?.rowList || [])
+                    for (const key of Object.keys(lists)) counts[key] = pool.filter(lists[key]).length
+                    if (lists[list]) counts[list] = rows.length
+                    // the decision lists with no period cover every week, as their own finds do
+                    if (!weekDate && !fromDate && !thruDate) for (const key of ['toApprove', 'returned']) if (key !== list)
+                        counts[key] = Array.from(ec.service.sync().name('mantle.work.TimesheetServices.find#Timesheets').parameters({list: key, partyId: partyId || null,
+                            withCounts: false, limit: 1000}).call()?.rowList || []).length
+                    try { counts.missing = list === 'missing' ? rows.length : missingRows().length } catch (err) {
+                        ec.logger.error(`Timesheets: the missing count failed and is left out: ${err && err.message ? err.message : err}`)
+                        counts.missing = null
+                    }
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="send" noun="MissingTimeReminders">
+        <description>
+            Reminds people whose week is not submitted (TimesheetMissing, with weekText, hoursText, expectedText): the week of weekDate,
+            default last week. With partyIds (Timesheets' Remind), those people, for one who may approve their week (each checked;
+            a refused or failed one is logged, counted in skippedCount and the rest go on). Without, as the hourly ServiceJob
+            send_MissingTimeReminders: every time keeper (get#TimeKeepers) whose policy's reminder day and hour are now (the
+            server's time zone), once a week each (a reminder already sent for that week, by subTopic, is not sent again).
+        </description>
+        <in-parameters>
+            <parameter name="partyIds" type="List"/>
+            <parameter name="weekDate"/>
+            <parameter name="force" type="Boolean" default="false"><description>The job: send whatever the policy's day and hour</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="sentCount" type="Integer"/>
+            <parameter name="skippedCount" type="Integer"/>
+            <parameter name="message"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            sentCount = 0; skippedCount = 0
+            const L = (text) => ec.l10n.localize(text)
+            const asJob = partyIds == null
+            const people = asJob ? Array.from(ec.service.sync().name('mantle.work.TimesheetServices.get#TimeKeepers').call()?.partyIdList || [])
+                    : Array.from(partyIds).map(String).filter((id) => id)
+            const nowMs = Number(String(ec.user.nowTimestamp))
+            const isoToday = (() => { const js = new Date(ec.l10n.format(String(nowMs), 'yyyy-MM-dd') + 'T12:00:00Z').getUTCDay(); return js === 0 ? 7 : js })()
+            const hourNow = Number(ec.l10n.format(String(nowMs), 'H'))
+            for (const person of people) {
+                ec.message.pushErrors()
+                try {
+                    const pOut = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').parameters({partyId: person}).call() || {}
+                    const policy = pOut.policy || {}
+                    if (asJob && !force && (policy.remindDay !== isoToday || policy.remindHour !== hourNow)) continue
+                    const thisWeek = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({weekStart: policy.weekStart || 1}).call()
+                    const w = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({weekStart: policy.weekStart || 1,
+                        date: weekDate || Number(String(thisWeek.fromDate)) - 86400000}).call()
+                    const sheet = ec.service.sync().name('mantle.work.TimesheetServices.get#PartyTimesheet').parameters({partyId: person, date: w.weekStartDay, make: false}).call() || {}
+                    if (['TmshCompleted', 'TmshApproved'].includes(sheet.timesheet?.statusId)) continue
+                    if (!asJob) {
+                        const access = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters(sheet.timesheetId
+                                ? {timesheetId: sheet.timesheetId} : {partyId: person, date: w.weekStartDay}).call() || {}
+                        if (!access.isApprover) { skippedCount++; ec.logger.warn(`Missing time: ${ec.user.username} does not approve ${person}'s week, no reminder`); continue }
+                    }
+                    const subTopic = person + ':' + w.weekStartDay
+                    const wasDisabled = ec.artifactExecution.disableAuthz()
+                    try {
+                        if (asJob && ec.entity.find('moqui.security.user.NotificationMessage').condition('topic', 'TimesheetMissing').condition('subTopic', subTopic).count() > 0) continue
+                        const userIds = Array.from(ec.entity.find('moqui.security.UserAccount').condition('partyId', person).selectField('userId').list()).map((row) => row.userId)
+                        if (!userIds.length) { skippedCount++; continue }
+                        let hours = 0
+                        if (sheet.timesheetId) for (const entry of ec.entity.find('mantle.work.time.TimeEntry').condition('timesheetId', sheet.timesheetId).selectField('hours').list())
+                            hours += Number(String(entry.hours ?? 0))
+                        const expected = Number(String(ec.service.sync().name('mantle.work.TimesheetServices.get#WeekDays').parameters({dayList: w.dayList, policy: policy,
+                            organizationPartyId: pOut.organizationPartyId || null, partyId: person}).call()?.expectedTotal ?? 0))
+                        const fromMs = Number(String(w.fromDate))
+                        const nm = ec.makeNotificationMessage().topic('TimesheetMissing').subTopic(subTopic).userIds(userIds).message({partyId: person,
+                            timesheetId: sheet.timesheetId || null, weekStart: w.weekStartDay,
+                            weekText: ec.l10n.format(String(fromMs + 43200000), 'MMM d') + ' – ' + ec.l10n.format(String(fromMs + 6 * 86400000 + 43200000), 'MMM d, yyyy'),
+                            hoursText: ec.l10n.format(Math.round(hours * 100) / 100, '#,##0.##'), expectedText: ec.l10n.format(expected, '#,##0.##')})
+                        if (sheet.timesheetId) nm.record('mantle.work.time.Timesheet', sheet.timesheetId)
+                        nm.send()
+                        sentCount++
+                    } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                } catch (err) {
+                    skippedCount++
+                    ec.logger.error(`Missing time: the reminder to ${person} was not sent: ${err && err.message ? err.message : err}`)
+                } finally { ec.message.clearErrors(); ec.message.popErrors() }
+            }
+            message = ec.resource.expand('${sent} reminders sent', '', {sent: sentCount}) + (skippedCount ? ', ' + ec.resource.expand('${skipped} skipped', '', {skipped: skippedCount}) : '')
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== The timer ========== -->
+
+    <service verb="get" noun="Timer">
+        <description>The user's running timer (a time entry with a start and no end), or null: {timeEntryId, workEffortId,
+            workEffortName, rootWorkEffortId, projectName, fromDate (millis), comments, elapsedMinutes}. With several running (made
+            before the one-timer rule) the latest.</description>
+        <in-parameters><parameter name="partyId"><description>Default the user's party; another's only for ADMIN or with authz off</description></parameter></in-parameters>
+        <out-parameters><parameter name="timer" type="Map"/></out-parameters>
+        <actions><script><![CDATA[
+            timer = null
+            const me = ec.user.userAccount?.partyId || null
+            const person = partyId || me
+            if (!person) return
+            if (person !== me && !ec.artifactExecution.authzDisabled() && !ec.user.isInGroup('ADMIN')) return
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const entry = Array.from(ec.entity.find('mantle.work.time.TimeEntry').condition('partyId', person).condition('thruDate', 'is-null', null)
+                        .condition('fromDate', 'is-not-null', null).orderBy('-fromDate').limit(1).list())[0]
+                if (!entry) return
+                const item = entry.workEffortId ? ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', entry.workEffortId).one() : null
+                const rootId = item ? (item.workEffortTypeEnumId === 'WetProject' ? item.workEffortId : item.rootWorkEffortId) : null
+                const project = rootId ? ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', rootId).one() : null
+                const from = Number(String(entry.fromDate))
+                timer = {timeEntryId: entry.timeEntryId, workEffortId: entry.workEffortId || null, workEffortName: item?.workEffortName || entry.workEffortId || '',
+                    rootWorkEffortId: rootId || null, projectName: project?.workEffortName || '', fromDate: from, comments: entry.comments || '',
+                    timesheetId: entry.timesheetId || null, elapsedMinutes: Math.max(0, Math.floor((Number(String(ec.user.nowTimestamp)) - from) / 60000))}
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="start" noun="Timer">
+        <description>Starts the user's timer on a work item (or none) from now: one runs per person, so a timer running on another
+            item stops first (switch). A timer already running on the item stays (alreadyRunning). The entry goes on this week's
+            timesheet; a submitted week refuses it.</description>
+        <in-parameters>
+            <parameter name="workEffortId"/>
+            <parameter name="comments"/>
+            <parameter name="workTypeEnumId"/>
+            <parameter name="rateTypeEnumId" default-value="RatpStandard"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="timeEntryId"/>
+            <parameter name="alreadyRunning" type="Boolean"/>
+            <parameter name="stoppedTimeEntryIds" type="List"/>
+            <parameter name="message"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            alreadyRunning = false; stoppedTimeEntryIds = []
+            const me = ec.user.userAccount?.partyId || null
+            if (!me) { ec.message.addError(L('Sign in to start a timer')); return }
+            const running = Array.from(ec.entity.find('mantle.work.time.TimeEntry').condition('partyId', me).condition('thruDate', 'is-null', null)
+                    .condition('fromDate', 'is-not-null', null).orderBy('-fromDate').disableAuthz().list())
+            const same = running.find((entry) => (entry.workEffortId || null) === (workEffortId || null))
+            if (same && running.length === 1) { timeEntryId = same.timeEntryId; alreadyRunning = true; message = L('The timer is already running'); return }
+            for (const entry of running) {
+                if (same && entry.timeEntryId === same.timeEntryId) continue
+                ec.service.sync().name('mantle.work.TimesheetServices.stop#Timer').parameters({timeEntryId: entry.timeEntryId}).call()
+                if (ec.message.hasError()) return
+                stoppedTimeEntryIds.push(entry.timeEntryId)
+            }
+            if (same) { timeEntryId = same.timeEntryId; alreadyRunning = true; message = L('The timer is already running'); return }
+            const out = ec.service.sync().name('mantle.work.TimeServices.create#TimeEntryClockIn').parameters({workEffortId: workEffortId || null,
+                partyId: me, comments: comments || null, workTypeEnumId: workTypeEnumId || null, rateTypeEnumId: rateTypeEnumId || 'RatpStandard',
+                fromDate: ec.user.nowTimestamp}).call()
+            if (ec.message.hasError()) return
+            timeEntryId = out?.timeEntryId
+            message = ec.resource.expand('Timer started at ${time}', '', {time: ec.l10n.format(ec.user.nowTimestamp, 'h:mm a')})
+        ]]></script></actions>
+    </service>
+
+    <service verb="stop" noun="Timer">
+        <description>Stops the user's running timer (timeEntryId, else the running one) now: the entry ends and store#TimeEntry
+            counts its hours and rates. A timer stopped within a minute of its start is removed (discarded).</description>
+        <in-parameters><parameter name="timeEntryId"/></in-parameters>
+        <out-parameters>
+            <parameter name="timeEntryId"/>
+            <parameter name="hours" type="BigDecimal"/>
+            <parameter name="discarded" type="Boolean"/>
+            <parameter name="message"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            discarded = false
+            const me = ec.user.userAccount?.partyId || null
+            let entry = null
+            if (timeEntryId) entry = ec.entity.find('mantle.work.time.TimeEntry').condition('timeEntryId', timeEntryId).disableAuthz().one()
+            else entry = Array.from(ec.entity.find('mantle.work.time.TimeEntry').condition('partyId', me || '_NA_').condition('thruDate', 'is-null', null)
+                    .condition('fromDate', 'is-not-null', null).orderBy('-fromDate').limit(1).disableAuthz().list())[0]
+            if (!entry || entry.thruDate != null || entry.fromDate == null) { ec.message.addError(L('No timer is running')); return }
+            if (entry.partyId !== me && !ec.artifactExecution.authzDisabled() && !ec.user.isInGroup('ADMIN')) { ec.message.addError(L('That timer is not yours')); return }
+            timeEntryId = entry.timeEntryId
+            const nowMs = Number(String(ec.user.nowTimestamp))
+            if (nowMs - Number(String(entry.fromDate)) < 60000) {
+                ec.service.sync().name('mantle.work.TimeServices.delete#TimeEntry').parameters({timeEntryId: timeEntryId}).call()
+                if (ec.message.hasError()) return
+                discarded = true; hours = 0
+                message = L('Timer discarded: under a minute')
+                return
+            }
+            ec.service.sync().name('mantle.work.TimeServices.store#TimeEntry').parameters({timeEntryId: timeEntryId, thruDate: ec.user.nowTimestamp,
+                rateTypeEnumId: entry.rateTypeEnumId || 'RatpStandard'}).call()
+            if (ec.message.hasError()) return
+            hours = ec.entity.find('mantle.work.time.TimeEntry').condition('timeEntryId', timeEntryId).disableAuthz().one()?.hours ?? 0
+            message = ec.resource.expand('Timer stopped: ${hours} h', '', {hours: ec.l10n.format(hours, '#,##0.00')})
+        ]]></script></actions>
+    </service>
+
+    <service verb="update" noun="Timer">
+        <description>The running timer's comment, work type or billable rate, without stopping it.</description>
+        <in-parameters>
+            <parameter name="timeEntryId"/>
+            <parameter name="comments"/>
+            <parameter name="workTypeEnumId"/>
+            <parameter name="rateTypeEnumId"/>
+        </in-parameters>
+        <out-parameters><parameter name="timeEntryId"/></out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const me = ec.user.userAccount?.partyId || null
+            const timer = ec.service.sync().name('mantle.work.TimesheetServices.get#Timer').call()?.timer
+            if (!timer || (timeEntryId && timer.timeEntryId !== timeEntryId)) { ec.message.addError(L('No timer is running')); return }
+            timeEntryId = timer.timeEntryId
+            const fields = {timeEntryId: timeEntryId}
+            if (comments != null) fields.comments = comments || null
+            if (workTypeEnumId != null) fields.workTypeEnumId = workTypeEnumId || null
+            if (rateTypeEnumId) fields.rateTypeEnumId = rateTypeEnumId
+            if (me) ec.service.sync().name('update#mantle.work.time.TimeEntry').parameters(fields).call()
+        ]]></script></actions>
+    </service>
+</services>

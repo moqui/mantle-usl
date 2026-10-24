@@ -37,7 +37,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="systemMessageTypeId" from="systemMessage.systemMessageTypeId"/>
                 <econdition field-name="systemMessageRemoteId" from="systemMessage.systemMessageRemoteId"/>
             </entity-find>
-            <if condition="pmftList.size() == 0">
+            <if condition="!pmftList.length">
                 <return error="true" message="Could not find paymentMethodId from PaymentMethodFileType record for file type PmftBai2 message type ${systemMessage.systemMessageTypeId} remote ${systemMessage.systemMessageRemoteId}"/>
             </if>
 
@@ -55,7 +55,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="baiString" required="true" allow-html="any"/>
         </in-parameters>
         <actions>
-            <set field="typeMap" from="[
+            <set field="typeMap" from="{
                 '108' : 'PMTT_CREDIT',
                 '409' : 'PMTT_DEBIT',
                 '475' : 'PMTT_CHECK',
@@ -64,48 +64,57 @@ along with this software (see the LICENSE.md file). If not, see
                 '142' : 'PMTT_PAYMENT', '451' : 'PMTT_PAYMENT',
                 '174' : 'PMTT_OTHER',
                 '277' : 'PMTT_ZBA_CRTR', '577' : 'PMTT_ZBA_DBTR'
-            ]"/>
+            }"/>
             <entity-find-one entity-name="mantle.account.method.PaymentMethod" value-field="paymentMethod"/>
             <entity-find-one entity-name="mantle.account.method.BankAccount" value-field="bankAccount"/>
             <script><![CDATA[
-                BigDecimal BD_100 = new BigDecimal(100)
-                def currencyCode = "USD"
-                def lastCode = null
+                const BD_100 = toDecimal(100)
+                let currencyCode = 'USD'
+                let lastCode = null
 
-                def routingNumber
-                def accountNumber
-                def postedDate
-                def paymentTransaction = [:]
-                def statusCodes = new HashMap()
+                let routingNumber = null
+                let accountNumber = null
+                let postedDate = null
+                let paymentTransaction = {}
+                const statusCodes = {}
 
-                transactionTotalAmount = 0
+                let transactionTotalAmount = toDecimal(0)
 
-                def parseStatusCodes(List fieldSet, Map results) {
-                    for (int i = 0; i < fieldSet.size(); i+=4) {
-                        amount = fieldSet[i+1]
+                // Java's String.split drops trailing empty fields
+                const splitFields = (line) => {
+                    const parts = line.split(',')
+                    while (parts.length > 1 && parts[parts.length - 1] === '') parts.pop()
+                    return parts
+                }
+
+                const parseStatusCodes = (fieldSet, results) => {
+                    for (let i = 0; i < fieldSet.length; i += 4) {
+                        const amount = fieldSet[i + 1]
                         if (amount) {
-                            results.put(fieldSet[i], new BigDecimal(amount)/100)
+                            results[fieldSet[i]] = toDecimal(amount).divide(100)
                         }
                     }
                 }
 
-                baiString.splitEachLine(',') {fields ->
-                    String code = fields[0]
+                const absOf = (value) => value.compare(0) < 0 ? value.multiply(-1) : value
+
+                for (const line of baiString.split(/\r\n|\r|\n/)) {
+                    const fields = splitFields(line)
+                    const code = fields[0] ?? ''
 
                     // Code 88 continue a previous record, so, when we encounter it we should know
                     // which type it belongs to
-                    if ('88' != code) lastCode = code
+                    if ('88' !== code) lastCode = code
 
                     // validate the originator ID that should match the bank routing number
-                    if ('02' == code) {
+                    if ('02' === code) {
                         routingNumber = fields[1]
-                        if (routingNumber != bankAccount.routingNumber) {
-                            ec.message.addError(ec.resource.expand('BAI originator ID ${originatorId} does not match routing number ${routingNumber} on Bank Account ${paymentMethodId}', '',
-                                    [originatorId: routingNumber, routingNumber: bankAccount.routingNumber, paymentMethodId: paymentMethodId]))
+                        if (routingNumber !== bankAccount.routingNumber) {
+                            ec.message.addError(`BAI originator ID ${routingNumber} does not match routing number ${bankAccount.routingNumber} on Bank Account ${paymentMethodId}`)
                             routingNumber = null
                         }
 
-                        if ('1' != fields[3]) {
+                        if ('1' !== fields[3]) {
                             ec.message.addError("Only groups of type Update can be processed")
                         }
 
@@ -116,71 +125,61 @@ along with this software (see the LICENSE.md file). If not, see
                     }
 
                     // validate the company account number
-                    if (routingNumber && '03' == code) {
+                    if (routingNumber && '03' === code) {
                         accountNumber = fields[1]
-                        if (accountNumber != bankAccount.accountNumber) {
-                            ec.message.addError(ec.resource.expand('Customer account number ${customerAccountNumber} does not match account number ${bankAccount.accountNumber} on Bank Account ${paymentMethodId}', '',
-                                    [customerAccountNumber: accountNumber, accountNumber: bankAccount.accountNumber, paymentMethodId: paymentMethodId]))
+                        if (accountNumber !== bankAccount.accountNumber) {
+                            ec.message.addError(`Customer account number ${accountNumber} does not match account number ${bankAccount.accountNumber} on Bank Account ${paymentMethodId}`)
                             accountNumber = null
                         }
 
                         if (fields[2]) currencyCode = fields[2]
-                        /* don't bother:
-                        if (currencyCode != paymentMethod.currencyUomId) {
-                            ec.message.addError(ec.resource.expand('Imported currency [${importedCurrency}] does not match account currency [${currencyUomId}] on Bank Account [${paymentMethodId}]', '',
-                                    [importedCurrency: currencyCode, currencyUomId: paymentMethod.currencyUomId, paymentMethodId: paymentMethodId]))
-                        }
-                        */
 
-                        parseStatusCodes(fields[3..fields.size()-1], statusCodes)
+                        parseStatusCodes(fields.slice(3), statusCodes)
                     }
 
-                    if (ec.message.hasError()) return
+                    if (ec.message.hasError()) continue
 
                     // create the transaction prepared during previous iteration and clear saved transaction details
-                    if ('16' == code || '49' == code) {
-                        if (paymentTransaction) {
-                            BigDecimal curTransAmount = (BigDecimal) paymentTransaction.transAmount
-                            if (curTransAmount) transactionTotalAmount += curTransAmount.abs()
-                            // ec.logger.info("TX ${curTransAmount} total ${transactionTotalAmount}")
+                    if ('16' === code || '49' === code) {
+                        if (Object.keys(paymentTransaction).length) {
+                            const curTransAmount = paymentTransaction.transAmount
+                            if (curTransAmount && !curTransAmount.isZero()) transactionTotalAmount = transactionTotalAmount.add(absOf(curTransAmount))
 
                             // NOTE: there is no consistent ID from the financial institution for BAI 2 files so can't use to match against existing records
-                            // if (ec.entity.find("mantle.account.method.PaymentMethodTrans").condition([paymentMethodId:paymentMethodId, fitId:paymentTransaction.fitId]).count() == 0)
-
                             // use a custom sequence for fitId since there is no reliable ID in the file
                             paymentTransaction.fitId = ec.entity.sequencedIdPrimary("mantle.account.method.PaymentMethodTrans." + paymentMethodId, 1, 10)
                             // create the record
                             ec.service.sync().name("create#mantle.account.method.PaymentMethodTrans").parameters(paymentTransaction).call()
-                            paymentTransaction = [:]
+                            paymentTransaction = {}
                         }
                     }
 
                     // process transaction
-                    if (routingNumber && accountNumber && ('16' == code || '88' == code)) {
-                        if ('16' == code) {
+                    if (routingNumber && accountNumber && ('16' === code || '88' === code)) {
+                        if ('16' === code) {
                             paymentTransaction.paymentMethodId = paymentMethodId
                             paymentTransaction.postedDate = postedDate
 
-                            String transDetailType = fields[1]
+                            const transDetailType = fields[1]
                             paymentTransaction.transCode = transDetailType
 
-                            transType = typeMap.get(transDetailType) ?: transDetailType
-                            paymentTransaction.transType = transType
+                            paymentTransaction.transType = typeMap[transDetailType] || transDetailType
 
-                            String amountString = fields[2]
-                            paymentTransaction.transAmount = amountString ? new BigDecimal(amountString).divide(BD_100, 2, BigDecimal.ROUND_HALF_UP) : 0.0
+                            const amountString = fields[2]
+                            let transAmount = amountString ? toDecimal(amountString).divide(BD_100).setScale(2, 'HALF_UP') : toDecimal(0)
                             // negate transAmount based on first digit of transDetailType (for debits): 4, 5, 6
                             if (transDetailType.startsWith('4') || transDetailType.startsWith('5') || transDetailType.startsWith('6'))
-                                paymentTransaction.transAmount = -paymentTransaction.transAmount
+                                transAmount = transAmount.multiply(-1)
+                            paymentTransaction.transAmount = transAmount
 
-                            def bankRefNum
-                            fundType = fields[3]
-                            if ('S' == fundType) {
+                            let bankRefNum
+                            const fundType = fields[3]
+                            if ('S' === fundType) {
                                 bankRefNum = fields[7]
-                            } else if ('V' == fundType) {
+                            } else if ('V' === fundType) {
                                 bankRefNum = fields[6]
-                            } else if ('D' == fundType) {
-                                int daysCount = Integer.valueOf(fields[4])
+                            } else if ('D' === fundType) {
+                                const daysCount = parseInt(fields[4], 10)
                                 bankRefNum = fields[5 + daysCount * 2]
                             } else {
                                 bankRefNum = fields[4]
@@ -189,59 +188,59 @@ along with this software (see the LICENSE.md file). If not, see
                                 paymentTransaction.refNumber = bankRefNum
                             }
 
-                            if ("474" == transDetailType || "475" == transDetailType || "395" == transDetailType) {
+                            if ("474" === transDetailType || "475" === transDetailType || "395" === transDetailType) {
                                 paymentTransaction.checkNumber = fields[5]
                             }
 
-                            memo = fields[6]
-                            if (memo && memo != "/") {
+                            const memo = fields[6]
+                            if (memo && memo !== "/") {
                                 paymentTransaction.transMemo = memo
                             }
 
-                        } else if ('88' == code) {
-                            if ('16' == lastCode && paymentTransaction) {
+                        } else if ('88' === code) {
+                            if ('16' === lastCode && Object.keys(paymentTransaction).length) {
                                 // continuation record that contains a memo fo the previous transaction
-                                composedText = paymentTransaction.transMemo
+                                let composedText = paymentTransaction.transMemo
                                 if (!composedText) composedText = ""
-                                for (int i = 1; i < fields.size(); i++) {
-                                    if (composedText.length() > 0) composedText += " "
+                                for (let i = 1; i < fields.length; i++) {
+                                    if (composedText.length > 0) composedText += " "
                                     composedText += fields[i]
                                 }
                                 paymentTransaction.transMemo = composedText
 
-                            } else if ('03' == lastCode) {
+                            } else if ('03' === lastCode) {
                                 // continue record that contains various status codes
-                                parseStatusCodes(fields[1..fields.size()-1], statusCodes)
+                                parseStatusCodes(fields.slice(1), statusCodes)
                             }
                         }
                     }
 
                     // close the account
-                    if ('49' == code) {
+                    if ('49' === code) {
                         accountNumber = null
 
                         // check control sum and generate error if it mismatches the processed transactions
-                        totalAmount = transactionTotalAmount
-                        statusCodes.each{k, v -> totalAmount += v}
-                        controlSum = fields[1] ? new BigDecimal(fields[1])/100 : 0
-                        if (totalAmount != controlSum) {
-                            ec.message.addError("Control sum ${controlSum} did not match total ${totalAmount} in BAI file dated ${postedDate} for Bank Account ${paymentMethodId}")
+                        let totalAmount = transactionTotalAmount
+                        for (const v of Object.values(statusCodes)) totalAmount = totalAmount.add(v)
+                        const controlSum = fields[1] ? toDecimal(fields[1]).divide(100) : toDecimal(0)
+                        if (!totalAmount.eq(controlSum)) {
+                            const postedText = postedDate ? new Date(Number(postedDate)).toISOString() : postedDate
+                            ec.message.addError(`Control sum ${controlSum} did not match total ${totalAmount} in BAI file dated ${postedText} for Bank Account ${paymentMethodId}`)
                         }
                     }
                     // close the group of accounts
-                    if ('98' == code) {
+                    if ('98' === code) {
                         routingNumber = null
                     }
                 }
 
-                closingLedger = statusCodes.get("015")
-                closingAvailable = statusCodes.get("045")
-                if (postedDate && (!paymentMethod.balanceDate || postedDate > paymentMethod.balanceDate)) {
+                const closingLedger = statusCodes["015"] ?? null
+                const closingAvailable = statusCodes["045"] ?? null
+                if (postedDate && (!paymentMethod.balanceDate || Number(postedDate) > Number(paymentMethod.balanceDate))) {
                     ec.service.sync().name("mantle.account.PaymentMethodServices.update#PaymentMethodMutable")
-                            .parameters([paymentMethodId:paymentMethodId, ledgerBalance:closingLedger,
-                            availableBalance:closingAvailable, balanceDate:postedDate]).call()
+                            .parameters({paymentMethodId:paymentMethodId, ledgerBalance:closingLedger,
+                            availableBalance:closingAvailable, balanceDate:postedDate}).call()
                 }
-
             ]]></script>
         </actions>
     </service>

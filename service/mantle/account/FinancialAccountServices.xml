@@ -40,15 +40,15 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="organizationDetail">
                 <field-map field-name="partyId" from="financialAccount.organizationPartyId"/></entity-find-one>
 
+            <!-- a timestamp in a script is epoch millis text; the month runs from the first of the month to one second before the first of the next -->
             <script><![CDATA[
                 if (fromDate == null && thruDate == null && year && month) {
-                    fromCal = ec.l10n.parseDateTime("${year}-${month}-01 00:00:00", "yyyy-MM-dd HH:mm:ss")
-                    thruCal = fromCal.clone()
-                    thruCal.add(Calendar.MONTH, 1)
-                    thruCal.add(Calendar.SECOND, -1)
+                    const yearNum = parseInt(year, 10), monthNum = parseInt(month, 10)
+                    const firstOf = (y, m) => ec.l10n.parseTimestamp(`${y}-${String(m).padStart(2, '0')}-01 00:00:00`, "yyyy-MM-dd HH:mm:ss")
+                    const nextFirst = monthNum === 12 ? firstOf(yearNum + 1, 1) : firstOf(yearNum, monthNum + 1)
 
-                    fromDate = new Timestamp(fromCal.getTimeInMillis())
-                    thruDate = new Timestamp(thruCal.getTimeInMillis())
+                    fromDate = firstOf(yearNum, monthNum)
+                    thruDate = String(Number(nextFirst) - 1000)
                 }
             ]]></script>
 
@@ -59,10 +59,10 @@ along with this software (see the LICENSE.md file). If not, see
                 <order-by field-name="transactionDate"/>
             </entity-find>
 
-            <set field="firstTrans" from="financialAccountTransList ? financialAccountTransList.first() : null"/>
-            <set field="beginningBalance" from="(firstTrans?.get('postBalance') ?: 0) - (firstTrans?.get('amount') ?: 0)"/>
-            <set field="lastTrans" from="financialAccountTransList ? financialAccountTransList.last() : null"/>
-            <set field="endingBalance" from="lastTrans?.get('postBalance') ?: 0"/>
+            <set field="firstTrans" from="financialAccountTransList?.length ? financialAccountTransList[0] : null"/>
+            <set field="beginningBalance" from="toDecimal(firstTrans?.postBalance ?? 0).subtract(firstTrans?.amount ?? 0)"/>
+            <set field="lastTrans" from="financialAccountTransList?.length ? financialAccountTransList[financialAccountTransList.length - 1] : null"/>
+            <set field="endingBalance" from="toDecimal(lastTrans?.postBalance ?? 0)"/>
         </actions>
     </service>
 
@@ -92,7 +92,7 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <if condition="!currencyUomId">
                 <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
-                        in-map="[organizationPartyId:organizationPartyId]"/>
+                        in-map="{organizationPartyId:organizationPartyId}"/>
                 <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId"/>
             </if>
             <if condition="!currencyUomId"><set field="currencyUomId" value="USD"/></if>
@@ -111,8 +111,8 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount"/>
             <!-- if needed adjust availableBalance -->
-            <if condition="negativeBalanceLimit != financialAccount.negativeBalanceLimit">
-                <set field="availableBalance" from="(financialAccount.availableBalance ?: 0.0) + (negativeBalanceLimit - financialAccount.negativeBalanceLimit)"/></if>
+            <if condition="negativeBalanceLimit != null &amp;&amp; !toDecimal(negativeBalanceLimit).eq(financialAccount.negativeBalanceLimit ?? 0)">
+                <set field="availableBalance" from="toDecimal(financialAccount.availableBalance ?? 0).add(toDecimal(negativeBalanceLimit).subtract(financialAccount.negativeBalanceLimit ?? 0))"/></if>
             <service-call name="update#mantle.account.financial.FinancialAccount" in-map="context" out-map="context"/>
         </actions>
     </service>
@@ -126,13 +126,13 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find entity-name="mantle.account.financial.FinancialAccount" list="finAccountList">
                 <econdition field-name="ownerPartyId"/><econdition field-name="finAccountTypeId"/></entity-find>
-            <if condition="finAccountList"><then>
+            <if condition="(finAccountList?.length > 0)"><then>
                 <set field="finAccountId" from="finAccountList[0].finAccountId"/>
             </then><else>
                 <entity-find-one entity-name="mantle.account.financial.FinancialAccountType" value-field="financialAccountType"/>
                 <entity-find-one entity-name="mantle.party.PartyDetail" value-field="owner">
                     <field-map field-name="partyId" from="ownerPartyId"/></entity-find-one>
-                <set field="finAccountName" value="${owner.organizationName?:''}${owner.firstName?:''}${owner.lastName ? ' ' + owner.lastName : ''} ${financialAccountType.description}"/>
+                <set field="finAccountName" value="${owner.organizationName||''}${owner.firstName||''}${owner.lastName ? ' ' + owner.lastName : ''} ${financialAccountType.description}"/>
                 <service-call name="mantle.account.FinancialAccountServices.create#FinancialAccount"
                         in-map="context" out-map="context"/>
             </else></if>
@@ -176,24 +176,24 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- View queries won't work with transaction cache (for data updated within the tx), so if active use different approach -->
             <!-- TODO: for some reason the view-entity approach to let the DB do the sum isn't working in ReturnToResponseBasicFlow tests, using full query and iterate though that won't work for lots of transactions -->
             <if condition="true || ec.transaction.isTransactionCacheActive()"><then>
-                <set field="actualBalance" from="0.0"/>
+                <set field="actualBalance" from="toDecimal(0)"/>
                 <entity-find entity-name="mantle.account.financial.FinancialAccountTrans" list="fatList">
                     <econdition field-name="finAccountId"/><select-field field-name="amount"/></entity-find>
-                <iterate list="fatList" entry="fat"><set field="actualBalance" from="actualBalance + fat.amount"/></iterate>
+                <iterate list="fatList" entry="fat"><set field="actualBalance" from="actualBalance.add(fat.amount ?? 0)"/></iterate>
                 <!--<log level="warn" message="fatList ${fatList}"/>-->
 
-                <set field="authBalance" from="0.0"/>
+                <set field="authBalance" from="toDecimal(0)"/>
                 <entity-find entity-name="mantle.account.financial.FinancialAccountAuth" list="faaList">
                     <econdition field-name="finAccountId"/>
                     <econdition field-name="expireDate" operator="greater" from="ec.user.nowTimestamp" or-null="true"/>
                     <select-field field-name="amount"/>
                 </entity-find>
-                <iterate list="faaList" entry="faa"><set field="authBalance" from="authBalance + faa.amount"/></iterate>
+                <iterate list="faaList" entry="faa"><set field="authBalance" from="authBalance.add(faa.amount ?? 0)"/></iterate>
                 <!--<log level="warn" message="faaList ${faaList}"/>-->
             </then><else>
                 <entity-find entity-name="mantle.account.financial.FinancialAccountActualView" list="faaList">
                     <econdition field-name="finAccountId"/></entity-find>
-                <set field="actualBalance" from="faaList?.first?.actualBalance ?: 0.0"/>
+                <set field="actualBalance" from="toDecimal(faaList?.[0]?.actualBalance ?? 0)"/>
                 <!--<log level="warn" message="faaList 1 ${faaList}"/>-->
 
                 <entity-find entity-name="mantle.account.financial.FinancialAccountAuthView" list="faaList">
@@ -201,11 +201,11 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="expireDate" operator="greater" from="ec.user.nowTimestamp" or-null="true"/>
                     <select-field field-name="finAccountId"/><select-field field-name="authBalance"/>
                 </entity-find>
-                <set field="authBalance" from="faaList?.first?.authBalance ?: 0.0"/>
+                <set field="authBalance" from="toDecimal(faaList?.[0]?.authBalance ?? 0)"/>
                 <!--<log level="warn" message="faaList 2 ${faaList}"/>-->
             </else></if>
 
-            <set field="availableBalance" from="actualBalance - authBalance + (financialAccount.negativeBalanceLimit ?: 0.0)"/>
+            <set field="availableBalance" from="actualBalance.subtract(authBalance).add(financialAccount.negativeBalanceLimit ?? 0)"/>
 
             <set field="financialAccount.actualBalance" from="actualBalance"/>
             <set field="financialAccount.availableBalance" from="availableBalance"/>
@@ -235,23 +235,23 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="finAccountTransId"/>
         </out-parameters>
         <actions>
-            <set field="amount" from="amount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+            <set field="amount" from="toDecimal(amount).setScale(2, 'HALF_UP')"/>
             <set field="performedByUserId" from="ec.user.userId"/>
 
             <!-- do a for-update query to lock the FinancialAccount record -->
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount"
                     for-update="true"/>
-            <set field="preBalance" from="financialAccount.actualBalance ?: 0"/>
+            <set field="preBalance" from="toDecimal(financialAccount.actualBalance ?? 0)"/>
 
-            <set field="postBalance" from="preBalance + amount"/>
+            <set field="postBalance" from="preBalance.add(amount)"/>
             <set field="finAccountTransTypeEnumId" value="FattAdjustment"/>
             <service-call name="create#mantle.account.financial.FinancialAccountTrans" in-map="context" out-map="context"/>
 
             <service-call name="mantle.account.FinancialAccountServices.calculate#FinancialAccountTotals"
-                    in-map="[finAccountId:finAccountId]" out-map="totalsOut"/>
-            <set field="postBalance" from="totalsOut.actualBalance"/>
-            <set field="differAmount" from="postBalance - preBalance"/>
-            <if condition="differAmount != amount">
+                    in-map="{finAccountId:finAccountId}" out-map="totalsOut"/>
+            <set field="postBalance" from="toDecimal(totalsOut.actualBalance)"/>
+            <set field="differAmount" from="postBalance.subtract(preBalance)"/>
+            <if condition="!differAmount.eq(amount)">
                 <return error="true" message="Error adjusting financial account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)}, pre balance ${preBalance} and post balance ${postBalance} differ by ${differAmount} and not by transaction amount ${amount}"/></if>
         </actions>
     </service>
@@ -275,27 +275,27 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="finAccountTransId"/>
         </out-parameters>
         <actions>
-            <if condition="amount &lt; 0.0"><return error="true" message="Cannot deposit negative amount ${amount}, do a withdraw instead"/></if>
+            <if condition="amount.compare(0) &lt; 0"><return error="true" message="Cannot deposit negative amount ${amount}, do a withdraw instead"/></if>
 
-            <set field="amount" from="amount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+            <set field="amount" from="toDecimal(amount).setScale(2, 'HALF_UP')"/>
             <set field="performedByUserId" from="ec.user.userId"/>
 
             <!-- do a for-update query to lock the FinancialAccount record -->
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount" for-update="true"/>
-            <set field="preBalance" from="financialAccount.actualBalance ?: 0"/>
+            <set field="preBalance" from="toDecimal(financialAccount.actualBalance ?? 0)"/>
 
             <if condition="!fromPartyId"><set field="fromPartyId" from="financialAccount.organizationPartyId"/></if>
             <if condition="!toPartyId"><set field="toPartyId" from="financialAccount.ownerPartyId"/></if>
 
-            <set field="postBalance" from="preBalance + amount"/>
+            <set field="postBalance" from="preBalance.add(amount)"/>
             <set field="finAccountTransTypeEnumId" value="FattDeposit"/>
             <service-call name="create#mantle.account.financial.FinancialAccountTrans" in-map="context" out-map="context"/>
 
             <service-call name="mantle.account.FinancialAccountServices.calculate#FinancialAccountTotals"
-                    in-map="[finAccountId:finAccountId]" out-map="totalsOut"/>
-            <set field="postBalance" from="totalsOut.actualBalance"/>
-            <set field="differAmount" from="postBalance - preBalance"/>
-            <if condition="differAmount != amount">
+                    in-map="{finAccountId:finAccountId}" out-map="totalsOut"/>
+            <set field="postBalance" from="toDecimal(totalsOut.actualBalance)"/>
+            <set field="differAmount" from="postBalance.subtract(preBalance)"/>
+            <if condition="!differAmount.eq(amount)">
                 <return error="true" message="Error adjusting financial account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)}, pre balance ${preBalance} and post balance ${postBalance} differ by ${differAmount} and not by transaction amount ${amount}"/></if>
         </actions>
     </service>
@@ -320,18 +320,18 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="responseMessage"/>
         </out-parameters>
         <actions>
-            <if condition="amount &lt; 0.0"><return error="true" message="Cannot withdraw negative amount ${amount}, do a deposit instead"/></if>
+            <if condition="amount.compare(0) &lt; 0"><return error="true" message="Cannot withdraw negative amount ${amount}, do a deposit instead"/></if>
 
-            <set field="amount" from="amount.setScale(2, BigDecimal.ROUND_HALF_UP)"/>
+            <set field="amount" from="toDecimal(amount).setScale(2, 'HALF_UP')"/>
             <set field="performedByUserId" from="ec.user.userId"/>
 
             <!-- do a for-update query to lock the FinancialAccount record -->
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount" for-update="true"/>
-            <set field="preBalance" from="financialAccount.actualBalance ?: 0.0"/>
+            <set field="preBalance" from="toDecimal(financialAccount.actualBalance ?? 0)"/>
 
             <!-- check actual balance for sufficient amount -->
-            <set field="balancePlusCredit" from="preBalance + (financialAccount.negativeBalanceLimit ?: 0)"/>
-            <if condition="balancePlusCredit &lt; amount">
+            <set field="balancePlusCredit" from="preBalance.add(financialAccount.negativeBalanceLimit ?? 0)"/>
+            <if condition="balancePlusCredit.compare(amount) &lt; 0">
                 <set field="responseCode" value="nsf"/>
                 <set field="responseMessage" value="Insufficient funds: ${ec.l10n.format(balancePlusCredit, '0.00')} can be withdrawn, withdraw amount ${ec.l10n.format(amount, '0.00')}"/>
                 <return/>
@@ -341,26 +341,26 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!toPartyId"><set field="toPartyId" from="financialAccount.organizationPartyId"/></if>
 
             <!-- this is a withdrawal, so subtract the amount -->
-            <set field="amount" from="-amount"/>
+            <set field="amount" from="amount.multiply(-1)"/>
 
-            <set field="postBalance" from="preBalance + amount"/>
+            <set field="postBalance" from="preBalance.add(amount)"/>
             <set field="finAccountTransTypeEnumId" value="FattWithdraw"/>
             <service-call name="create#mantle.account.financial.FinancialAccountTrans" in-map="context" out-map="context"/>
 
             <service-call name="update#mantle.account.financial.FinancialAccount"
-                    in-map="[finAccountId:finAccountId, actualBalance:postBalance]"/>
+                    in-map="{finAccountId:finAccountId, actualBalance:postBalance}"/>
 
             <if condition="finAccountAuthId">
                 <!-- if there is an auth, expire it -->
                 <service-call name="update#mantle.account.financial.FinancialAccountAuth"
-                        in-map="[finAccountAuthId:finAccountAuthId, expireDate:ec.user.nowTimestamp]"/>
+                        in-map="{finAccountAuthId:finAccountAuthId, expireDate:ec.user.nowTimestamp}"/>
             </if>
 
             <service-call name="mantle.account.FinancialAccountServices.calculate#FinancialAccountTotals"
-                    in-map="[finAccountId:finAccountId]" out-map="totalsOut"/>
-            <set field="postBalance" from="totalsOut.actualBalance"/>
-            <set field="differAmount" from="postBalance - preBalance"/>
-            <if condition="differAmount != amount">
+                    in-map="{finAccountId:finAccountId}" out-map="totalsOut"/>
+            <set field="postBalance" from="toDecimal(totalsOut.actualBalance)"/>
+            <set field="differAmount" from="postBalance.subtract(preBalance)"/>
+            <if condition="!differAmount.eq(amount)">
                 <return error="true" message="Error withdrawing from financial account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)}, pre balance ${preBalance} and post balance ${postBalance} differ by ${differAmount} and not by transaction amount ${amount}"/></if>
 
             <set field="responseCode" value="success"/>
@@ -382,7 +382,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="depositFinAccountTransId"/>
         </out-parameters>
         <actions>
-            <if condition="amount == 0.0"><return message="Not doing transfer, amount is zero"/></if>
+            <if condition="toDecimal(amount).isZero()"><return message="Not doing transfer, amount is zero"/></if>
 
             <!-- find and lock the two accounts -->
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="fromFinAccount" for-update="true">
@@ -398,20 +398,20 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- withdraw from FinancialAccount -->
             <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" out-map="withdrawOut"
-                    in-map="[finAccountId:fromFinAccountId, reasonEnumId:'FatrTransfer', amount:amount,
-                        transactionDate:transactionDate, entryDate:entryDate, comments:comments]"/>
+                    in-map="{finAccountId:fromFinAccountId, reasonEnumId:'FatrTransfer', amount:amount,
+                        transactionDate:transactionDate, entryDate:entryDate, comments:comments}"/>
             <if condition="withdrawOut.responseCode != 'success'"><return error="true" message="${withdrawOut.responseMessage}"/></if>
             <set field="withdrawFinAccountTransId" from="withdrawOut.finAccountTransId"/>
 
             <!-- deposit to FinancialAccount -->
             <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="depositOut"
-                    in-map="[finAccountId:toFinAccountId, reasonEnumId:'FatrTransfer', amount:amount, transactionDate:transactionDate,
-                        entryDate:entryDate, comments:toComments, otherFinAccountTransId:withdrawFinAccountTransId]"/>
+                    in-map="{finAccountId:toFinAccountId, reasonEnumId:'FatrTransfer', amount:amount, transactionDate:transactionDate,
+                        entryDate:entryDate, comments:toComments, otherFinAccountTransId:withdrawFinAccountTransId}"/>
             <set field="depositFinAccountTransId" from="depositOut.finAccountTransId"/>
 
             <!-- set otherFinAccountTransId on withdraw TX -->
             <service-call name="update#mantle.account.financial.FinancialAccountTrans"
-                    in-map="[finAccountTransId:withdrawFinAccountTransId, otherFinAccountTransId:depositFinAccountTransId]"/>
+                    in-map="{finAccountTransId:withdrawFinAccountTransId, otherFinAccountTransId:depositFinAccountTransId}"/>
         </actions>
     </service>
 
@@ -426,14 +426,14 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- do a for-update query to lock the FinancialAccount record -->
             <set field="finAccountId" from="faTrans.finAccountId"/>
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount" for-update="true"/>
-            <set field="preBalance" from="financialAccount.actualBalance ?: 0.0"/>
+            <set field="preBalance" from="toDecimal(financialAccount.actualBalance ?? 0)"/>
 
             <!-- set reverse fields -->
-            <set field="reverseMap" from="[finAccountId:faTrans.finAccountId, reasonEnumId:faTrans.reasonEnumId,
+            <set field="reverseMap" from="{finAccountId:faTrans.finAccountId, reasonEnumId:faTrans.reasonEnumId,
                     toPartyId:faTrans.fromPartyId, fromPartyId:faTrans.toPartyId, transactionDate:faTrans.transactionDate,
-                    entryDate:ec.user.nowTimestamp, amount:(-faTrans.amount),
+                    entryDate:ec.user.nowTimestamp, amount:toDecimal(faTrans.amount).multiply(-1),
                     paymentId:faTrans.paymentId, invoiceId:faTrans.invoiceId, orderId:faTrans.orderId, orderItemSeqId:faTrans.orderItemSeqId,
-                    performedByUserId:ec.user.userId]"/>
+                    performedByUserId:ec.user.userId}"/>
             <set field="reverseMap.reverseOfTransId" from="finAccountTransId"/>
             <set field="reverseMap.finAccountTransTypeEnumId" from="faTrans.finAccountTransTypeEnumId == 'FattDeposit' ? 'FattWithdraw' :
                     (faTrans.finAccountTransTypeEnumId == 'FattWithdraw' ? 'FattDeposit' : faTrans.finAccountTransTypeEnumId)"/>
@@ -446,10 +446,10 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-update value-field="faTrans"/>
 
             <service-call name="mantle.account.FinancialAccountServices.calculate#FinancialAccountTotals"
-                    in-map="[finAccountId:finAccountId]" out-map="totalsOut"/>
-            <set field="postBalance" from="totalsOut.actualBalance"/>
-            <set field="differAmount" from="postBalance - preBalance"/>
-            <if condition="differAmount != reverseMap.amount">
+                    in-map="{finAccountId:finAccountId}" out-map="totalsOut"/>
+            <set field="postBalance" from="toDecimal(totalsOut.actualBalance)"/>
+            <set field="differAmount" from="postBalance.subtract(preBalance)"/>
+            <if condition="!differAmount.eq(reverseMap.amount)">
                 <return error="true" message="Error withdrawing from financial account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)}, pre balance ${preBalance} and post balance ${postBalance} differ by ${differAmount} and not by transaction amount ${reverseMap.amount}"/></if>
 
             <!-- set the out value -->
@@ -474,32 +474,28 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount"
                     for-update="true"/>
-            <set field="preAvailableBalance" from="financialAccount.availableBalance"/>
+            <set field="preAvailableBalance" from="toDecimal(financialAccount.availableBalance ?? 0)"/>
 
             <!-- check available balance for sufficient amount -->
-            <if condition="preAvailableBalance &lt; amount">
+            <if condition="preAvailableBalance.compare(amount) &lt; 0">
                 <set field="responseCode" value="nsf"/>
                 <set field="responseMessage" value="Insufficient funds: ${ec.l10n.format(preAvailableBalance, '0.00')} available, authorize amount ${ec.l10n.format(amount, '0.00')}"/>
                 <return/>
             </if>
 
             <set field="financialAccountType" from="financialAccount.type"/>
-            <set field="authValidDays" from="(financialAccountType?.authValidDays) ?: 7"/>
-            <script>
-                Calendar expireCal = ec.user.nowCalendar
-                expireCal.setTimeInMillis(authorizationDate.time)
-                expireCal.add(Calendar.DAY_OF_MONTH, authValidDays as int)
-                expireDate = new Timestamp(expireCal.getTimeInMillis())
-            </script>
+            <set field="authValidDays" from="(financialAccountType?.authValidDays) || 7"/>
+            <!-- authValidDays days after the authorization date; a timestamp in a script is epoch millis text -->
+            <set field="expireDate" from="String(Number(authorizationDate) + Math.trunc(toNumber(authValidDays)) * 86400000)"/>
             <!-- <log message="authorizationDate=${authorizationDate}, expireDate=${expireDate}"/> -->
             <service-call name="create#mantle.account.financial.FinancialAccountAuth" in-map="context" out-map="context"/>
 
             <service-call name="mantle.account.FinancialAccountServices.calculate#FinancialAccountTotals"
-                    in-map="[finAccountId:finAccountId]" out-map="totalsOut"/>
-            <set field="postAvailableBalance" from="totalsOut.availableBalance"/>
+                    in-map="{finAccountId:finAccountId}" out-map="totalsOut"/>
+            <set field="postAvailableBalance" from="toDecimal(totalsOut.availableBalance)"/>
 
-            <set field="differAmount" from="preAvailableBalance - postAvailableBalance"/>
-            <if condition="differAmount != amount">
+            <set field="differAmount" from="preAvailableBalance.subtract(postAvailableBalance)"/>
+            <if condition="!differAmount.eq(amount)">
                 <return error="true" message="Error in authorization for financial account ${ec.resource.expand('FinancialAccountNameTemplate','',financialAccount)}, pre balance ${preAvailableBalance} and post balance ${postAvailableBalance} differ by [${differAmount}] and not by auth amount ${amount}"/></if>
 
             <set field="responseCode" value="success"/>
@@ -545,17 +541,17 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- create Payment first (then update after with finAccountTransId, because FinancialAccountTrans is create-only/immutable) -->
             <service-call name="mantle.account.PaymentServices.create#Payment" out-map="context"
-                    in-map="[paymentTypeEnumId:'PtFinancialAccount', statusId:'PmntPromised', comments:comments,
+                    in-map="{paymentTypeEnumId:'PtFinancialAccount', statusId:'PmntPromised', comments:comments,
                         fromPartyId:financialAccount.organizationPartyId, toPartyId:financialAccount.ownerPartyId,
                         amount:amount, amountUomId:financialAccount.currencyUomId, finAccountId:finAccountId,
-                        paymentInstrumentEnumId:paymentInstrumentEnumId, paymentMethodId:paymentMethodId, effectiveDate:effectiveDate]"/>
+                        paymentInstrumentEnumId:paymentInstrumentEnumId, paymentMethodId:paymentMethodId, effectiveDate:effectiveDate}"/>
 
             <if condition="withdrawNow">
                 <!-- withdraw from FinancialAccount -->
                 <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" in-map="context" out-map="context"/>
                 <if condition="responseCode != 'success'"><return error="true" message="${responseMessage}"/></if>
                 <!-- update Payment record, set finAccountTransId -->
-                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, finAccountTransId:finAccountTransId]"/>
+                <service-call name="update#mantle.account.payment.Payment" in-map="{paymentId:paymentId, finAccountTransId:finAccountTransId}"/>
             </if>
         </actions>
     </service>
@@ -584,16 +580,16 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- create Payment first (then update after with finAccountTransId, because FinancialAccountTrans is create-only/immutable) -->
             <service-call name="mantle.account.PaymentServices.create#Payment" out-map="context"
-                    in-map="[paymentTypeEnumId:'PtFinancialAccount', statusId:'PmntPromised', comments:comments,
+                    in-map="{paymentTypeEnumId:'PtFinancialAccount', statusId:'PmntPromised', comments:comments,
                         fromPartyId:financialAccount.ownerPartyId, toPartyId:financialAccount.organizationPartyId,
                         amount:amount, amountUomId:financialAccount.currencyUomId, finAccountId:finAccountId,
-                        paymentInstrumentEnumId:paymentInstrumentEnumId, paymentMethodId:paymentMethodId, effectiveDate:effectiveDate]"/>
+                        paymentInstrumentEnumId:paymentInstrumentEnumId, paymentMethodId:paymentMethodId, effectiveDate:effectiveDate}"/>
 
             <if condition="depositNow">
                 <!-- deposit to FinancialAccount -->
                 <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" in-map="context" out-map="context"/>
                 <!-- update Payment record, set finAccountTransId -->
-                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, finAccountTransId:finAccountTransId]"/>
+                <service-call name="update#mantle.account.payment.Payment" in-map="{paymentId:paymentId, finAccountTransId:finAccountTransId}"/>
             </if>
         </actions>
     </service>
@@ -607,7 +603,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="invoiceId"/><econdition field-name="finAccountId" operator="is-not-null"/></entity-find>
             <iterate list="faItemList" entry="faItem">
                 <service-call name="mantle.account.FinancialAccountServices.checkCreate#InvoiceItemTrans"
-                        in-map="[invoiceId:faItem.invoiceId, invoiceItemSeqId:faItem.invoiceItemSeqId]"/>
+                        in-map="{invoiceId:faItem.invoiceId, invoiceItemSeqId:faItem.invoiceItemSeqId}"/>
             </iterate>
         </actions>
     </service>
@@ -622,8 +618,8 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.invoice.InvoiceItem" value-field="invoiceItem" for-update="true"/>
             <set field="finAccountId" from="invoiceItem.finAccountId"/>
             <if condition="!finAccountId"><return/></if>
-            <set field="amount" from="(invoiceItem.quantity != null ? invoiceItem.quantity : 1.0) * (invoiceItem.amount ?: 0.0)"/>
-            <if condition="!amount"><return/></if>
+            <set field="amount" from="toDecimal(invoiceItem.quantity ?? 1).multiply(invoiceItem.amount ?? 0)"/>
+            <if condition="amount.isZero()"><return/></if>
             <if condition="invoiceItem.finAccountTransId">
                 <set field="finAccountTransId" from="invoiceItem.finAccountTransId"/>
                 <return/>
@@ -646,17 +642,17 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- note that this is the opposite of the invoice level, for example funds flow from payment to invoice to invoice item (as FA trans) -->
             <set field="isDeposit" from="organizationPartyId == fromPartyId"/>
             <!-- unless the amount is negative on the InvoiceItem, then it is withdrawn (or a deposit for payable invoices) -->
-            <if condition="amount &lt; 0.0">
+            <if condition="toDecimal(amount).compare(0) &lt; 0">
                 <set field="isDeposit" from="!isDeposit"/>
-                <set field="amount" from="-amount"/>
+                <set field="amount" from="toDecimal(amount).multiply(-1)"/>
             </if>
 
             <if condition="isDeposit"><then>
                 <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="txOut"
-                        in-map="[finAccountId:finAccountId, amount:amount, transactionDate:invoice.invoiceDate, invoiceId:invoiceId]"/>
+                        in-map="{finAccountId:finAccountId, amount:amount, transactionDate:invoice.invoiceDate, invoiceId:invoiceId}"/>
             </then><else>
                 <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" out-map="txOut"
-                        in-map="[finAccountId:finAccountId, amount:amount, transactionDate:invoice.invoiceDate, invoiceId:invoiceId]"/>
+                        in-map="{finAccountId:finAccountId, amount:amount, transactionDate:invoice.invoiceDate, invoiceId:invoiceId}"/>
             </else></if>
 
             <set field="finAccountTransId" from="txOut.finAccountTransId"/>
@@ -677,7 +673,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="invoiceId"/><econdition field-name="finAccountTransId" operator="is-not-null"/></entity-find>
             <iterate list="faItemList" entry="faItem">
                 <service-call name="mantle.account.FinancialAccountServices.reverse#FinancialAccountTrans"
-                        in-map="[finAccountTransId:faItem.finAccountTransId]"/>
+                        in-map="{finAccountTransId:faItem.finAccountTransId}"/>
             </iterate>
         </actions>
     </service>
@@ -700,12 +696,12 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="finAccountId" from="payment.finAccountId"/>
             <if condition="!finAccountId"><return/></if>
             <set field="amount" from="payment.amount"/>
-            <if condition="!amount"><return/></if>
+            <if condition="amount == null || toDecimal(amount).isZero()"><return/></if>
             <if condition="payment.finAccountTransId">
                 <set field="finAccountTransId" from="payment.finAccountTransId"/>
                 <return/>
             </if>
-            <if condition="payment.statusId in ['PmntProposed', 'PmntPromised', 'PmntCancelled', 'PmntVoid', 'PmntDeclined']">
+            <if condition="['PmntProposed', 'PmntPromised', 'PmntCancelled', 'PmntVoid', 'PmntDeclined'].includes(payment.statusId)">
                 <return message="Not creating Financial Account transaction for Payment ${paymentId} in status ${payment.status?.description}, must be Authorized or Delivered"/></if>
 
             <entity-find-one entity-name="mantle.account.financial.FinancialAccount" value-field="financialAccount"/>
@@ -732,19 +728,19 @@ along with this software (see the LICENSE.md file). If not, see
                 <return message="Payment has a Financial Account ID but is not a Financial Account type payment OR some other type of payment with a Financial Account payment instrument, so not creating financial account transaction"/>
             </else></if>
             <!-- unless the amount is negative on the Payment, then it is withdrawn (or a deposit for payable invoices) -->
-            <if condition="amount &lt; 0.0">
+            <if condition="toDecimal(amount).compare(0) &lt; 0">
                 <set field="isDeposit" from="!isDeposit"/>
-                <set field="amount" from="-amount"/>
+                <set field="amount" from="toDecimal(amount).multiply(-1)"/>
             </if>
 
             <if condition="isDeposit"><then>
                 <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="txOut"
-                        in-map="[finAccountId:finAccountId, amount:amount, transactionDate:payment.effectiveDate,
-                            paymentId:paymentId, reasonEnumId:(reasonEnumId ?: 'FatrReplenish')]"/>
+                        in-map="{finAccountId:finAccountId, amount:amount, transactionDate:payment.effectiveDate,
+                            paymentId:paymentId, reasonEnumId:(reasonEnumId || 'FatrReplenish')}"/>
             </then><else>
                 <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" out-map="txOut"
-                        in-map="[finAccountId:finAccountId, amount:amount, transactionDate:payment.effectiveDate,
-                            paymentId:paymentId, reasonEnumId:(reasonEnumId ?: 'FatrDisbursement')]"/>
+                        in-map="{finAccountId:finAccountId, amount:amount, transactionDate:payment.effectiveDate,
+                            paymentId:paymentId, reasonEnumId:(reasonEnumId || 'FatrDisbursement')}"/>
             </else></if>
 
             <set field="finAccountTransId" from="txOut.finAccountTransId"/>
@@ -753,7 +749,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- if status Authorized now consider Delivered; make sure finAccountTransId set first so not redone from SECA rule -->
             <if condition="payment.statusId == 'PmntAuthorized'">
-                <service-call name="update#mantle.account.payment.Payment" in-map="[paymentId:paymentId, statusId:'PmntDelivered']"/></if>
+                <service-call name="update#mantle.account.payment.Payment" in-map="{paymentId:paymentId, statusId:'PmntDelivered'}"/></if>
 
             <!-- TODO: adjust Payment GL posting to post to Financial Account In Transit account (deposit or withdraw)
                 instead of to account configured for item type, maybe do here with Payment.overrideGlAccountId and then
@@ -768,7 +764,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.account.payment.Payment" value-field="payment" for-update="true"/>
             <if condition="!payment.finAccountTransId"><return/></if>
             <service-call name="mantle.account.FinancialAccountServices.reverse#FinancialAccountTrans"
-                    in-map="[finAccountTransId:payment.finAccountTransId]"/>
+                    in-map="{finAccountTransId:payment.finAccountTransId}"/>
         </actions>
     </service>
 
@@ -788,13 +784,13 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <if condition="!finAccountId"><return error="true" message="No Financial Account associated with Payment ${payment.paymentId}"/></if>
 
-            <if condition="!amount"><set field="amount" from="payment.amount"/></if>
+            <if condition="amount == null || toDecimal(amount).isZero()"><set field="amount" from="payment.amount"/></if>
 
             <service-call name="mantle.account.FinancialAccountServices.authorize#FinancialAccount" out-map="authOut"
-                    in-map="[finAccountId:finAccountId, amount:amount, paymentId:paymentId]"/>
+                    in-map="{finAccountId:finAccountId, amount:amount, paymentId:paymentId}"/>
 
             <service-call name="create#mantle.account.method.PaymentGatewayResponse" out-map="context"
-                    in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoAuthorize',
+                    in-map="{paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoAuthorize',
                         paymentId:paymentId, paymentMethodId:payment.paymentMethodId, finAccountId:finAccountId,
                         amount:amount, amountUomId:payment.amountUomId,
                         referenceNum:authOut.finAccountAuthId, approvalCode:authOut.finAccountAuthId,
@@ -803,7 +799,7 @@ along with this software (see the LICENSE.md file). If not, see
                         resultSuccess:(authOut.responseCode == 'success' ? 'Y' : 'N'),
                         resultDeclined:(authOut.responseCode == 'success' ? 'N' : 'Y'),
                         resultError:'N',
-                        resultNsf:(authOut.responseCode == 'nsf' ? 'Y' : 'N')]"/>
+                        resultNsf:(authOut.responseCode == 'nsf' ? 'Y' : 'N')}"/>
 
             <if condition="authOut.finAccountAuthId">
                 <set field="payment.finAccountAuthId" from="authOut.finAccountAuthId"/>
@@ -823,13 +819,13 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <if condition="!finAccountId"><return error="true" message="No Financial Account associated with Payment ${payment.paymentId}"/></if>
 
-            <if condition="!amount"><set field="amount" from="payment.amount"/></if>
+            <if condition="amount == null || toDecimal(amount).isZero()"><set field="amount" from="payment.amount"/></if>
 
             <service-call name="mantle.account.FinancialAccountServices.withdraw#FinancialAccount" out-map="wdOut"
-                    in-map="[finAccountId:finAccountId, amount:amount, finAccountAuthId:payment.finAccountAuthId, paymentId:paymentId]"/>
+                    in-map="{finAccountId:finAccountId, amount:amount, finAccountAuthId:payment.finAccountAuthId, paymentId:paymentId}"/>
 
             <service-call name="create#mantle.account.method.PaymentGatewayResponse" out-map="context"
-                    in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoCapture',
+                    in-map="{paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoCapture',
                         paymentId:paymentId, paymentMethodId:payment.paymentMethodId, finAccountId:finAccountId,
                         amount:amount, amountUomId:payment.amountUomId,
                         referenceNum:wdOut.finAccountTransId, approvalCode:wdOut.finAccountTransId,
@@ -838,7 +834,7 @@ along with this software (see the LICENSE.md file). If not, see
                         resultSuccess:(wdOut.responseCode == 'success' ? 'Y' : 'N'),
                         resultDeclined:(wdOut.responseCode == 'success' ? 'N' : 'Y'),
                         resultError:'N',
-                        resultNsf:(wdOut.responseCode == 'nsf' ? 'Y' : 'N')]"/>
+                        resultNsf:(wdOut.responseCode == 'nsf' ? 'Y' : 'N')}"/>
 
             <if condition="wdOut.finAccountTransId">
                 <set field="payment.finAccountTransId" from="wdOut.finAccountTransId"/>
@@ -853,14 +849,14 @@ along with this software (see the LICENSE.md file). If not, see
             <if condition="!payment.finAccountAuthId"><return error="true" message="No authorization associated with Payment ${payment.paymentId}"/></if>
 
             <service-call name="mantle.account.FinancialAccountServices.expire#FinancialAccountAuth" out-map="wdOut"
-                    in-map="[finAccountAuthId:payment.finAccountAuthId]"/>
+                    in-map="{finAccountAuthId:payment.finAccountAuthId}"/>
 
             <service-call name="create#mantle.account.method.PaymentGatewayResponse" out-map="context"
-                    in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoRelease',
+                    in-map="{paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoRelease',
                         paymentId:paymentId, paymentMethodId:payment.paymentMethodId, finAccountId:finAccountId,
                         amount:payment.amount, amountUomId:payment.amountUomId,
                         transactionDate:ec.user.nowTimestamp,
-                        resultSuccess:'Y', resultDeclined:'N', resultError:'N', resultNsf:'N']"/>
+                        resultSuccess:'Y', resultDeclined:'N', resultError:'N', resultNsf:'N'}"/>
 
             <set field="payment.finAccountAuthId" from="null"/>
             <entity-update value-field="payment"/>
@@ -878,18 +874,18 @@ along with this software (see the LICENSE.md file). If not, see
             </if>
             <if condition="!finAccountId"><return error="true" message="No Financial Account associated with Payment ${payment.paymentId}"/></if>
 
-            <if condition="!amount"><set field="amount" from="payment.amount"/></if>
+            <if condition="amount == null || toDecimal(amount).isZero()"><set field="amount" from="payment.amount"/></if>
 
             <service-call name="mantle.account.FinancialAccountServices.deposit#FinancialAccount" out-map="dpOut"
-                    in-map="[finAccountId:finAccountId, amount:amount, reasonEnumId:'FatrRefund']"/>
+                    in-map="{finAccountId:finAccountId, amount:amount, reasonEnumId:'FatrRefund'}"/>
 
             <service-call name="create#mantle.account.method.PaymentGatewayResponse" out-map="context"
-                    in-map="[paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoRefund',
+                    in-map="{paymentGatewayConfigId:paymentGatewayConfigId, paymentOperationEnumId:'PgoRefund',
                         paymentId:paymentId, paymentMethodId:payment.paymentMethodId, finAccountId:finAccountId,
                         amount:amount, amountUomId:payment.amountUomId,
                         referenceNum:dpOut.finAccountTransId, approvalCode:dpOut.finAccountTransId,
                         transactionDate:ec.user.nowTimestamp,
-                        resultSuccess:'Y', resultDeclined:'N', resultError:'N', resultNsf:'N']"/>
+                        resultSuccess:'Y', resultDeclined:'N', resultError:'N', resultNsf:'N'}"/>
 
             <!-- NOTE: don't update Payment status to refunded, let calling code do that -->
         </actions>

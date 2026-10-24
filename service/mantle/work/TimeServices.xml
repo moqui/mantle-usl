@@ -36,16 +36,21 @@ along with this software (see the LICENSE.md file). If not, see
                 <entity-find-one entity-name="mantle.party.Party" value-field="party"/>
                 <if condition="party.disabled == 'Y'"><return error="true" message="Time Entry not created, ${party.pseudoId} is not active."/></if>
             </if>
+            <!-- an entry with no timesheet given goes on its person's timesheet of its week (below) -->
+            <set field="timesheetGiven" from="!!timesheetId"/>
             <set field="entryHasHours" from="false"/>
             <if condition="timeEntryId">
                 <entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="timeEntry" for-update="true"/>
                 <if condition="timeEntry != null">
-                    <set field="entryHasHours" from="timeEntry.hours != null &amp;&amp; timeEntry.hours != 0.0"/>
+                    <set field="entryHasHours" from="timeEntry.hours != null &amp;&amp; !toDecimal(timeEntry.hours).isZero()"/>
                     <!-- fill in field values not passed into this service so that calcs can run -->
-                    <iterate list="timeEntry" entry="fieldValue" key="fieldName">
-                        <if condition="fieldValue != null &amp;&amp; !context.containsKey(fieldName)">
-                            <script>context.put(fieldName, fieldValue)</script></if>
-                    </iterate>
+                    <script><![CDATA[
+                        const timeEntryFields = Object.assign({}, timeEntry)
+                        for (const fieldName of Object.keys(timeEntryFields)) {
+                            const fieldValue = timeEntryFields[fieldName]
+                            if (fieldValue != null && !(fieldName in context)) globalThis[fieldName] = fieldValue
+                        }
+                    ]]></script>
                 </if>
             </if>
             <if condition="teamPartyId">
@@ -62,25 +67,40 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- TODO Should we allow negative numbers? -->
 
-            <!-- calculate thruDate based from fromDate/hours/breakHours -->
-            <if condition="hours &amp;&amp; fromDate &amp;&amp; !thruDate">
-                <set field="thruDate" from="new Timestamp((Long) (fromDate.time + (hours*60*60*1000) + (breakHours ? (breakHours*60*60*1000) : 0)))"/>
-            </if>
-            <!-- at this point if there is no thruDate default to now -->
-            <if condition="thruDate == null"><set field="thruDate" from="ec.user.nowTimestamp"/></if>
+            <!-- calculate thruDate from fromDate/hours/breakHours, fromDate from thruDate/hours/breakHours, or hours from
+                 fromDate/thruDate/breakHours; a timestamp reaches a script as epoch millis text -->
+            <script><![CDATA[
+                const millisOf = (value) => {
+                    const text = String(value)
+                    return /^-?\d+$/.test(text) ? Number(text) : Date.parse(text.length === 10 ? text + 'T00:00:00Z' : text)
+                }
+                const hourMillis = 60 * 60 * 1000
+                const hasHours = hours != null && !toDecimal(hours).isZero()
+                const hasBreak = breakHours != null && !toDecimal(breakHours).isZero()
+                const hoursMillis = hasHours ? toDecimal(hours).multiply(hourMillis).toNumber() : 0
+                const breakMillis = hasBreak ? toDecimal(breakHours).multiply(hourMillis).toNumber() : 0
 
-            <!-- calculate fromDate based on thruDate/hours/breakHours -->
-            <if condition="hours &amp;&amp; !fromDate &amp;&amp; thruDate">
-                <set field="fromDate" from="new Timestamp((Long) (thruDate.time - (hours*60*60*1000) - (breakHours ? (breakHours*60*60*1000) : 0)))"/>
-            </if>
+                if (hasHours && fromDate && !thruDate) thruDate = String(Math.trunc(millisOf(fromDate) + hoursMillis + breakMillis))
+                // at this point if there is no thruDate default to now
+                if (thruDate == null) thruDate = ec.user.nowTimestamp
+                if (hasHours && !fromDate && thruDate) fromDate = String(Math.trunc(millisOf(thruDate) - hoursMillis - breakMillis))
 
-            <if condition="fromDate &amp;&amp; thruDate &amp;&amp; fromDate &gt; thruDate">
-                <return error="true" message="From date ${fromDate} is after thru date ${thruDate}"/></if>
+                fromAfterThru = !!(fromDate && thruDate && millisOf(fromDate) > millisOf(thruDate))
+                if (!fromAfterThru && hours == null && fromDate && thruDate) {
+                    hours = toDecimal(millisOf(thruDate) - millisOf(fromDate)).divide(hourMillis).subtract(breakHours ?? 0)
+                }
+            ]]></script>
+            <if condition="fromAfterThru">
+                <return error="true" message="From date ${ec.l10n.format(fromDate, 'yyyy-MM-dd HH:mm:ss.SSS')} is after thru date ${ec.l10n.format(thruDate, 'yyyy-MM-dd HH:mm:ss.SSS')}"/></if>
 
-            <!-- calculate hours using fromDate/thruDate/breakHours -->
-            <if condition="hours == null &amp;&amp; fromDate &amp;&amp; thruDate">
-                <set field="hours" from="((thruDate.time - fromDate.time)/(60*60*1000)) - (breakHours ?: 0)"/>
-            </if>
+            <!-- the week's timesheet (mantle.work.TimesheetServices, IronStone Projects design §8): an entry with a person and a start goes
+                on that person's timesheet of its week unless one is given; with the policy's lock the entries of a submitted or approved
+                week are not changed (their time, item, person, work type or comment), moved in or out, or added -->
+            <service-call name="mantle.work.TimeServices.check#TimeEntryTimesheet" out-map="sheetCheck"
+                    in-map="{timeEntry:(timeEntry ? timeEntry.getMap() : null), timesheetId:(timesheetGiven ? timesheetId : null), partyId:partyId, fromDate:fromDate, thruDate:thruDate,
+                        hours:hours, breakHours:breakHours, workEffortId:workEffortId, workTypeEnumId:workTypeEnumId, comments:comments, pieceCount:pieceCount}"/>
+            <if condition="ec.message.hasError()"><return/></if>
+            <if condition="sheetCheck.timesheetId"><set field="timesheetId" from="sheetCheck.timesheetId"/></if>
 
             <!-- what is the party's emplPositionClassId? try WorkEffortParty with task first, then root/project, then try EmplPositionClassParty -->
             <if condition="workEffortId">
@@ -115,11 +135,11 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="toPartyId" from="partyId"/>
                     <econdition field-name="relationshipTypeEnumId" value="PrtEmployee"/>
                 </entity-find>
-                <if condition="employRelList">
+                <if condition="(employRelList?.length > 0)">
                     <entity-find-one entity-name="mantle.humanres.employment.Employment" value-field="employment">
                         <field-map field-name="partyRelationshipId" from="employRelList[0].partyRelationshipId"/></entity-find-one>
                     <if condition="employment">
-                        <set field="emplPosition" from="employment.'mantle.humanres.position.EmplPosition'"/>
+                        <set field="emplPosition" from="employment['mantle.humanres.position.EmplPosition']"/>
                         <set field="emplPositionClassId" from="emplPosition?.emplPositionClassId"/>
                     </if>
                 </if>
@@ -169,7 +189,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <date-filter valid-date="fromDate"/><econdition field-name="workEffortId"/>
                     <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/>
                 </entity-find>
-                <if condition="billToList"><then>
+                <if condition="(billToList?.length > 0)"><then>
                     <set field="clientPartyId" from="billToList[0].partyId"/>
                 </then><else>
                     <!-- see if there is a CustomerBillTo associated with the root (project) -->
@@ -180,7 +200,7 @@ along with this software (see the LICENSE.md file). If not, see
                             <econdition field-name="workEffortId" from="workEffort.rootWorkEffortId"/>
                             <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/>
                         </entity-find>
-                        <if condition="rootBillToList"><set field="clientPartyId" from="rootBillToList[0].partyId"/></if>
+                        <if condition="(rootBillToList?.length > 0)"><set field="clientPartyId" from="rootBillToList[0].partyId"/></if>
                     </if>
                 </else></if>
             </if>
@@ -190,7 +210,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <date-filter valid-date="fromDate"/><econdition field-name="facilityId"/>
                     <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/>
                 </entity-find>
-                <if condition="customerList"><then>
+                <if condition="(customerList?.length > 0)"><then>
                     <set field="clientPartyId" from="customerList[0].partyId"/>
                 </then><else>
                     <!-- set clientPartyId to facility owner -->
@@ -206,7 +226,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <date-filter valid-date="fromDate"/><econdition field-name="workEffortId"/>
                     <econdition field-name="roleTypeId" operator="in" value="Vendor,VendorBillFrom"/>
                 </entity-find>
-                <if condition="billFromList"><then>
+                <if condition="(billFromList?.length > 0)"><then>
                     <set field="vendorPartyId" from="billFromList[0].partyId"/>
                 </then><else>
                     <!-- see if there is a Vendor associated with the root (project) -->
@@ -217,7 +237,7 @@ along with this software (see the LICENSE.md file). If not, see
                             <econdition field-name="workEffortId" from="workEffort.rootWorkEffortId"/>
                             <econdition field-name="roleTypeId" operator="in" value="Vendor,VendorBillFrom"/>
                         </entity-find>
-                        <if condition="rootBillFromList"><set field="vendorPartyId" from="rootBillFromList[0].partyId"/></if>
+                        <if condition="(rootBillFromList?.length > 0)"><set field="vendorPartyId" from="rootBillFromList[0].partyId"/></if>
                     </if>
                 </else></if>
             </if>
@@ -227,7 +247,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <date-filter valid-date="fromDate"/><econdition field-name="facilityId"/>
                     <econdition field-name="roleTypeId" operator="in" value="Manager,Vendor,VendorBillFrom"/>
                 </entity-find>
-                <if condition="vendorList"><then>
+                <if condition="(vendorList?.length > 0)"><then>
                     <set field="vendorPartyId" from="vendorList[0].partyId"/>
                 </then><else>
                     <!-- set vendorPartyId to facility owner -->
@@ -250,10 +270,16 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="hasModifiedRates" value="N"/>
             <if condition="ec.user.hasPermission('TIME_ENTRY_RATE')"><then>
-                <if condition="(clientHourRate &amp;&amp; (timeEntry?.hasModifiedRates || clientHourRate != timeEntry?.clientHourRate)) ||
-                        (vendorHourRate &amp;&amp; (timeEntry?.hasModifiedRates || vendorHourRate != timeEntry?.vendorHourRate)) ||
-                        (clientPieceRate &amp;&amp; (timeEntry?.hasModifiedRates || clientPieceRate != timeEntry?.clientPieceRate)) ||
-                        (vendorPieceRate &amp;&amp; (timeEntry?.hasModifiedRates || vendorPieceRate != timeEntry?.vendorPieceRate))">
+                <script><![CDATA[
+                    // a rate is modified when it is given and either the entry was already modified or the rate differs from the stored one
+                    const rateModified = (rate, stored) => rate != null && !toDecimal(rate).isZero() &&
+                        (timeEntry?.hasModifiedRates || stored == null || toDecimal(rate).compare(stored) !== 0)
+                    anyRateModified = rateModified(clientHourRate, timeEntry?.clientHourRate) ||
+                        rateModified(vendorHourRate, timeEntry?.vendorHourRate) ||
+                        rateModified(clientPieceRate, timeEntry?.clientPieceRate) ||
+                        rateModified(vendorPieceRate, timeEntry?.vendorPieceRate)
+                ]]></script>
+                <if condition="anyRateModified">
                     <set field="hasModifiedRates" value="Y"/>
                 </if>
             </then><else>
@@ -267,19 +293,26 @@ along with this software (see the LICENSE.md file). If not, see
             <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="context" in-map="context"/>
 
             <!-- If any rate increments were provided, add them to the Time Entry -->
-            <if condition="vendorHourRateIncrement || vendorPieceRateIncrement || clientHourRateIncrement || clientPieceRateIncrement">
+            <script>
+                const nonZero = (value) => value != null &amp;&amp; !toDecimal(value).isZero()
+                hasVendorHourInc = nonZero(vendorHourRateIncrement)
+                hasVendorPieceInc = nonZero(vendorPieceRateIncrement)
+                hasClientHourInc = nonZero(clientHourRateIncrement)
+                hasClientPieceInc = nonZero(clientPieceRateIncrement)
+            </script>
+            <if condition="hasVendorHourInc || hasVendorPieceInc || hasClientHourInc || hasClientPieceInc">
                 <entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="timeEntry" for-update="true"/>
-                <if condition="vendorHourRateIncrement">
-                    <set field="timeEntry.vendorHourRate" from="(timeEntry.vendorHourRate?:0.0)+vendorHourRateIncrement"/>
+                <if condition="hasVendorHourInc">
+                    <set field="timeEntry.vendorHourRate" from="toDecimal(timeEntry.vendorHourRate ?? 0).add(vendorHourRateIncrement)"/>
                 </if>
-                <if condition="vendorPieceRateIncrement">
-                    <set field="timeEntry.vendorPieceRate" from="(timeEntry.vendorPieceRate?:0.0)+vendorPieceRateIncrement"/>
+                <if condition="hasVendorPieceInc">
+                    <set field="timeEntry.vendorPieceRate" from="toDecimal(timeEntry.vendorPieceRate ?? 0).add(vendorPieceRateIncrement)"/>
                 </if>
-                <if condition="clientHourRateIncrement">
-                    <set field="timeEntry.clientHourRate" from="(timeEntry.clientHourRate?:0.0)+clientHourRateIncrement"/>
+                <if condition="hasClientHourInc">
+                    <set field="timeEntry.clientHourRate" from="toDecimal(timeEntry.clientHourRate ?? 0).add(clientHourRateIncrement)"/>
                 </if>
-                <if condition="clientPieceRateIncrement">
-                    <set field="timeEntry.clientPieceRate" from="(timeEntry.clientPieceRate?:0.0)+clientPieceRateIncrement"/>
+                <if condition="hasClientPieceInc">
+                    <set field="timeEntry.clientPieceRate" from="toDecimal(timeEntry.clientPieceRate ?? 0).add(clientPieceRateIncrement)"/>
                 </if>
                 <set field="timeEntry.hasModifiedRates" value="Y"/>
                 <entity-update value-field="timeEntry"/>
@@ -289,13 +322,13 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- WorkEffort specific: handle remainingWorkTime -->
                 <if condition="remainingWorkTime != null"><then>
                     <service-call name="update#mantle.work.effort.WorkEffort"
-                            in-map="[workEffortId:workEffortId, remainingWorkTime:remainingWorkTime]"/>
-                </then><else-if condition="hours &amp;&amp; !entryHasHours">
+                            in-map="{workEffortId:workEffortId, remainingWorkTime:remainingWorkTime}"/>
+                </then><else-if condition="hours != null &amp;&amp; !toDecimal(hours).isZero() &amp;&amp; !entryHasHours">
                     <!-- auto deduct from remainingWorkTime -->
                     <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="task"/>
-                    <if condition="task?.remainingWorkTime">
-                        <set field="task.remainingWorkTime" from="task.remainingWorkTime - hours"/>
-                        <if condition="task.remainingWorkTime &lt; 0.0"><set field="task.remainingWorkTime" from="0.0"/></if>
+                    <if condition="task?.remainingWorkTime != null &amp;&amp; !toDecimal(task.remainingWorkTime).isZero()">
+                        <set field="newRemainingWorkTime" from="toDecimal(task.remainingWorkTime).subtract(hours)"/>
+                        <set field="task.remainingWorkTime" from="newRemainingWorkTime.compare(0) &lt; 0 ? toDecimal(0) : newRemainingWorkTime"/>
                         <entity-update value-field="task"/>
                     </if>
                 </else-if></if>
@@ -313,8 +346,80 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="timeEntryId"/></out-parameters>
         <actions>
+            <!-- on the person's timesheet of the week, which must not be submitted (check#TimeEntryTimesheet) -->
+            <service-call name="mantle.work.TimeServices.check#TimeEntryTimesheet" out-map="sheetCheck"
+                    in-map="{timesheetId:timesheetId, partyId:partyId, fromDate:fromDate, workEffortId:workEffortId}"/>
+            <if condition="ec.message.hasError()"><return/></if>
+            <if condition="sheetCheck.timesheetId"><set field="timesheetId" from="sheetCheck.timesheetId"/></if>
             <service-call name="create#mantle.work.time.TimeEntry" out-map="context" in-map="context"/>
         </actions>
+    </service>
+    <service verb="check" noun="TimeEntryTimesheet" allow-remote="false">
+        <description>The timesheet of a time entry being stored (store#TimeEntry, create#TimeEntryClockIn): the given timesheetId, else
+            the person's timesheet of the week of fromDate (mantle.work.TimesheetServices.get#PartyTimesheet, made when there is none;
+            a failure there is logged and the entry goes on no timesheet). With the timesheet policy's lock (the default) an entry
+            of a submitted or approved timesheet is an error when it is new, moves in or out of it, or changes its time, work item,
+            person, work type, comment or pieces (timeEntry: the stored entry; its rates may still change).</description>
+        <in-parameters>
+            <parameter name="timeEntry" type="Map"/>
+            <parameter name="timesheetId"/>
+            <parameter name="partyId"/>
+            <parameter name="fromDate" type="Timestamp"/>
+            <parameter name="thruDate" type="Timestamp"/>
+            <parameter name="hours" type="BigDecimal"/>
+            <parameter name="breakHours" type="BigDecimal"/>
+            <parameter name="workEffortId"/>
+            <parameter name="workTypeEnumId"/>
+            <parameter name="comments"/>
+            <parameter name="pieceCount" type="BigDecimal"/>
+        </in-parameters>
+        <out-parameters><parameter name="timesheetId"/></out-parameters>
+        <actions><script><![CDATA[
+            const millis = (value) => value == null || value === '' ? null : Number(String(value))
+            if (!timesheetId && partyId && fromDate != null) {
+                ec.message.pushErrors()
+                try {
+                    timesheetId = ec.service.sync().name('mantle.work.TimesheetServices.get#PartyTimesheet').parameters({partyId: partyId,
+                        date: millis(fromDate)}).call()?.timesheetId || null
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                } catch (err) {
+                    timesheetId = null
+                    ec.logger.error(`Time entry of ${partyId}: its week's timesheet was not found or made, the entry goes on none: ${err && err.message ? err.message : err}`)
+                } finally { ec.message.clearErrors(); ec.message.popErrors() }
+            }
+            // the lock: the stored entry's timesheet, and the one it goes on
+            const lockedSheets = {}
+            const isLocked = (id) => {
+                if (!id) return false
+                if (!(id in lockedSheets)) {
+                    const sheet = ec.entity.find('mantle.work.time.Timesheet').condition('timesheetId', id).disableAuthz().one()
+                    let locked = !!sheet && (sheet.statusId === 'TmshCompleted' || sheet.statusId === 'TmshApproved')
+                    if (locked) locked = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy').parameters({partyId: sheet.partyId})
+                            .call()?.policy?.lock !== false
+                    lockedSheets[id] = locked
+                }
+                return lockedSheets[id]
+            }
+            const stored = timeEntry || null
+            const storedSheet = stored?.timesheetId || null
+            const L = (text) => ec.l10n.localize(text)
+            if (!stored) {
+                if (isLocked(timesheetId)) ec.message.addError(L('That week is submitted: its time is locked until it is returned or reopened'))
+                return
+            }
+            const same = (a, b) => {
+                if (a == null || a === '') return b == null || b === ''
+                if (b == null || b === '') return false
+                const na = Number(String(a)), nb = Number(String(b))
+                return !Number.isNaN(na) && !Number.isNaN(nb) ? Math.abs(na - nb) < 0.0001 : String(a) === String(b)
+            }
+            const changed = !same(fromDate, stored.fromDate) || !same(thruDate, stored.thruDate) || !same(hours, stored.hours) || !same(breakHours, stored.breakHours)
+                    || !same(workEffortId, stored.workEffortId) || !same(partyId, stored.partyId) || !same(workTypeEnumId, stored.workTypeEnumId)
+                    || !same(comments, stored.comments) || !same(pieceCount, stored.pieceCount)
+            const moved = (timesheetId || null) !== storedSheet
+            if ((isLocked(storedSheet) && (changed || moved)) || (moved && isLocked(timesheetId)))
+                ec.message.addError(ec.resource.expand('Time entry ${id} is on a submitted week: it is locked until the week is returned or reopened', '', {id: stored.timeEntryId}))
+        ]]></script></actions>
     </service>
 
     <service verb="delete" noun="TimeEntry">
@@ -328,6 +433,12 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="timeEntry.invoiceId || timeEntry.vendorInvoiceId">
                 <return error="true" message="Cannot delete time entry ${timeEntryId}. It has already been invoiced."/></if>
+            <!-- an entry of a submitted or approved week is locked (mantle.work.TimesheetServices, the policy's lock) -->
+            <if condition="timeEntry.timesheetId">
+                <service-call name="mantle.work.TimeServices.check#TimeEntryTimesheet" in-map="{timeEntry:timeEntry.getMap(), timesheetId:timeEntry.timesheetId,
+                        partyId:timeEntry.partyId, fromDate:null, workEffortId:null}"/>
+                <if condition="ec.message.hasError()"><return/></if>
+            </if>
 
             <entity-find entity-name="mantle.work.time.TimeEntry" list="childTimeEntries">
                 <econdition field-name="parentEntryId" from="timeEntry.timeEntryId"/></entity-find>
@@ -335,7 +446,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <if condition="deleteChildTimeEntries">
                     <then>
                         <service-call name="mantle.work.TimeServices.delete#TimeEntry"
-                                        in-map="context + [timeEntryId:childTimeEntry.timeEntryId]"/></then>
+                                        in-map="Object.assign({}, context, {timeEntryId:childTimeEntry.timeEntryId})"/></then>
                     <else>
                         <return error="true" message="Cannot delete time entry ${timeEntryId}. Found child Time Entry."/></else></if>
             </iterate>
@@ -351,11 +462,11 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList">
                 <econdition field-name="workEffortId"/>
             </entity-find>
-            <if condition="!timeEntryList"><return/></if>
+            <if condition="!timeEntryList?.length"><return/></if>
 
             <iterate list="timeEntryList" entry="timeEntry">
                 <service-call name="mantle.work.TimeServices.delete#TimeEntry"
-                              in-map="context + [timeEntryId:timeEntry.timeEntryId]"/>
+                              in-map="Object.assign({}, context, {timeEntryId:timeEntry.timeEntryId})"/>
             </iterate>
         </actions>
     </service>
@@ -382,19 +493,19 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="workEffortId" from="rootWorkEffortId"/>
             </entity-find-one>
             <if condition="rootWorkEffort">
-                <if condition="rootWorkEffort.estimatedStartDate &gt; actualStartDate">
+                <if condition="Number(rootWorkEffort.estimatedStartDate) &gt; Number(actualStartDate)">
                     <return error="true" message="Task start date outside of project's start date."/>
                 </if>
-                <if condition="rootWorkEffort.estimatedCompletionDate &amp;&amp; actualStartDate &amp;&amp; rootWorkEffort.estimatedCompletionDate &lt; actualStartDate">
+                <if condition="rootWorkEffort.estimatedCompletionDate &amp;&amp; actualStartDate &amp;&amp; Number(rootWorkEffort.estimatedCompletionDate) &lt; Number(actualStartDate)">
                     <return error="true" message="Task end date out side of project's end date."/>
                 </if>
             </if>
             <service-call name="store#mantle.work.effort.WorkEffort" in-map="context" out-map="context"/>
             <service-call name="mantle.work.WorkEffortServices.replace#WorkEffortParty"
-                          in-map="[workEffortId:workEffortId, roleTypeId:'Customer', newPartyId:clientPartyId]"/>
-            <if condition="actualPaidBreakDuration"><then>
+                          in-map="{workEffortId:workEffortId, roleTypeId:'Customer', newPartyId:clientPartyId}"/>
+            <if condition="actualPaidBreakDuration != null &amp;&amp; !toDecimal(actualPaidBreakDuration).isZero()"><then>
                 <service-call name="store#mantle.work.effort.WorkEffort"
-                              in-map="context + [workEffortId:childWorkEffortId,actualWorkDuration:actualPaidBreakDuration,actualBreakDuration:null,parentWorkEffortId:workEffortId,workTypeEnumId:'WktpPaidBreak']"/>
+                              in-map="Object.assign({}, context, {workEffortId:childWorkEffortId,actualWorkDuration:actualPaidBreakDuration,actualBreakDuration:null,parentWorkEffortId:workEffortId,workTypeEnumId:'WktpPaidBreak'})"/>
             </then></if>
         </actions>
     </service>
@@ -422,10 +533,10 @@ along with this software (see the LICENSE.md file). If not, see
 
             <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="workEffort"/>
 
-            <if condition="workEffort.estimatedStartDate &gt; fromDate">
+            <if condition="Number(workEffort.estimatedStartDate) &gt; Number(fromDate)">
                 <return error="true" message="Task start date outside of project's start date."/>
             </if>
-            <if condition="workEffort.estimatedCompletionDate &amp;&amp; fromDate &amp;&amp; workEffort.estimatedCompletionDate &lt; fromDate">
+            <if condition="workEffort.estimatedCompletionDate &amp;&amp; fromDate &amp;&amp; Number(workEffort.estimatedCompletionDate) &lt; Number(fromDate)">
                 <return error="true" message="Task end date out side of project's end date."/>
             </if>
 
@@ -437,34 +548,36 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="workEffortId"/><econdition field-name="partyId"/>
                 <order-by field-name="-fromDate"/>
             </entity-find>
-            <if condition="wepList"><set field="workEffortParty" from="wepList[0]"/></if>
+            <if condition="(wepList?.length > 0)"><set field="workEffortParty" from="wepList[0]"/></if>
 
             <if condition="!workTypeEnumId">
-                <set field="workTypeEnumId" from="workEffortParty?.workTypeEnumId ?: workEffort.workTypeEnumId"/></if>
-            <if condition="!fromDate"><set field="fromDate" from="workEffort.actualStartDate ?: workEffort.estimatedStartDate"/></if>
-            <if condition="!hours &amp;&amp; hours != 0"><set field="hours" from="workEffort.actualWorkDuration"/></if>
-            <if condition="!breakHours &amp;&amp; hours != 0"><set field="breakHours" from="workEffort.actualBreakDuration"/></if>
+                <set field="workTypeEnumId" from="workEffortParty?.workTypeEnumId || workEffort.workTypeEnumId"/></if>
+            <if condition="!fromDate"><set field="fromDate" from="workEffort.actualStartDate || workEffort.estimatedStartDate"/></if>
+            <if condition="hours == null"><set field="hours" from="workEffort.actualWorkDuration"/></if>
+            <if condition="(breakHours == null || toDecimal(breakHours).isZero()) &amp;&amp; (hours == null || !toDecimal(hours).isZero())"><set field="breakHours" from="workEffort.actualBreakDuration"/></if>
             <if condition="!clientPartyId">
                 <entity-find entity-name="mantle.work.effort.WorkEffortParty" list="clientWepList">
                     <econdition field-name="workEffortId"/>
                     <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/>
                     <order-by field-name="-fromDate"/>
                 </entity-find>
-                <if condition="clientWepList"><set field="clientPartyId" from="clientWepList[0].partyId"/></if>
+                <if condition="(clientWepList?.length > 0)"><set field="clientPartyId" from="clientWepList[0].partyId"/></if>
             </if>
 
             <service-call name="mantle.work.TimeServices.store#TimeEntry" in-map="context" out-map="context"/>
-            <if condition="paidBreakHours"><then>
+            <if condition="paidBreakHours != null &amp;&amp; !toDecimal(paidBreakHours).isZero()"><then>
                 <service-call name="mantle.work.TimeServices.store#TimeEntry"
-                              in-map="context + [timeEntryId:childTimeEntryId,parentEntryId:timeEntryId,hours:paidBreakHours,breakHours:null,workTypeEnumId:'WktpPaidBreak']"/>
+                              in-map="Object.assign({}, context, {timeEntryId:childTimeEntryId,parentEntryId:timeEntryId,hours:paidBreakHours,breakHours:null,workTypeEnumId:'WktpPaidBreak'})"/>
                 <entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="timeEntry">
                     <field-map field-name="timeEntryId"/></entity-find-one>
+                <!-- the thru date as epoch millis text, moved out by the paid break -->
+                <set field="paidBreakThruDate" from="String(Math.trunc(Number(timeEntry.thruDate) + toDecimal(paidBreakHours).multiply(60 * 60 * 1000).toNumber()))"/>
                 <service-call name="mantle.work.TimeServices.store#TimeEntry"
-                              in-map="context + [thruDate: new Timestamp((Long) (timeEntry.thruDate.time + (paidBreakHours*60*60*1000)))]" out-map="context"/>
+                              in-map="Object.assign({}, context, {thruDate:paidBreakThruDate})" out-map="context"/>
             </then></if>
 
             <if condition="teamPartyId &amp;&amp; moveToTeam == 'Y'">
-                <set field="effectiveThruDate" from="workEffort.actualStartDate ?: ec.user.nowTimestamp"/>
+                <set field="effectiveThruDate" from="workEffort.actualStartDate || ec.user.nowTimestamp"/>
                 <!-- remove from any existing teams -->
                 <entity-find entity-name="mantle.party.PartyRelationship" list="existingRelList">
                     <date-filter valid-date="effectiveThruDate"/><econdition field-name="relationshipTypeEnumId" value="PrtMember"/>
@@ -475,8 +588,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <entity-update value-field="existingRel"/>
                 </iterate>
                 <!-- add to current team -->
-                <service-call name="create#mantle.party.PartyRelationship" in-map="[fromPartyId:partyId, fromRoleTypeId:'Worker',
-                        relationshipTypeEnumId:'PrtMember', toPartyId:teamPartyId, toRoleTypeId:'OrgTeam', fromDate:effectiveThruDate]"/>
+                <service-call name="create#mantle.party.PartyRelationship" in-map="{fromPartyId:partyId, fromRoleTypeId:'Worker',
+                        relationshipTypeEnumId:'PrtMember', toPartyId:teamPartyId, toRoleTypeId:'OrgTeam', fromDate:effectiveThruDate}"/>
             </if>
         </actions>
     </service>
@@ -505,7 +618,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="roleTypeId" operator="in" value="Customer,CustomerBillTo"/>
                     <order-by field-name="-fromDate"/>
                 </entity-find>
-                <if condition="clientWepList">
+                <if condition="(clientWepList?.length > 0)">
                     <entity-find-one entity-name="mantle.party.PartyDetail" value-field="clientDetail">
                         <field-map field-name="partyId" from="clientWepList[0].partyId"/></entity-find-one>
                 </if>
@@ -521,7 +634,7 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="teamMemberInfoList" from="[]"/>
 
             <!-- get all TimeEntry records for this team and WorkEffort; this will include temporary team members with a TimeEntry but no PartyRelationship to the team -->
-            <set field="memberIds" from="new HashSet()"/>
+            <set field="memberIds" from="[]"/>
             <if condition="workEffort != null">
                 <entity-find entity-name="mantle.work.time.TimeEntry" list="teamTimeEntryList">
                     <econdition field-name="teamPartyId" from="partyId"/>
@@ -529,12 +642,12 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="parentEntryId" operator="is-null"/>
                 </entity-find>
                 <iterate list="teamTimeEntryList" entry="timeEntry">
-                    <script>memberIds.add(timeEntry.partyId)</script>
+                    <script>if (!memberIds.includes(timeEntry.partyId)) memberIds.push(timeEntry.partyId)</script>
                     <entity-find-one entity-name="mantle.party.PartyDetail" value-field="memberDetail">
                         <field-map field-name="partyId" from="timeEntry.partyId"/></entity-find-one>
                     <entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="childTimeEntry">
                         <field-map field-name="parentEntryId" from="timeEntry.timeEntryId"/></entity-find-one>
-                    <set field="teamMemberInfo" from="memberDetail.getMap()"/>
+                    <set field="teamMemberInfo" from="Object.assign({}, memberDetail)"/>
                     <set field="teamMemberInfo.fromPartyId" from="timeEntry.partyId"/><!-- so fits with direct team members -->
                     <set field="teamMemberInfo.timeEntry" from="timeEntry"/>
                     <set field="teamMemberInfo.childTimeEntry" from="childTimeEntry"/>
@@ -548,7 +661,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <econdition field-name="relationshipTypeEnumId" value="PrtMember"/>
                     </entity-find-count>
                     <set field="teamMemberInfo.teamMember" from="memberRelCount ? 'Y' : 'N'"/>
-                    <script>teamMemberInfoList.add(teamMemberInfo)</script>
+                    <script>teamMemberInfoList.push(teamMemberInfo)</script>
                 </iterate>
             </if>
 
@@ -561,9 +674,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <econdition field-name="relationshipTypeEnumId" value="PrtMember"/>
             </entity-find>
             <iterate list="teamMemberList" entry="teamMember">
-                <set field="teamMemberInfo" from="teamMember.getMap()"/>
+                <set field="teamMemberInfo" from="Object.assign({}, teamMember)"/>
                 <set field="teamMemberInfo.teamMember" value="Y"/>
-                <script>teamMemberInfoList.add(teamMemberInfo)</script>
+                <script>teamMemberInfoList.push(teamMemberInfo)</script>
             </iterate>
 
             <order-map-list list="teamMemberInfoList"><order-by field-name="firstName,lastName,organizationName"/></order-map-list>
@@ -594,10 +707,10 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <if condition="timeEntry == null"><entity-find-one entity-name="mantle.work.time.TimeEntry" value-field="timeEntry"/></if>
 
-            <set field="hours" from="timeEntry.hours ?: 0.0"/>
-            <set field="pieceCount" from="timeEntry.pieceCount ?: 0.0"/>
+            <set field="hours" from="toDecimal(timeEntry.hours ?? 0)"/>
+            <set field="pieceCount" from="toDecimal(timeEntry.pieceCount ?? 0)"/>
 
-            <if condition="hours"><then>
+            <if condition="!hours.isZero()"><then>
                 <set field="hourlyAmount" from="ratePurposeEnumId == 'RaprVendor' ? timeEntry.vendorHourRate : timeEntry.clientHourRate"/>
                 <if condition="hourlyAmount == null"><then>
                     <set field="rateAmountId" from="ratePurposeEnumId == 'RaprVendor' ? timeEntry.vendorRateAmountId : timeEntry.rateAmountId"/>
@@ -605,7 +718,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="rateAmount" cache="true">
                             <field-map field-name="rateAmountId"/></entity-find-one>
                     </then><else>
-                        <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="getTerOut" in-map="[timeEntryId:timeEntryId]"/>
+                        <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="getTerOut" in-map="{timeEntryId:timeEntryId}"/>
                         <!-- set the values in the timeEntry record for use below since the service updates the DB record and we don't want to re-query to get it -->
                         <set field="timeEntry.rateAmountId" from="getTerOut.rateAmountId"/>
                         <set field="timeEntry.vendorRateAmountId" from="getTerOut.vendorRateAmountId"/>
@@ -616,7 +729,7 @@ along with this software (see the LICENSE.md file). If not, see
                     </else></if>
                     <if condition="rateAmount"><then>
                         <set field="hourlyAmount" from="rateAmount.rateAmount"/>
-                        <set field="hourlyAmountTotal" from="hours * hourlyAmount"/>
+                        <set field="hourlyAmountTotal" from="hours.multiply(hourlyAmount)"/>
                         <set field="currencyUomId" from="rateAmount.rateCurrencyUomId"/>
                     </then><else>
                         <set field="purposeDesc" from="ec.entity.find('enums').condition('enumId', ratePurposeEnumId).one()?.description"/>
@@ -625,13 +738,13 @@ along with this software (see the LICENSE.md file). If not, see
                         <message error="true">No hourly ${purposeDesc} rate amount found for time entry ${timeEntryId} for worker ${ec.resource.expand('PartyNameTemplate','',workerParty)}</message>
                     </else></if>
                 </then><else>
-                    <set field="hourlyAmountTotal" from="hours * hourlyAmount"/>
+                    <set field="hourlyAmountTotal" from="hours.multiply(hourlyAmount)"/>
                 </else></if>
             </then><else>
-                <set field="hourlyAmount" from="0.0"/>
-                <set field="hourlyAmountTotal" from="0.0"/>
+                <set field="hourlyAmount" from="toDecimal(0)"/>
+                <set field="hourlyAmountTotal" from="toDecimal(0)"/>
             </else></if>
-            <if condition="pieceCount"><then>
+            <if condition="!pieceCount.isZero()"><then>
                 <set field="pieceAmount" from="ratePurposeEnumId == 'RaprVendor' ? timeEntry.vendorPieceRate : timeEntry.clientPieceRate"/>
                 <if condition="pieceAmount == null"><then>
                     <set field="pieceRateAmountId" from="ratePurposeEnumId == 'RaprVendor' ? timeEntry.vendorPieceRateAmountId : timeEntry.pieceRateAmountId"/>
@@ -639,7 +752,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <entity-find-one entity-name="mantle.humanres.rate.RateAmount" value-field="pieceRateAmount" cache="true">
                             <field-map field-name="rateAmountId" from="pieceRateAmountId"/></entity-find-one>
                     </then><else>
-                        <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="getTerOut" in-map="[timeEntryId:timeEntryId]"/>
+                        <service-call name="mantle.work.TimeServices.get#TimeEntryRate" out-map="getTerOut" in-map="{timeEntryId:timeEntryId}"/>
                         <!-- set the values in the timeEntry record for use below since the service updates the DB record and we don't want to re-query to get it -->
                         <set field="timeEntry.pieceRateAmountId" from="getTerOut.pieceRateAmountId"/>
                         <set field="timeEntry.vendorPieceRateAmountId" from="getTerOut.vendorPieceRateAmountId"/>
@@ -650,43 +763,43 @@ along with this software (see the LICENSE.md file). If not, see
                     </else></if>
                     <if condition="pieceRateAmount"><then>
                         <set field="pieceAmount" from="pieceRateAmount.rateAmount"/>
-                        <set field="pieceAmountTotal" from="pieceCount * pieceAmount"/>
-                        <set field="currencyUomId" from="rateAmount.rateCurrencyUomId"/>
+                        <set field="pieceAmountTotal" from="pieceCount.multiply(pieceAmount)"/>
+                        <set field="currencyUomId" from="pieceRateAmount.rateCurrencyUomId"/>
                     </then><else>
                         <set field="purposeDesc" from="ec.entity.find('enums').condition('enumId', ratePurposeEnumId).one()?.description"/>
                         <message>No ${purposeDesc} piece rate amount found for time entry ${timeEntryId}</message>
                     </else></if>
                 </then><else>
-                    <set field="pieceAmountTotal" from="pieceCount * pieceAmount"/>
+                    <set field="pieceAmountTotal" from="pieceCount.multiply(pieceAmount)"/>
                 </else></if>
             </then><else>
-                <set field="pieceAmount" from="0.0"/>
-                <set field="pieceAmountTotal" from="0.0"/>
+                <set field="pieceAmount" from="toDecimal(0)"/>
+                <set field="pieceAmountTotal" from="toDecimal(0)"/>
             </else></if>
 
             <check-errors/>
 
-            <if condition="pieceAmountTotal"><then>
-                <if condition="pieceRateAmount?.rateTypeEnumId == 'RatpPiecePlusHour'"><then>
-                    <set field="amountTotal" from="(hourlyAmountTotal ?: 0.0) + pieceAmountTotal"/>
-                    <set field="amount" from="amountTotal"/>
-                    <set field="quantity" from="1.0"/>
-                </then><else>
-                    <if condition="hourlyAmountTotal &gt; pieceAmountTotal"><then>
-                        <set field="amountTotal" from="hourlyAmountTotal"/>
-                        <set field="amount" from="hourlyAmount"/>
-                        <set field="quantity" from="hours"/>
-                    </then><else>
-                        <set field="amountTotal" from="pieceAmountTotal"/>
-                        <set field="amount" from="pieceAmount"/>
-                        <set field="quantity" from="pieceCount"/>
-                    </else></if>
-                </else></if>
-            </then><else>
-                <set field="amountTotal" from="hourlyAmountTotal"/>
-                <set field="amount" from="hourlyAmount"/>
-                <set field="quantity" from="hours"/>
-            </else></if>
+            <script><![CDATA[
+                if (pieceAmountTotal != null && !toDecimal(pieceAmountTotal).isZero()) {
+                    if (pieceRateAmount?.rateTypeEnumId === 'RatpPiecePlusHour') {
+                        amountTotal = toDecimal(hourlyAmountTotal ?? 0).add(pieceAmountTotal)
+                        amount = amountTotal
+                        quantity = toDecimal(1)
+                    } else if (toDecimal(hourlyAmountTotal ?? 0).compare(pieceAmountTotal) > 0) {
+                        amountTotal = hourlyAmountTotal
+                        amount = hourlyAmount
+                        quantity = hours
+                    } else {
+                        amountTotal = pieceAmountTotal
+                        amount = pieceAmount
+                        quantity = pieceCount
+                    }
+                } else {
+                    amountTotal = hourlyAmountTotal
+                    amount = hourlyAmount
+                    quantity = hours
+                }
+            ]]></script>
         </actions>
     </service>
 
@@ -702,10 +815,10 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <if condition="timePeriodId">
-                <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="[timePeriodId:timePeriodId]" out-map="periodInfo"/>
+                <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="{timePeriodId:timePeriodId}" out-map="periodInfo"/>
                 <set field="fromTimestamp" from="periodInfo.fromTimestamp"/>
                 <set field="thruTimestamp" from="periodInfo.thruTimestamp"/>
-                <set field="clientPartyId" from="clientPartyId ?: periodInfo.timePeriod.partyId"/>
+                <set field="clientPartyId" from="clientPartyId || periodInfo.timePeriod.partyId"/>
             </if>
             <entity-find entity-name="mantle.work.time.TimeEntry" list="timeEntryList">
                 <econdition field-name="workEffortId" ignore-if-empty="true"/>
@@ -718,7 +831,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <select-field field-name="timeEntryId"/>
             </entity-find>
             <iterate list="timeEntryList" entry="timeEntry">
-                <service-call name="mantle.work.TimeServices.get#TimeEntryRate" in-map="[timeEntryId:timeEntry.timeEntryId, resetRates:true]"/>
+                <service-call name="mantle.work.TimeServices.get#TimeEntryRate" in-map="{timeEntryId:timeEntry.timeEntryId, resetRates:true}"/>
             </iterate>
         </actions>
     </service>
@@ -735,7 +848,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <select-field field-name="timeEntryId"/>
             </entity-find>
             <iterate list="timeEntryList" entry="timeEntry">
-                <service-call name="mantle.work.TimeServices.get#TimeEntryRate" in-map="[timeEntryId:timeEntry.timeEntryId, resetRates:true]"/>
+                <service-call name="mantle.work.TimeServices.get#TimeEntryRate" in-map="{timeEntryId:timeEntry.timeEntryId, resetRates:true}"/>
             </iterate>
         </actions>
     </service>
@@ -744,7 +857,7 @@ along with this software (see the LICENSE.md file). If not, see
         <in-parameters>
             <parameter name="timeEntryId" required="true"/>
             <!-- TODO: where to get currency... project setting? client or internal org setting? -->
-            <parameter name="rateCurrencyUomId" default-value="${ec.user.getPreference('CurrencyDefault') ?: 'USD'}"/>
+            <parameter name="rateCurrencyUomId" default-value="${ec.user.getPreference('CurrencyDefault') || 'USD'}"/>
             <parameter name="resetRates" type="Boolean" default="false"/>
         </in-parameters>
         <out-parameters>
@@ -769,8 +882,8 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="!timeEntry.rateAmountId &amp;&amp; timeEntry.rateTypeEnumId"><then>
                 <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="clientRate"
-                        in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprClient',
-                            rateTypeEnumId:timeEntry.rateTypeEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                        in-map="{timeEntry:timeEntry, ratePurposeEnumId:'RaprClient',
+                            rateTypeEnumId:timeEntry.rateTypeEnumId, rateCurrencyUomId:rateCurrencyUomId}"/>
                 <if condition="clientRate.rateAmountId">
                     <set field="timeEntry.rateAmountId" from="clientRate.rateAmountId"/>
                     <!--<if condition="timeEntry.hasModifiedRates != 'Y'"><set field="timeEntry.clientHourRate" from="clientRate.rateAmount"/></if>-->
@@ -779,13 +892,13 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </then><else>
                 <set field="rateAmountId" from="timeEntry.rateAmountId"/>
-                <set field="rateAmount" from="timeEntry.'mantle.humanres.rate.RateAmount'?.rateAmount"/>
+                <set field="rateAmount" from="timeEntry['mantle.humanres.rate.RateAmount']?.rateAmount"/>
                 <if condition="timeEntry.hasModifiedRates != 'Y'"><set field="timeEntry.clientHourRate" from="rateAmount"/></if>
             </else></if>
             <if condition="!timeEntry.vendorRateAmountId &amp;&amp; timeEntry.rateTypeEnumId"><then>
                 <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="vendorRate"
-                        in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor',
-                            rateTypeEnumId:timeEntry.rateTypeEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                        in-map="{timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor',
+                            rateTypeEnumId:timeEntry.rateTypeEnumId, rateCurrencyUomId:rateCurrencyUomId}"/>
                 <if condition="vendorRate.rateAmountId">
                     <set field="timeEntry.vendorRateAmountId" from="vendorRate.rateAmountId"/>
                     <!--<if condition="timeEntry.hasModifiedRates != 'Y'"><set field="timeEntry.vendorHourRate" from="vendorRate.rateAmount"/></if>-->
@@ -794,14 +907,14 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </then><else>
                 <set field="vendorRateAmountId" from="timeEntry.vendorRateAmountId"/>
-                <set field="vendorRateAmount" from="timeEntry.'Vendor#mantle.humanres.rate.RateAmount'?.rateAmount"/>
+                <set field="vendorRateAmount" from="timeEntry['Vendor#mantle.humanres.rate.RateAmount']?.rateAmount"/>
                 <if condition="timeEntry.hasModifiedRates != 'Y'"><set field="timeEntry.vendorHourRate" from="vendorRateAmount"/></if>
             </else></if>
 
             <if condition="!timeEntry.pieceRateAmountId &amp;&amp; timeEntry.pieceRateTypeEnumId"><then>
                 <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="pieceRate"
-                        in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprClient', timePeriodUomId:'OTH_ea',
-                            rateTypeEnumId:timeEntry.pieceRateTypeEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                        in-map="{timeEntry:timeEntry, ratePurposeEnumId:'RaprClient', timePeriodUomId:'OTH_ea',
+                            rateTypeEnumId:timeEntry.pieceRateTypeEnumId, rateCurrencyUomId:rateCurrencyUomId}"/>
                 <if condition="pieceRate.rateAmountId">
                     <set field="timeEntry.pieceRateAmountId" from="pieceRate.rateAmountId"/>
                     <!--<if condition="timeEntry.hasModifiedRates != 'Y'"><set field="timeEntry.pieceRate" from="pieceRate.rateAmount"/></if>-->
@@ -810,13 +923,13 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </then><else>
                 <set field="pieceRateAmountId" from="timeEntry.pieceRateAmountId"/>
-                <set field="pieceRateAmount" from="timeEntry.'Piece#mantle.humanres.rate.RateAmount'?.rateAmount"/>
+                <set field="pieceRateAmount" from="timeEntry['Piece#mantle.humanres.rate.RateAmount']?.rateAmount"/>
                 <if condition="timeEntry.hasModifiedRates != 'Y'"><set field="timeEntry.clientPieceRate" from="pieceRateAmount"/></if>
             </else></if>
             <if condition="!timeEntry.vendorPieceRateAmountId &amp;&amp; timeEntry.pieceRateTypeEnumId"><then>
                 <service-call name="mantle.work.TimeServices.find#TimeEntryRateAmount" out-map="vendorPieceRate"
-                        in-map="[timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor', timePeriodUomId:'OTH_ea',
-                            rateTypeEnumId:timeEntry.pieceRateTypeEnumId, rateCurrencyUomId:rateCurrencyUomId]"/>
+                        in-map="{timeEntry:timeEntry, ratePurposeEnumId:'RaprVendor', timePeriodUomId:'OTH_ea',
+                            rateTypeEnumId:timeEntry.pieceRateTypeEnumId, rateCurrencyUomId:rateCurrencyUomId}"/>
                 <if condition="vendorPieceRate.rateAmountId">
                     <set field="timeEntry.vendorPieceRateAmountId" from="vendorPieceRate.rateAmountId"/>
                     <!--<if condition="timeEntry.hasModifiedRates != 'Y'"><set field="timeEntry.vendorPieceRate" from="vendorPieceRate.rateAmount"/></if>-->
@@ -825,7 +938,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
             </then><else>
                 <set field="vendorPieceRateAmountId" from="timeEntry.vendorPieceRateAmountId"/>
-                <set field="vendorPieceRateAmount" from="timeEntry.'VendorPiece#mantle.humanres.rate.RateAmount'?.rateAmount"/>
+                <set field="vendorPieceRateAmount" from="timeEntry['VendorPiece#mantle.humanres.rate.RateAmount']?.rateAmount"/>
                 <if condition="timeEntry.hasModifiedRates != 'Y'"><set field="timeEntry.vendorPieceRate" from="vendorPieceRateAmount"/></if>
             </else></if>
 
@@ -891,34 +1004,34 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="!dftRiskClassEnumId">
                 <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
-                              in-map="[partySettingTypeId:'PayrollWcRiskClass',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                              in-map="{partySettingTypeId:'PayrollWcRiskClass',partyId:partyId,partyRelationshipId:partyRelationshipId}"/>
                 <set field="dftRiskClassEnumId" from="getPsvOut.settingValue"/>
 
                 <service-call name="mantle.party.PartyServices.get#PartySettingValue" out-map="getPsvOut"
-                              in-map="[partySettingTypeId:'PayrollWcDftOvrWrkTp',partyId:partyId,partyRelationshipId:partyRelationshipId]"/>
+                              in-map="{partySettingTypeId:'PayrollWcDftOvrWrkTp',partyId:partyId,partyRelationshipId:partyRelationshipId}"/>
                 <set field="dftRiskClassOverride" from="getPsvOut.settingValue=='BlY'" type="Boolean"/>
             </if>
 
-            <set field="rateTypeEnumId" from="timeEntry.rateTypeEnumId?:'RatpStandard'"/>
-            <set field="workTypeEnumId" from="timeEntry.workTypeEnumId?:(timeEntry.workEffort?.workTypeEnumId)"/>
+            <set field="rateTypeEnumId" from="timeEntry.rateTypeEnumId||'RatpStandard'"/>
+            <set field="workTypeEnumId" from="timeEntry.workTypeEnumId||(timeEntry.workEffort?.workTypeEnumId)"/>
 
             <!-- Make sure all rate types have been accounted for in case any need special treatment -->
-            <if condition="rateTypeEnumId in ['RatpVacation', 'RatpHoliday', 'RatpSick', 'RatpPtoOther']"><then>
+            <if condition="['RatpVacation', 'RatpHoliday', 'RatpSick', 'RatpPtoOther'].includes(rateTypeEnumId)"><then>
                 <!-- TODO: Are there any circumstances where vacation/etc. are subject to workers' comp? -->
                 <return/>
-            </then><else-if condition="rateTypeEnumId in ['RatpPaidBreakStd', 'RatpPaidBreakRrp']">
+            </then><else-if condition="['RatpPaidBreakStd', 'RatpPaidBreakRrp'].includes(rateTypeEnumId)">
                 <!-- For breaks, use the parent's work type if available -->
                 <if condition="timeEntry.parentEntryId">
-                    <set field="workTypeEnumId" from="timeEntry.parentEntry.workTypeEnumId?:workTypeEnumId"/>
+                    <set field="workTypeEnumId" from="timeEntry.parentEntry.workTypeEnumId||workTypeEnumId"/>
                 </if>
-            </else-if><else-if condition="!(rateTypeEnumId in ['RatpStandard',
+            </else-if><else-if condition="!(['RatpStandard',
                                                                'RatpPieceMinWageAdj',
                                                                'RatpPaidNptStd',
                                                                'RatpPaidNptRrp',
                                                                'RatpEvening',
                                                                'RatpNight',
                                                                'RatpWeekend',
-                                                               'RatpShHoliday'])">
+                                                               'RatpShHoliday'].includes(rateTypeEnumId))">
                 <log level="warn" message="Unhandled rate type '${rateTypeEnumId}' in get#TimeEntryInfo"/>
                 <return/>
             </else-if></if>
@@ -933,7 +1046,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </if>
 
                 <if condition="!stateGeoId"> <!-- TODO: Does the relationship exist if employee is a map? -->
-                    <set field="stateGeoId" from="employee?:taxHomeContectMech?.stateProvinceGeoId"/>
+                    <set field="stateGeoId" from="employee||taxHomeContectMech?.stateProvinceGeoId"/>
                 </if>
             </if>
 
@@ -997,7 +1110,7 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- get all possible rates in one query, then do maximal match -->
             <entity-find entity-name="mantle.humanres.rate.RateAmount" list="rateAmountList">
-                <date-filter valid-date="fromDate ?: ec.user.nowTimestamp"/>
+                <date-filter valid-date="fromDate || ec.user.nowTimestamp"/>
                 <econdition field-name="partyId" from="partyId" or-null="true"/>
                 <econditions combine="or">
                     <econdition field-name="workEffortId" from="taskWorkEffort?.workEffortId" ignore-if-empty="true"/>
@@ -1017,15 +1130,15 @@ along with this software (see the LICENSE.md file). If not, see
 
             <!-- if there is a taskWorkEffort and rates are associated with it or the project only use those -->
             <if condition="taskWorkEffort != null">
-                <set field="taskRaList" from="rateAmountList.findAll({ it.workEffortId == taskWorkEffort.workEffortId })"/>
-                <if condition="taskRaList"><then>
+                <set field="taskRaList" from="rateAmountList.filter((ra) => ra.workEffortId === taskWorkEffort.workEffortId)"/>
+                <if condition="taskRaList.length"><then>
                     <set field="rateAmountList" from="taskRaList"/>
                 </then><else-if condition="taskWorkEffort.rootWorkEffortId">
-                    <set field="rootWeRaList" from="rateAmountList.findAll({ it.workEffortId == taskWorkEffort.rootWorkEffortId })"/>
-                    <if condition="rootWeRaList"><set field="rateAmountList" from="rootWeRaList"/></if>
+                    <set field="rootWeRaList" from="rateAmountList.filter((ra) => ra.workEffortId === taskWorkEffort.rootWorkEffortId)"/>
+                    <if condition="rootWeRaList.length"><set field="rateAmountList" from="rootWeRaList"/></if>
                 </else-if></if>
             </if>
-            <set field="workTypeEnumId" from="workTypeEnumId ?: taskWorkEffort?.workTypeEnumId"/>
+            <set field="workTypeEnumId" from="workTypeEnumId || taskWorkEffort?.workTypeEnumId"/>
 
             <!-- If there is a party or employment, find the employment and attempt to define the payGrade and positionClass.
                  If there are any party specific rates, do a maximal match against them. -->
@@ -1038,15 +1151,15 @@ along with this software (see the LICENSE.md file). If not, see
                         <econdition field-name="fromPartyId" from="partyId" ignore-if-empty="true"/>
                         <econdition field-name="toPartyId" from="employerPartyId" ignore-if-empty="true"/>
                     </entity-find>
-                    <set field="employment" from="employmentList ? employmentList[0] : null"/>
-                    <set field="partyId" from="partyId ?: employment?.fromPartyId ?: null"/> <!-- Need party from employment if not set -->
+                    <set field="employment" from="employmentList?.length ? employmentList[0] : null"/>
+                    <set field="partyId" from="partyId || employment?.fromPartyId || null"/> <!-- Need party from employment if not set -->
                 </then><else-if condition="partyId &amp;&amp; employerPartyId">
                     <entity-find entity-name="mantle.humanres.employment.EmploymentAndRelationship" list="employmentList">
                         <date-filter valid-date="thruDate"/>
                         <econdition field-name="fromPartyId" from="partyId"/>
                         <econdition field-name="toPartyId" from="employerPartyId"/>
                     </entity-find>
-                    <set field="employment" from="employmentList ? employmentList[0] : null"/>
+                    <set field="employment" from="employmentList?.length ? employmentList[0] : null"/>
                 </else-if></if>
 
                 <if condition="employment?.emplPositionId">
@@ -1054,29 +1167,49 @@ along with this software (see the LICENSE.md file). If not, see
                         <field-map field-name="emplPositionId" from="employment.emplPositionId"/></entity-find-one>
                 </if>
 
-                <set field="payGradeId" from="payGradeId ?: emplPosition?.payGradeId"/>
-                <set field="emplPositionClassId" from="emplPositionClassId ?: emplPosition?.emplPositionClassId"/>
+                <set field="payGradeId" from="payGradeId || emplPosition?.payGradeId"/>
+                <set field="emplPositionClassId" from="emplPositionClassId || emplPosition?.emplPositionClassId"/>
 
-                <set field="partyRaList" from="rateAmountList.findAll({ it.partyId == partyId })"/>
-                <if condition="partyRaList">
-                    <set field="partyRateAmountToUse" from="findMaximalMatch(partyRaList,
-                        [workTypeEnumId:workTypeEnumId, payGradeId:payGradeId, emplPositionClassId:emplPositionClassId])"/>
-
-                </if>
+                <set field="partyRaList" from="rateAmountList.filter((ra) => ra.partyId === partyId)"/>
             </if>
-            <!--<log level="warn" message="=============== partyRaList=${partyRaList}"/>-->
 
-            <!-- Do a maximal match on the rates that do not have a partyId. -->
-            <set field="nonPartyRaList" from="rateAmountList.findAll({it.partyId == null })"/>
-            <set field="nonPartyRateAmountToUse" from="findMaximalMatch(nonPartyRaList,
-                    [workTypeEnumId:workTypeEnumId, payGradeId:payGradeId, emplPositionClassId:emplPositionClassId])"/>
-            <!--<log level="warn" message="=============== nonPartyRaList=${nonPartyRaList}"/>-->
+            <!-- Maximal match: for each rate, a null field matches any value but adds nothing to the score, otherwise the field must
+                 equal the value to be a candidate; an earlier field in fieldsByPriority and more matched fields score higher -->
+            <script><![CDATA[
+                const findMaximalMatch = (mapList, fieldsByPriority) => {
+                    const fieldNames = Object.keys(fieldsByPriority)
+                    const numFields = fieldNames.length
+                    let highScore = -1
+                    let highMap = null
+                    for (const curMap of mapList) {
+                        let curScore = 0
+                        let skipMap = false
+                        for (let i = 0; i < numFields; i++) {
+                            const curValue = curMap[fieldNames[i]]
+                            // a null value in the rate allows any match value
+                            if (curValue == null) continue
+                            if (curValue !== fieldsByPriority[fieldNames[i]]) { skipMap = true; break }
+                            curScore += (numFields - i) + numFields
+                        }
+                        if (skipMap) continue
+                        if (curScore > highScore) { highScore = curScore; highMap = curMap }
+                    }
+                    return highMap
+                }
+                const matchFields = {workTypeEnumId: workTypeEnumId, payGradeId: payGradeId, emplPositionClassId: emplPositionClassId}
+
+                partyRateAmountToUse = (partyRaList != null && partyRaList.length) ? findMaximalMatch(partyRaList, matchFields) : null
+
+                // Do a maximal match on the rates that do not have a partyId.
+                nonPartyRaList = rateAmountList.filter((ra) => ra.partyId == null)
+                nonPartyRateAmountToUse = findMaximalMatch(nonPartyRaList, matchFields)
+            ]]></script>
 
             <!-- Take the greater of the matched rates. This allows one to set a base rate for an employee, but allow
                  specific rates to exceed the employee rate.  This does preclude paying less than the employee rate. -->
             <if condition="partyRateAmountToUse"><then>
                 <if condition="nonPartyRateAmountToUse &amp;&amp;
-                               (nonPartyRateAmountToUse.rateAmount &gt; partyRateAmountToUse.rateAmount)"><then>
+                               toDecimal(nonPartyRateAmountToUse.rateAmount ?? 0).compare(partyRateAmountToUse.rateAmount ?? 0) &gt; 0"><then>
                     <set field="rateAmountId" from="nonPartyRateAmountToUse.rateAmountId"/>
                     <set field="rateAmount" from="nonPartyRateAmountToUse.rateAmount"/>
                 </then><else>
@@ -1108,12 +1241,12 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <service-call name="mantle.work.TimeServices.find#RateAmount"
-                          in-map="[fromDate:timeEntry.fromDate, thruDate:timeEntry.thruDate,
+                          in-map="{fromDate:timeEntry.fromDate, thruDate:timeEntry.thruDate,
                                    ratePurposeEnumId:ratePurposeEnumId,rateTypeEnumId:rateTypeEnumId,
                                    rateCurrencyUomId:rateCurrencyUomId,timePeriodUomId:timePeriodUomId,
                                    workEffortId:timeEntry.workEffortId, partyId:timeEntry.partyId,
                                    employerPartyId:timeEntry.clientPartyId, workTypeEnumId:timeEntry.workTypeEnumId,
-                                   emplPositionClassId:timeEntry.emplPositionClassId]"
+                                   emplPositionClassId:timeEntry.emplPositionClassId}"
                           out-map="context"/>
         </actions>
     </service>
@@ -1141,12 +1274,11 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <script>
-            org.moqui.context.ExecutionContext ec = context.ec
             recordsLoaded = ec.entity.makeDataLoader().csvText(fileText)
                     .csvEntityName("mantle.work.TimeServices.import#TimeSummaryRecord")
                     .csvFieldNames(['employeeId', 'emplPositionClassId', 'standardHours', 'overtimeHours',
                                     'doubleTimeHours', 'standardPieces', 'overtimePieces', 'doubleTimePieces'])
-                    .defaultValues([clientPartyId:clientPartyId, effectiveDate:effectiveDate])
+                    .defaultValues({clientPartyId:clientPartyId, effectiveDate:effectiveDate})
                     .load()
             </script>
             <message>Loaded ${recordsLoaded} time summary records</message>
@@ -1174,15 +1306,15 @@ along with this software (see the LICENSE.md file). If not, see
                 <field-map field-name="pseudoId" from="employeeId"/></entity-find-one></if>
             <if condition="!party"><return error="true" message="Could not find employee with ID ${employeeId}"/></if>
 
-            <if condition="standardHours || standardPieces"><service-call name="mantle.work.TimeServices.store#TimeEntry"
-                    in-map="[partyId:party.partyId, rateTypeEnumId:'RatpStandard', rateModifierEnumId:'RatmRegular', emplPositionClassId:emplPositionClassId,
-                        clientPartyId:clientPartyId, thruDate:effectiveDate, hours:standardHours, pieceCount:standardPieces]"/></if>
-            <if condition="overtimeHours || overtimePieces"><service-call name="mantle.work.TimeServices.store#TimeEntry"
-                    in-map="[partyId:party.partyId, rateTypeEnumId:'RatpStandard', rateModifierEnumId:'RatmOvertime', emplPositionClassId:emplPositionClassId,
-                        clientPartyId:clientPartyId, thruDate:effectiveDate, hours:overtimeHours, pieceCount:overtimePieces]"/></if>
-            <if condition="doubleTimeHours || doubleTimePieces"><service-call name="mantle.work.TimeServices.store#TimeEntry"
-                    in-map="[partyId:party.partyId, rateTypeEnumId:'RatpStandard', rateModifierEnumId:'RatmDouble', emplPositionClassId:emplPositionClassId,
-                        clientPartyId:clientPartyId, thruDate:effectiveDate, hours:doubleTimeHours, pieceCount:doubleTimePieces]"/></if>
+            <if condition="(standardHours != null &amp;&amp; !toDecimal(standardHours).isZero()) || (standardPieces != null &amp;&amp; !toDecimal(standardPieces).isZero())"><service-call name="mantle.work.TimeServices.store#TimeEntry"
+                    in-map="{partyId:party.partyId, rateTypeEnumId:'RatpStandard', rateModifierEnumId:'RatmRegular', emplPositionClassId:emplPositionClassId,
+                        clientPartyId:clientPartyId, thruDate:effectiveDate, hours:standardHours, pieceCount:standardPieces}"/></if>
+            <if condition="(overtimeHours != null &amp;&amp; !toDecimal(overtimeHours).isZero()) || (overtimePieces != null &amp;&amp; !toDecimal(overtimePieces).isZero())"><service-call name="mantle.work.TimeServices.store#TimeEntry"
+                    in-map="{partyId:party.partyId, rateTypeEnumId:'RatpStandard', rateModifierEnumId:'RatmOvertime', emplPositionClassId:emplPositionClassId,
+                        clientPartyId:clientPartyId, thruDate:effectiveDate, hours:overtimeHours, pieceCount:overtimePieces}"/></if>
+            <if condition="(doubleTimeHours != null &amp;&amp; !toDecimal(doubleTimeHours).isZero()) || (doubleTimePieces != null &amp;&amp; !toDecimal(doubleTimePieces).isZero())"><service-call name="mantle.work.TimeServices.store#TimeEntry"
+                    in-map="{partyId:party.partyId, rateTypeEnumId:'RatpStandard', rateModifierEnumId:'RatmDouble', emplPositionClassId:emplPositionClassId,
+                        clientPartyId:clientPartyId, thruDate:effectiveDate, hours:doubleTimeHours, pieceCount:doubleTimePieces}"/></if>
         </actions>
     </service>
 
@@ -1205,12 +1337,11 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <script>
-            org.moqui.context.ExecutionContext ec = context.ec
             recordsLoaded = ec.entity.makeDataLoader().csvText(fileText)
                     .csvEntityName("mantle.work.TimeServices.import#TimeDetailRecord")
                     .csvFieldNames(['employeeId', 'emplPositionClassId', 'rateType', 'startDateTime',
                                     'endDateTime', 'hours', 'pieceCount'])
-                    .defaultValues([clientPartyId:clientPartyId, defaultDate:defaultDate])
+                    .defaultValues({clientPartyId:clientPartyId, defaultDate:defaultDate})
                     .load()
             </script>
             <message>Loaded ${recordsLoaded} time detail records</message>
@@ -1245,9 +1376,664 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="rateTypeEnumId" value="Ratp${rateType}"/>
 
             <service-call name="mantle.work.TimeServices.store#TimeEntry"
-                    in-map="[partyId:party.partyId, rateTypeEnumId:rateTypeEnumId, emplPositionClassId:emplPositionClassId,
+                    in-map="{partyId:party.partyId, rateTypeEnumId:rateTypeEnumId, emplPositionClassId:emplPositionClassId,
                         clientPartyId:clientPartyId, fromDate:fromDate, thruDate:thruDate,
-                        hours:hours, pieceCount:pieceCount]"/>
+                        hours:hours, pieceCount:pieceCount}"/>
         </actions>
+    </service>
+    <!-- ========== IronStone Projects: the time entries list, the time import and time in Chatter (design-projects.md §8
+        TimeEntries, ProjectTime and §15 Time import, Time in Chatter; impl-projects.md P6b) ========== -->
+
+    <service verb="find" noun="TimeEntries">
+        <description>
+            The time entries the user may see, narrowed, sorted and paged, for TimeEntries and ProjectTime (design-projects.md §8;
+            no entity filter covers TimeEntry, impl-projects.md F1). A person's time is seen by the person, the managers of the
+            projects it is on (ProjectManager or Manager: the entries on the project and its items), the person's line managers
+            (PrtManager), and everyone's by ADMIN and, when the user's timesheet policy has approvers any, by the holders of
+            TIMESHEET_APPROVE.
+
+            The find: partyId, rootWorkEffortId (the project's entries and its items'), workEffortId (one item), noWorkItem,
+            clientPartyId, workTypeEnumId, billable (Y or N), clientInvoiced and workerInvoiced (Y or N), sheetStatus (open:
+            In-Process or none, returned, submitted, approved, locked: submitted or approved), fromDate and thruDate (an entry
+            whose fromDate is in the period), text (in the comments), timeEntryIds. orderByField one of fromDate, hours, partyId,
+            workEffortId (with - for descending; default -fromDate).
+
+            A row: {timeEntryId, partyId, personName, workEffortId, workEffortName, workEffortTypeEnumId, rootWorkEffortId,
+            projectName, fromDate and thruDate (millis), running, hours, breakHours, workTypeEnumId, workTypeLabel, rateTypeEnumId,
+            billable, comments, clientPartyId, timesheetId, sheetStatusId (In-Process when none), returned, locked (its week
+            submitted or approved under a locking policy), invoiceId, vendorInvoiceId, invoiced}; with rates (withRates, for
+            ADMIN and holders of TIME_ENTRY_RATE: those who manage money) also clientHourRate, vendorHourRate, clientAmount and
+            vendorAmount (hours times the rate: the entry's own hour rate, else its RateAmount's, impl-projects.md F86). totals (withTotals, over every match, not the page): hours, billableHours,
+            nonBillableHours, entryCount, byPerson, byWorkType and byItem (hours of each, with an item's estimate), and with
+            rates clientAmount and vendorAmount.
+        </description>
+        <in-parameters>
+            <parameter name="partyId"/>
+            <parameter name="rootWorkEffortId"/>
+            <parameter name="workEffortId"/>
+            <parameter name="noWorkItem" type="Boolean" default="false"/>
+            <parameter name="clientPartyId"/>
+            <parameter name="workTypeEnumId"/>
+            <parameter name="billable"/>
+            <parameter name="clientInvoiced"/>
+            <parameter name="workerInvoiced"/>
+            <parameter name="sheetStatus"/>
+            <parameter name="fromDate" type="Timestamp"/>
+            <parameter name="thruDate" type="Timestamp"/>
+            <parameter name="text"/>
+            <parameter name="timeEntryIds" type="List"/>
+            <parameter name="orderByField"/>
+            <parameter name="pageIndex" type="Integer" default="0"/>
+            <parameter name="pageSize" type="Integer" default="50"/>
+            <parameter name="pageNoLimit" type="Boolean" default="false"/>
+            <parameter name="withRates" type="Boolean" default="false"/>
+            <parameter name="withTotals" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="rowList" type="List"/>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="pageIndex" type="Integer"/>
+            <parameter name="pageSize" type="Integer"/>
+            <parameter name="pageMaxIndex" type="Integer"/>
+            <parameter name="pageRangeLow" type="Integer"/>
+            <parameter name="pageRangeHigh" type="Integer"/>
+            <parameter name="totals" type="Map"/>
+            <parameter name="ratesShown" type="Boolean"/>
+            <parameter name="seesAll" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            rowList = []; rowCount = 0; totals = null
+            const L = (text) => ec.l10n.localize(text)
+            const cf = ec.entity.conditionFactory
+            const me = ec.user.userAccount?.partyId || null
+            const isAdmin = !!ec.user.userId && ec.user.isInGroup('ADMIN')
+            ratesShown = !!withRates && (isAdmin || ec.user.hasPermission('TIME_ENTRY_RATE'))
+            const size = Math.max(1, Math.min(Number(pageSize) || 50, 500))
+            const index = Math.max(0, Number(pageIndex) || 0)
+            const toMillis = (value) => value == null || value === '' ? null : (value instanceof Date ? value.getTime() : (/^-?\d+$/.test(String(value)) ? Number(String(value)) : Date.parse(String(value))))
+            const num = (value) => value == null || value === '' ? null : Number(String(value))
+            const round = (value) => Math.round(value * 100) / 100
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                // ===== who the user sees
+                const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+                // a client contact sees no time here (impl-projects.md P10: shared hours are the project's own view, without rates)
+                if (vis.isClient) { pageIndex = 0; pageSize = size; pageMaxIndex = 0; pageRangeLow = 0; pageRangeHigh = 0; return }
+                let anyApprover = false
+                if (!isAdmin && ec.user.hasPermission('TIMESHEET_APPROVE')) anyApprover = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy')
+                        .call()?.policy?.approvers === 'any'
+                seesAll = isAdmin || anyApprover
+                const seen = []
+                if (!seesAll) {
+                    if (!me) { pageIndex = 0; pageSize = size; pageMaxIndex = 0; pageRangeLow = 0; pageRangeHigh = 0; return }
+                    seen.push(cf.makeCondition('partyId', 'equals', me))
+                    const managed = Array.from(vis.managedProjectIds || [])
+                    if (managed.length) {
+                        seen.push(cf.makeCondition('rootWorkEffortId', 'in', managed))
+                        seen.push(cf.makeCondition('workEffortId', 'in', managed))
+                    }
+                    const reports = Array.from(new Set(Array.from(ec.entity.find('mantle.party.PartyRelationship').condition('relationshipTypeEnumId', 'PrtManager')
+                            .condition('fromPartyId', me).conditionDate('fromDate', 'thruDate', null).list()).map((row) => row.toPartyId)))
+                    if (reports.length) seen.push(cf.makeCondition('partyId', 'in', reports))
+                }
+                // ===== the find
+                const conds = []
+                if (seen.length) conds.push(cf.makeCondition(seen, 'or'))
+                if (partyId) conds.push(cf.makeCondition('partyId', 'equals', partyId))
+                if (rootWorkEffortId) conds.push(cf.makeCondition([cf.makeCondition('rootWorkEffortId', 'equals', rootWorkEffortId),
+                    cf.makeCondition('workEffortId', 'equals', rootWorkEffortId)], 'or'))
+                if (workEffortId) conds.push(cf.makeCondition('workEffortId', 'equals', workEffortId))
+                if (noWorkItem) conds.push(cf.makeCondition('workEffortId', 'is-null', null))
+                if (clientPartyId) conds.push(cf.makeCondition('clientPartyId', 'equals', clientPartyId))
+                if (workTypeEnumId) conds.push(cf.makeCondition('workTypeEnumId', 'equals', workTypeEnumId))
+                if (billable === 'Y') conds.push(cf.makeCondition('rateTypeEnumId', 'not-equals', 'RatpNoCharge', true))
+                if (billable === 'N') conds.push(cf.makeCondition('rateTypeEnumId', 'equals', 'RatpNoCharge'))
+                if (clientInvoiced === 'Y') conds.push(cf.makeCondition('invoiceId', 'is-not-null', null))
+                if (clientInvoiced === 'N') conds.push(cf.makeCondition('invoiceId', 'is-null', null))
+                if (workerInvoiced === 'Y') conds.push(cf.makeCondition('vendorInvoiceId', 'is-not-null', null))
+                if (workerInvoiced === 'N') conds.push(cf.makeCondition('vendorInvoiceId', 'is-null', null))
+                if (fromDate != null) conds.push(cf.makeCondition('fromDate', 'greater-equals', new Date(toMillis(fromDate))))
+                if (thruDate != null) conds.push(cf.makeCondition('fromDate', 'less-than', new Date(toMillis(thruDate))))
+                if (text && String(text).trim()) conds.push(cf.makeCondition('comments', 'like', '%' + String(text).trim() + '%', false, true))
+                if (timeEntryIds != null) {
+                    const ids = Array.from(timeEntryIds).map(String).filter((id) => id)
+                    conds.push(ids.length ? cf.makeCondition('timeEntryId', 'in', ids) : cf.makeCondition('timeEntryId', 'equals', '_NA_'))
+                }
+                // the week's status: the timesheets of each status, as an IN on timesheetId
+                if (['open', 'returned', 'submitted', 'approved', 'locked'].includes(sheetStatus)) {
+                    const statuses = {submitted: ['TmshCompleted'], approved: ['TmshApproved'], locked: ['TmshCompleted', 'TmshApproved']}[sheetStatus]
+                    if (statuses) {
+                        const sheetIds = Array.from(ec.entity.find('mantle.work.time.Timesheet').condition('statusId', 'in', statuses).selectField('timesheetId')
+                                .limit(20000).list()).map((row) => row.timesheetId)
+                        conds.push(sheetIds.length ? cf.makeCondition('timesheetId', 'in', sheetIds) : cf.makeCondition('timesheetId', 'equals', '_NA_'))
+                    } else if (sheetStatus === 'returned') {
+                        const sheetIds = Array.from(ec.entity.find('mantle.work.time.Timesheet').condition(cf.makeCondition('statusId', 'equals', 'TmshInProcess', true))
+                                .condition('comments', 'is-not-null', null).selectField('timesheetId').limit(20000).list()).map((row) => row.timesheetId)
+                        conds.push(sheetIds.length ? cf.makeCondition('timesheetId', 'in', sheetIds) : cf.makeCondition('timesheetId', 'equals', '_NA_'))
+                    } else {
+                        const closedIds = Array.from(ec.entity.find('mantle.work.time.Timesheet').condition('statusId', 'in', ['TmshCompleted', 'TmshApproved'])
+                                .selectField('timesheetId').limit(20000).list()).map((row) => row.timesheetId)
+                        if (closedIds.length) conds.push(cf.makeCondition([cf.makeCondition('timesheetId', 'is-null', null),
+                            cf.makeCondition('timesheetId', 'not-in', closedIds)], 'or'))
+                    }
+                }
+                const where = conds.length ? cf.makeCondition(conds, 'and') : null
+                const view = 'mantle.work.time.TimeEntryAndWorkEffort'
+                const findOf = () => { const find = ec.entity.find(view); return where ? find.condition(where) : find }
+                rowCount = findOf().count()
+                const orders = {fromDate: 'fromDate', hours: 'hours', partyId: 'partyId', workEffortId: 'workEffortId'}
+                const wanted = String(orderByField || '-fromDate')
+                const desc = wanted.startsWith('-')
+                const orderField = orders[wanted.replace(/^[-+]/, '')] || 'fromDate'
+                let find = findOf().orderBy((desc ? '-' : '') + orderField)
+                if (orderField !== 'fromDate') find = find.orderBy('-fromDate')
+                find = find.orderBy('timeEntryId')
+                if (!pageNoLimit) find = find.offset(index * size).limit(size)
+                else find = find.limit(5000)
+                const page = Array.from(find.list()).map((row) => row.getMap())
+                pageIndex = pageNoLimit ? 0 : index
+                pageSize = pageNoLimit ? Math.max(page.length, 1) : size
+                pageMaxIndex = pageNoLimit ? 0 : Math.max(0, Math.ceil(rowCount / size) - 1)
+                pageRangeLow = rowCount ? pageIndex * pageSize + 1 : 0
+                pageRangeHigh = rowCount ? Math.min(rowCount, pageIndex * pageSize + page.length) : 0
+
+                // ===== the rows' names, timesheets and the policy's lock of each person
+                const nameCache = {}
+                const nameOf = (id) => {
+                    if (!id) return ''
+                    if (!(id in nameCache)) {
+                        const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', id).one()
+                        nameCache[id] = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || party.pseudoId || id) : id
+                    }
+                    return nameCache[id]
+                }
+                const projectNames = {}
+                const projectName = (id) => {
+                    if (!id) return ''
+                    if (!(id in projectNames)) projectNames[id] = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', id).one()?.workEffortName || id
+                    return projectNames[id]
+                }
+                const sheetIds = Array.from(new Set(page.map((row) => row.timesheetId).filter((id) => id)))
+                const sheets = {}
+                if (sheetIds.length) for (const sheet of ec.entity.find('mantle.work.time.Timesheet').condition('timesheetId', 'in', sheetIds).list()) sheets[sheet.timesheetId] = sheet
+                const lockCache = {}
+                const lockOf = (person) => {
+                    if (!(person in lockCache)) lockCache[person] = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy')
+                            .parameters({partyId: person}).call()?.policy?.lock !== false
+                    return lockCache[person]
+                }
+                const typeLabels = {}
+                for (const type of ec.entity.find('moqui.basic.Enumeration').condition('enumTypeId', 'WorkType').useCache(true).list()) typeLabels[type.enumId] = type.description || type.enumId
+                const rateAmounts = {}
+                const rateOf = (own, rateAmountId) => {
+                    if (num(own) != null) return num(own)
+                    if (!rateAmountId) return null
+                    if (!(rateAmountId in rateAmounts)) rateAmounts[rateAmountId] = num(ec.entity.find('mantle.humanres.rate.RateAmount').condition('rateAmountId', rateAmountId)
+                            .useCache(true).one()?.rateAmount)
+                    return rateAmounts[rateAmountId]
+                }
+                for (const row of page) {
+                    const sheet = row.timesheetId ? sheets[row.timesheetId] : null
+                    const status = sheet?.statusId || 'TmshInProcess'
+                    const isProject = row.workEffortTypeEnumId === 'WetProject'
+                    const root = isProject ? row.workEffortId : (row.rootWorkEffortId || null)
+                    const hours = num(row.hours) ?? 0
+                    const out = {timeEntryId: row.timeEntryId, partyId: row.partyId, personName: nameOf(row.partyId), workEffortId: row.workEffortId || null,
+                        workEffortName: row.workEffortName || '', workEffortTypeEnumId: row.workEffortTypeEnumId || null, rootWorkEffortId: root,
+                        projectName: projectName(root), fromDate: toMillis(row.fromDate), thruDate: toMillis(row.thruDate), running: row.thruDate == null && row.fromDate != null,
+                        hours: hours, breakHours: num(row.breakHours), workTypeEnumId: row.workTypeEnumId || null, workTypeLabel: row.workTypeEnumId ? (typeLabels[row.workTypeEnumId] || row.workTypeEnumId) : '',
+                        rateTypeEnumId: row.rateTypeEnumId || null, billable: row.rateTypeEnumId !== 'RatpNoCharge', comments: row.comments || '', clientPartyId: row.clientPartyId || null,
+                        timesheetId: row.timesheetId || null, sheetStatusId: status, returned: status === 'TmshInProcess' && !!sheet?.comments,
+                        locked: (status === 'TmshCompleted' || status === 'TmshApproved') && lockOf(row.partyId),
+                        invoiceId: row.invoiceId || null, vendorInvoiceId: row.vendorInvoiceId || null, invoiced: !!(row.invoiceId || row.vendorInvoiceId)}
+                    if (ratesShown) {
+                        // the entry's own hour rate, else its RateAmount's (new entries carry only rateAmountId, impl-projects.md F86)
+                        out.clientHourRate = rateOf(row.clientHourRate, row.rateAmountId)
+                        out.vendorHourRate = rateOf(row.vendorHourRate, row.vendorRateAmountId)
+                        out.clientAmount = out.clientHourRate == null ? null : round(hours * out.clientHourRate)
+                        out.vendorAmount = out.vendorHourRate == null ? null : round(hours * out.vendorHourRate)
+                    }
+                    rowList.push(out)
+                }
+
+                // ===== the totals over every match
+                if (withTotals) {
+                    let all = findOf().selectField('timeEntryId').selectField('partyId').selectField('hours').selectField('rateTypeEnumId').selectField('workTypeEnumId')
+                            .selectField('workEffortId').selectField('workEffortName').selectField('estimatedWorkTime')
+                    if (ratesShown) all = all.selectField('clientHourRate').selectField('vendorHourRate').selectField('rateAmountId').selectField('vendorRateAmountId')
+                    const rows = Array.from(all.limit(20000).list())
+                    const sum = {hours: 0, billableHours: 0, nonBillableHours: 0, entryCount: rows.length, clientAmount: ratesShown ? 0 : null, vendorAmount: ratesShown ? 0 : null}
+                    const byPerson = {}, byType = {}, byItem = {}
+                    for (const row of rows) {
+                        const hours = num(row.hours) ?? 0
+                        const billed = row.rateTypeEnumId !== 'RatpNoCharge'
+                        sum.hours += hours
+                        if (billed) sum.billableHours += hours; else sum.nonBillableHours += hours
+                        const person = byPerson[row.partyId] || (byPerson[row.partyId] = {partyId: row.partyId, name: nameOf(row.partyId), hours: 0, billableHours: 0})
+                        person.hours += hours
+                        if (billed) person.billableHours += hours
+                        const typeKey = row.workTypeEnumId || ''
+                        const type = byType[typeKey] || (byType[typeKey] = {workTypeEnumId: row.workTypeEnumId || null, label: row.workTypeEnumId ? (typeLabels[row.workTypeEnumId] || row.workTypeEnumId) : L('No work type'), hours: 0})
+                        type.hours += hours
+                        const itemKey = row.workEffortId || ''
+                        const item = byItem[itemKey] || (byItem[itemKey] = {workEffortId: row.workEffortId || null, name: row.workEffortName || (row.workEffortId ? row.workEffortId : L('No work item')),
+                            estimate: num(row.estimatedWorkTime), hours: 0})
+                        item.hours += hours
+                        if (ratesShown) {
+                            const clientRate = rateOf(row.clientHourRate, row.rateAmountId)
+                            const vendorRate = rateOf(row.vendorHourRate, row.vendorRateAmountId)
+                            if (clientRate != null) sum.clientAmount += round(hours * clientRate)
+                            if (vendorRate != null) sum.vendorAmount += round(hours * vendorRate)
+                        }
+                    }
+                    const sorted = (map) => Object.values(map).map((entry) => Object.assign(entry, {hours: round(entry.hours)},
+                            entry.billableHours != null ? {billableHours: round(entry.billableHours)} : {})).sort((a, b) => b.hours - a.hours)
+                    totals = {hours: round(sum.hours), billableHours: round(sum.billableHours), nonBillableHours: round(sum.nonBillableHours), entryCount: sum.entryCount,
+                        clientAmount: sum.clientAmount == null ? null : round(sum.clientAmount), vendorAmount: sum.vendorAmount == null ? null : round(sum.vendorAmount),
+                        byPerson: sorted(byPerson), byWorkType: sorted(byType), byItem: sorted(byItem).slice(0, 50), truncated: rows.length >= 20000}
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="import" noun="TimeEntryCsv">
+        <description>
+            The time import (design-projects.md §8 ImportTime, §15 Time import): the Time entries CSV, a header line then a row per
+            entry with date (yyyy-MM-dd), person (email or user name; a full name with one match; empty: partyId), work item key or
+            project key (an item column, else a project column), hours (decimal or h:mm[:ss]) or start and end times (HH:mm, or a
+            date and time), work type (its id or name), billable (yes or no; empty yes) and comment. The headers are matched by
+            their words, so the detailed exports of Toggl, Harvest and Clockify read with at most a column renamed (their own
+            presets come later, §16); the delimiter is the header line's commonest of comma, semicolon and tab.
+
+            Each row is planned: the person, the item (a task or project the user sees), the work type, billable, the time (hours
+            rounded to the person's policy's smallest entry, a warning when that changed; rows with hours only stack from 9:00 on
+            their person's day), and what it will do: create, skip (an entry of the person on the item starting at the same moment
+            is there already) or fail with its problems (no date, no person found, a work item not found or not visible, no hours,
+            a work item required by the policy, a future day the policy refuses, a week the user may not change, or one submitted
+            and locked). preview true plans only (previewList, the first maxRows); otherwise each row to create goes through
+            store#TimeEntry in its own transaction: a row that fails is logged and named with its reason, the others are imported.
+            progressUserId gets the progress on the topic timeImportProgress every 25 rows and at the end. The file comes as an
+            upload (timeEntryFile), text (fileText) or a resource location (fileLocation).
+        </description>
+        <in-parameters>
+            <parameter name="timeEntryFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"/>
+            <parameter name="fileLocation"/>
+            <parameter name="characterSet" default-value="UTF-8"/>
+            <parameter name="partyId"><description>The person of rows with no person; default the user's party</description></parameter>
+            <parameter name="preview" type="Boolean" default="false"/>
+            <parameter name="maxRows" type="Integer" default="50"/>
+            <parameter name="progressUserId"/>
+            <parameter name="progressKey"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="rowCount" type="Integer"/>
+            <parameter name="columnMapping" type="Map"/>
+            <parameter name="unusedColumns" type="List"/>
+            <parameter name="previewList" type="List"/>
+            <parameter name="counts" type="Map"/>
+            <parameter name="createdCount" type="Integer"/>
+            <parameter name="skippedCount" type="Integer"/>
+            <parameter name="failedCount" type="Integer"/>
+            <parameter name="hoursImported" type="BigDecimal"/>
+            <parameter name="failureList" type="List"/>
+            <parameter name="warningList" type="List"/>
+            <parameter name="resultList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text, values) => ec.resource.expand(ec.l10n.localize(text), '', values || {})
+            rowCount = 0; columnMapping = {}; unusedColumns = []; previewList = []; counts = {rows: 0, create: 0, skip: 0, fail: 0, warned: 0}
+            createdCount = 0; skippedCount = 0; failedCount = 0; hoursImported = 0; failureList = []; warningList = []; resultList = []
+            const me = ec.user.userAccount?.partyId || null
+            const defaultPerson = partyId || me
+
+            // ===== the text, its records and columns
+            let content = fileText
+            if (content == null && (timeEntryFile != null || fileLocation)) {
+                const read = ec.service.sync().name('mantle.party.ContactImportServices.read#ContactFileText').parameters({contactFile: timeEntryFile,
+                    fileLocation: timeEntryFile != null ? null : fileLocation, characterSet: characterSet || 'UTF-8'}).call()
+                if (ec.message.hasError()) return
+                content = read.text
+            }
+            if (content == null || String(content).trim() === '') { ec.message.addError(L('The time file is empty')); return }
+            content = String(content)
+            if (content.charCodeAt(0) === 0xFEFF) content = content.substring(1)
+            const firstLine = content.split(/\r?\n/, 1)[0]
+            const outside = firstLine.replace(/"[^"]*"/g, '')
+            const delimiter = [',', ';', '\t'].map((d) => [d, outside.split(d).length]).sort((a, b) => b[1] - a[1])[0][0]
+            const records = []
+            let record = [], field = '', quoted = false
+            for (let i = 0; i < content.length; i++) {
+                const ch = content[i]
+                if (quoted) {
+                    if (ch === '"') { if (content[i + 1] === '"') { field += '"'; i++ } else quoted = false } else field += ch
+                } else if (ch === '"' && field === '') quoted = true
+                else if (ch === delimiter) { record.push(field); field = '' }
+                else if (ch === '\n' || ch === '\r') {
+                    if (ch === '\r' && content[i + 1] === '\n') i++
+                    record.push(field); field = ''; records.push(record); record = []
+                } else field += ch
+            }
+            if (field !== '' || record.length) { record.push(field); records.push(record) }
+            const lines = records.filter((rec) => rec.some((value) => String(value).trim() !== ''))
+            if (!lines.length) { ec.message.addError(L('The time file has no header line')); return }
+            const headers = lines[0].map((header) => String(header).trim())
+            const norm = (text) => String(text).toLowerCase().replace(/[^a-z0-9]/g, '')
+            // each target by its header words, in order of preference
+            const aliases = {
+                date: ['date', 'day', 'startdate', 'spenton', 'entrydate', 'workdate'],
+                person: ['email', 'useremail', 'person', 'username', 'login', 'user', 'worker', 'member', 'employee', 'name'],
+                item: ['workitem', 'workitemkey', 'workitemorprojectkey', 'workitemorproject', 'item', 'key', 'task', 'taskkey', 'issue', 'issuekey', 'ticket'],
+                project: ['project', 'projectkey'],
+                hours: ['hours', 'durationh', 'durationhours', 'durationdecimal', 'hoursspent', 'spenthours', 'duration', 'time'],
+                start: ['start', 'starttime', 'from', 'fromtime', 'begin'],
+                end: ['end', 'endtime', 'to', 'totime', 'thru', 'thrutime', 'finish'],
+                workType: ['worktype', 'activity', 'type', 'category'],
+                billable: ['billable', 'isbillable'],
+                comment: ['comment', 'comments', 'description', 'notes', 'note', 'details']}
+            const used = new Set()
+            const indexOf = {}
+            for (const [target, words] of Object.entries(aliases)) {
+                for (const word of words) {
+                    const at = headers.findIndex((header, i) => !used.has(i) && norm(header) === word)
+                    if (at >= 0) { indexOf[target] = at; used.add(at); columnMapping[target] = headers[at]; break }
+                }
+            }
+            unusedColumns = headers.filter((header, i) => !used.has(i) && header)
+            if (indexOf.date == null && indexOf.start == null) { ec.message.addError(L('The file has no date column (date, or start with a date)')); return }
+            if (indexOf.hours == null && (indexOf.start == null || indexOf.end == null)) { ec.message.addError(L('The file has no hours column, nor start and end')); return }
+            const dataLines = lines.slice(1)
+            rowCount = dataLines.length
+            counts.rows = rowCount
+
+            // ===== the lookups, cached for the rows
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+            const visible = new Set(Array.from(vis.visibleProjectIds || []))
+            const managed = new Set(Array.from(vis.managedProjectIds || []))
+            const restricted = new Set(Array.from(vis.restrictedItemIds || []))
+            const cache = {person: {}, item: {}, type: null, access: {}, policy: {}}
+            const personOf = (value) => {
+                const text = String(value || '').trim()
+                if (!text) return {partyId: defaultPerson}
+                const key = text.toLowerCase()
+                if (key in cache.person) return cache.person[key]
+                let found = Array.from(ec.entity.find('moqui.security.UserAccount').condition(ec.entity.conditionFactory.makeCondition([
+                        ec.entity.conditionFactory.makeCondition('username', 'equals', text, true),
+                        ec.entity.conditionFactory.makeCondition('emailAddress', 'equals', text, true)], 'or')).list()).filter((account) => account.partyId)
+                if (!found.length && /\s/.test(text)) {
+                    const parts = text.split(/\s+/)
+                    const people = Array.from(ec.entity.find('mantle.party.Person').condition('firstName', 'equals', parts[0], true)
+                            .condition('lastName', 'equals', parts.slice(1).join(' '), true).list())
+                    found = people.length === 1 ? [{partyId: people[0].partyId}] : (people.length > 1 ? people : [])
+                    if (people.length > 1) { cache.person[key] = {error: L('${name} matches several people', {name: text})}; return cache.person[key] }
+                }
+                const ids = Array.from(new Set(found.map((row) => row.partyId)))
+                cache.person[key] = ids.length === 1 ? {partyId: ids[0]} : {error: ids.length ? L('${name} matches several people', {name: text}) : L('No person ${name}', {name: text})}
+                return cache.person[key]
+            }
+            const itemOf = (value) => {
+                const text = String(value || '').trim()
+                if (!text) return null
+                if (text in cache.item) return cache.item[text]
+                let item = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', text).one()
+                if (!item && text !== text.toUpperCase()) item = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', text.toUpperCase()).one()
+                let result
+                if (!item || !['WetTask', 'WetProject'].includes(item.workEffortTypeEnumId)) result = {error: L('No work item or project ${key}', {key: text})}
+                else {
+                    const root = item.workEffortTypeEnumId === 'WetProject' ? item.workEffortId : item.rootWorkEffortId
+                    const rootItem = root ? ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', root).one() : null
+                    const seen = !!vis.allProjects || (root && visible.has(root))
+                    const hidden = item.workEffortTypeEnumId === 'WetTask' && ['WevRestricted', 'WevConfidential'].includes(item.visibilityEnumId)
+                            && !vis.allProjects && !managed.has(root) && !restricted.has(item.workEffortId)
+                    if (!root || !seen || hidden) result = {error: L('Work item ${key} is not available', {key: text})}
+                    else if (rootItem?.isTemplate === 'Y') result = {error: L('${key} is in a template', {key: text})}
+                    else result = {workEffortId: item.workEffortId, name: item.workEffortName || item.workEffortId, rootWorkEffortId: root,
+                        projectName: rootItem?.workEffortName || root, closed: ['WeComplete', 'WeClosed', 'WeCancelled'].includes(item.statusId)}
+                }
+                cache.item[text] = result
+                return result
+            }
+            const typeOf = (value) => {
+                const text = String(value || '').trim()
+                if (!text) return {enumId: null}
+                if (!cache.type) {
+                    cache.type = {}
+                    for (const row of ec.entity.find('moqui.basic.Enumeration').condition('enumTypeId', 'WorkType').useCache(true).list()) {
+                        cache.type[String(row.enumId).toLowerCase()] = row
+                        if (row.description) cache.type[String(row.description).toLowerCase()] = row
+                    }
+                }
+                const row = cache.type[text.toLowerCase()]
+                return row ? {enumId: row.enumId, label: row.description || row.enumId} : {enumId: null, warning: L('No work type ${type}; left empty', {type: text})}
+            }
+            const policyOf = (person) => {
+                if (!(person in cache.policy)) cache.policy[person] = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy')
+                        .parameters({partyId: person}).call()?.policy || {}
+                return cache.policy[person]
+            }
+            const weekAccess = (person, day) => {
+                const policy = policyOf(person)
+                const range = ec.service.sync().name('mantle.work.TimesheetServices.get#WeekRange').parameters({date: day, weekStart: policy.weekStart || 1}).call()
+                const key = person + '|' + range.weekStartDay
+                if (!(key in cache.access)) {
+                    const sheet = ec.service.sync().name('mantle.work.TimesheetServices.get#PartyTimesheet').parameters({partyId: person, date: range.weekStartDay, make: false}).call() || {}
+                    // the user's rights, so authorization back on for the access (it reads the user, not the records)
+                    cache.access[key] = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetAccess').parameters(sheet.timesheetId
+                            ? {timesheetId: sheet.timesheetId} : {partyId: person, date: range.weekStartDay}).call() || {}
+                }
+                return cache.access[key]
+            }
+            const nameOf = (person) => {
+                const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', person).one()
+                return party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || person) : person
+            }
+            const dayStart = (day) => Number(String(ec.l10n.parseTimestamp(day + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')))
+            const today = ec.l10n.format(ec.user.nowTimestamp, 'yyyy-MM-dd')
+            const cell = (values, target) => indexOf[target] == null ? '' : String(values[indexOf[target]] ?? '').trim()
+            // a time of day as minutes, or a date and time as [day, minutes]
+            const timeOf = (text) => {
+                const t = String(text || '').trim()
+                let m = /^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(t)
+                if (m) return {day: m[1], minutes: Number(m[2]) * 60 + Number(m[3])}
+                m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?$/.exec(t)
+                if (!m) return null
+                let h = Number(m[1])
+                if (m[4]) { const pm = m[4].toLowerCase() === 'pm'; if (h === 12) h = pm ? 12 : 0; else if (pm) h += 12 }
+                if (h > 24 || Number(m[2]) > 59) return null
+                return {day: null, minutes: h * 60 + Number(m[2])}
+            }
+            const hoursOf = (text) => {
+                const t = String(text || '').trim()
+                if (!t) return null
+                const m = /^(\d+):(\d{2})(?::(\d{2}))?$/.exec(t)
+                if (m) return Number(m[1]) + Number(m[2]) / 60 + Number(m[3] || 0) / 3600
+                const n = Number(t.replace(',', '.').replace(/\s*h(ours?)?$/i, ''))
+                return Number.isNaN(n) ? NaN : n
+            }
+            const stacked = {}
+
+            // ===== the plan of each row
+            const planned = []
+            try {
+                dataLines.forEach((values, i) => {
+                    const rowNumber = i + 2
+                    const problems = [], warnings = []
+                    const raw = {}
+                    headers.forEach((header, at) => { if (header) raw[header] = values[at] ?? '' })
+                    const row = {rowNumber: rowNumber, values: raw, problems: problems, warnings: warnings, action: 'create'}
+                    planned.push(row)
+                    try {
+                        // the person
+                        const person = personOf(cell(values, 'person'))
+                        if (person.error) problems.push(person.error)
+                        else if (!person.partyId) problems.push(L('No person: the file has none and you have no party'))
+                        else { row.partyId = person.partyId; row.personName = nameOf(person.partyId) }
+                        // the day and the times
+                        const start = timeOf(cell(values, 'start'))
+                        const end = timeOf(cell(values, 'end'))
+                        let day = cell(values, 'date')
+                        const dayMatch = /^(\d{4}-\d{2}-\d{2})/.exec(day)
+                        day = dayMatch ? dayMatch[1] : (start?.day || null)
+                        if (!day) { problems.push(cell(values, 'date') ? L('The date ${date} is not yyyy-MM-dd', {date: cell(values, 'date')}) : L('No date')); return }
+                        row.day = day
+                        const base = dayStart(day)
+                        let hours = hoursOf(cell(values, 'hours'))
+                        if (Number.isNaN(hours)) { problems.push(L('The hours ${hours} are not a number', {hours: cell(values, 'hours')})); hours = null }
+                        let from = null, thru = null
+                        if (start && end) {
+                            from = base + start.minutes * 60000
+                            thru = (end.day ? dayStart(end.day) : base) + end.minutes * 60000
+                            if (thru <= from) thru += 86400000
+                            if (hours == null) hours = (thru - from) / 3600000
+                        } else if (start) from = base + start.minutes * 60000
+                        if (hours == null) { if (!cell(values, 'hours')) problems.push(L('No hours, nor start and end')); return }
+                        if (!(hours > 0) || hours > 24) { problems.push(L('The hours are more than 0 and at most 24')); return }
+                        const policy = row.partyId ? policyOf(row.partyId) : {}
+                        const step = Number(policy.minHours || 0.25)
+                        let rounded = Math.round(hours / step) * step
+                        if (rounded === 0) rounded = step
+                        rounded = Math.round(rounded * 100) / 100
+                        if (Math.abs(rounded - hours) > 0.004) warnings.push(L('${hours} h rounded to ${rounded} h (the smallest entry)', {hours: Math.round(hours * 100) / 100, rounded}))
+                        row.hours = rounded
+                        if (from == null) {
+                            const key = (row.partyId || '') + '|' + day
+                            from = stacked[key] ?? base + 9 * 3600000
+                        }
+                        thru = from + rounded * 3600000
+                        if (thru > base + 2 * 86400000) { problems.push(L('The entry runs past the next day')); return }
+                        stacked[(row.partyId || '') + '|' + day] = thru
+                        row.fromDate = from; row.thruDate = thru
+                        // the work item, else the project
+                        const itemText = cell(values, 'item') || cell(values, 'project')
+                        if (itemText) {
+                            const item = itemOf(itemText)
+                            if (item?.error) problems.push(item.error)
+                            else if (item) {
+                                row.workEffortId = item.workEffortId; row.itemName = item.name; row.rootWorkEffortId = item.rootWorkEffortId; row.projectName = item.projectName
+                                if (item.closed) warnings.push(L('${key} is closed', {key: item.workEffortId}))
+                            }
+                        } else if (policy.needItem) problems.push(L('No work item: the policy requires one'))
+                        // the work type, billable, the comment
+                        const type = typeOf(cell(values, 'workType'))
+                        if (type.warning) warnings.push(type.warning)
+                        row.workTypeEnumId = type.enumId; row.workTypeLabel = type.label || ''
+                        const billText = cell(values, 'billable').toLowerCase()
+                        if (['', 'y', 'yes', 'true', '1', 'billable'].includes(billText)) row.billable = true
+                        else if (['n', 'no', 'false', '0', 'not billable', 'non-billable', 'nonbillable'].includes(billText)) row.billable = false
+                        else { row.billable = true; warnings.push(L('Billable ${value} not read; billable', {value: cell(values, 'billable')})) }
+                        row.comments = cell(values, 'comment') || null
+                        if (row.comments && row.comments.length > 4000) { row.comments = row.comments.substring(0, 4000); warnings.push(L('The comment was cut to 4000 characters')) }
+                        if (!row.partyId) return
+                        // the week: the user may change it, it is not locked, the day is allowed
+                        if (policy.future === false && day > today) problems.push(L('Time is not logged on future days'))
+                        const access = weekAccess(row.partyId, day)
+                        if (!access.canEdit) problems.push(access.locked ? L('The week of ${day} is submitted: its time is locked', {day}) : L('You may not log time for ${name}', {name: row.personName}))
+                        if (problems.length) return
+                        // an entry there already: skipped
+                        let existing = ec.entity.find('mantle.work.time.TimeEntry').condition('partyId', row.partyId).condition('fromDate', new Date(from))
+                        existing = row.workEffortId ? existing.condition('workEffortId', row.workEffortId) : existing.condition('workEffortId', 'is-null', null)
+                        if (existing.count() > 0) { row.action = 'skip'; warnings.push(L('Already logged: an entry starting then is there')) }
+                    } catch (err) {
+                        problems.push(String(err && err.message ? err.message : err))
+                        ec.message.clearErrors()
+                    } finally {
+                        if (problems.length) row.action = 'fail'
+                    }
+                })
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            for (const row of planned) {
+                counts[row.action] = (counts[row.action] || 0) + 1
+                if (row.warnings.length) counts.warned++
+            }
+            const fmt = (millis, pattern) => millis == null ? '' : ec.l10n.format(String(millis), pattern)
+            const shape = (row) => ({rowNumber: row.rowNumber, day: row.day || '', partyId: row.partyId || null, personName: row.personName || '',
+                workEffortId: row.workEffortId || null, itemName: row.itemName || '', rootWorkEffortId: row.rootWorkEffortId || null, projectName: row.projectName || '',
+                hours: row.hours ?? null, fromText: fmt(row.fromDate, 'HH:mm'), thruText: fmt(row.thruDate, 'HH:mm'), workTypeEnumId: row.workTypeEnumId || null,
+                workTypeLabel: row.workTypeLabel || '', billable: row.billable !== false, comments: row.comments || '', action: row.action,
+                problems: row.problems, warnings: row.warnings})
+            if (preview) { previewList = planned.slice(0, Math.max(1, Number(maxRows) || 50)).map(shape); return }
+
+            // ===== the rows, each in its own transaction
+            const progress = (done, finished) => {
+                if (!progressUserId) return
+                try {
+                    ec.makeNotificationMessage().topic('timeImportProgress').userId(progressUserId).message({progressKey: progressKey || null, done: done,
+                        total: planned.length, createdCount, skippedCount, failedCount, finished: finished}).send()
+                } catch (err) { ec.logger.warn(`Time import progress for ${progressUserId} not sent: ${err}`) }
+            }
+            let done = 0, hoursSum = 0
+            for (const row of planned) {
+                if (done > 0 && done % 25 === 0) progress(done, false)
+                done++
+                for (const warning of row.warnings) warningList.push({rowNumber: row.rowNumber, warning: warning})
+                if (row.action === 'fail') {
+                    failedCount++
+                    const error = row.problems.join('; ')
+                    ec.logger.warn(`Time import of ${ec.user.userId}: row ${row.rowNumber} failed: ${error}`)
+                    failureList.push({rowNumber: row.rowNumber, error: error, values: row.values})
+                    resultList.push({rowNumber: row.rowNumber, action: 'fail', timeEntryId: null})
+                    continue
+                }
+                if (row.action === 'skip') { skippedCount++; resultList.push({rowNumber: row.rowNumber, action: 'skip', timeEntryId: null}); continue }
+                try {
+                    const out = ec.service.sync().name('mantle.work.TimeServices.store#TimeEntry').parameters({partyId: row.partyId, workEffortId: row.workEffortId || null,
+                        fromDate: new Date(row.fromDate), thruDate: new Date(row.thruDate), hours: row.hours, rateTypeEnumId: row.billable === false ? 'RatpNoCharge' : 'RatpStandard',
+                        workTypeEnumId: row.workTypeEnumId || null, comments: row.comments || null}).requireNewTransaction(true).call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    createdCount++
+                    hoursSum += Number(row.hours)
+                    resultList.push({rowNumber: row.rowNumber, action: 'create', timeEntryId: out?.timeEntryId || null})
+                } catch (err) {
+                    const error = String(err && err.message ? err.message : err).trim()
+                    ec.message.clearErrors()
+                    ec.logger.warn(`Time import of ${ec.user.userId}: row ${row.rowNumber} failed: ${error}`)
+                    failedCount++
+                    failureList.push({rowNumber: row.rowNumber, error: error, values: row.values})
+                    resultList.push({rowNumber: row.rowNumber, action: 'fail', timeEntryId: null})
+                }
+            }
+            hoursImported = Math.round(hoursSum * 100) / 100
+            progress(done, true)
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="TimeEntryTimeline">
+        <description>A RecordTimelineSource (ServiceRegister of data/MantleSetupData.xml; mantle.party.CommunicationServices
+            get#RecordTimeline): the time logged on a work effort, as entries of kind time, newest first, each {date (when the
+            work ended), entryKey (the timeEntryId), authorPartyId (who logged it), title, body (the comment), hours, workTypeEnumId,
+            workTypeLabel, billable, fromDate, thruDate, timeEntryId}. No rates. A running timer is left out, and so is every
+            record that is not a WorkEffort, and a request for kinds without time.</description>
+        <in-parameters>
+            <parameter name="recordEntityName" required="true"/>
+            <parameter name="recordId" required="true"/>
+            <parameter name="kinds" type="List"/>
+            <parameter name="beforeDate" type="Timestamp"/>
+            <parameter name="limit" type="Integer" default="50"/>
+        </in-parameters>
+        <out-parameters><parameter name="entryList" type="List"/></out-parameters>
+        <actions><script><![CDATA[
+            entryList = []
+            if (recordEntityName !== 'mantle.work.effort.WorkEffort') return
+            const wanted = Array.from(kinds || []).map((kind) => String(kind).trim()).filter((kind) => kind)
+            if (wanted.length && !wanted.includes('time')) return
+            // a client contact gets no time in a record's timeline (impl-projects.md P10)
+            if (ec.user.userId && ec.user.hasPermission('PROJECT_CLIENT')) return
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                let find = ec.entity.find('mantle.work.time.TimeEntry').condition('workEffortId', recordId).condition('thruDate', 'is-not-null', null)
+                if (beforeDate != null) find = find.condition('thruDate', 'less-than', beforeDate)
+                const types = {}
+                for (const type of ec.entity.find('moqui.basic.Enumeration').condition('enumTypeId', 'WorkType').useCache(true).list()) types[type.enumId] = type.description || type.enumId
+                for (const entry of find.orderBy('-thruDate').limit(Math.max(1, Number(limit) || 50)).list()) {
+                    const hours = Number(String(entry.hours ?? 0))
+                    const label = entry.workTypeEnumId ? (types[entry.workTypeEnumId] || entry.workTypeEnumId) : ''
+                    entryList.push({kind: 'time', date: entry.thruDate, entryKey: entry.timeEntryId, authorPartyId: entry.partyId, authorUserId: null,
+                        title: ec.l10n.format(hours, '#,##0.##') + ' h' + (label ? ' · ' + label : ''), body: entry.comments || null, contentType: 'text/plain',
+                        statusId: null, hours: hours, workTypeEnumId: entry.workTypeEnumId || null, workTypeLabel: label, billable: entry.rateTypeEnumId !== 'RatpNoCharge',
+                        fromDate: entry.fromDate, thruDate: entry.thruDate, timeEntryId: entry.timeEntryId})
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
     </service>
 </services>

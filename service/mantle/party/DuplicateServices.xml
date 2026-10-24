@@ -14,63 +14,87 @@ along with this software (see the LICENSE.md file). If not, see
 -->
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
     <service verb="find" noun="PartyHasDuplicates">
+        <description>Whether find#PartyDuplicates would find a duplicate, by identification, email, birthday and name, or a
+            similar name (find#PartyNameMatches). Personal contacts (Party.privateOwnerUserId) are left out of the duplicate
+            scan: such a party has no duplicates, and is no other party's duplicate. A party marked not a duplicate of this
+            one (mark#PartyNotDuplicate) is not one.</description>
         <in-parameters><parameter name="partyId" required="true"/></in-parameters>
         <out-parameters><parameter name="hasDuplicates" type="Boolean"/></out-parameters>
-        <actions>
-            <!-- find matching identifications -->
-            <entity-find entity-name="mantle.party.PartyIdentification" list="partyIdentificationList">
-                <econdition field-name="partyId"/><select-field field-name="idValue,partyIdTypeEnumId"/></entity-find>
-            <!-- TODO: perhaps filter characters in query somehow? (all non-alphanumeric; dash, dot, comma, space, etc) -->
-            <entity-find-count entity-name="mantle.party.PartyIdentification" count-field="idCount">
-                <econdition field-name="partyId" operator="not-equals"/>
-                <econdition field-name="idValue" operator="in" from="partyIdentificationList*.idValue"/></entity-find-count>
-            <if condition="idCount > 0"><set field="hasDuplicates" from="true"/><return/></if>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            hasDuplicates = false
+            const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+            if (party == null || party.privateOwnerUserId) return
+            const notDuplicates = new Set(Array.from(ec.service.sync().name('mantle.party.DuplicateServices.get#PartyNotDuplicates')
+                    .parameters({partyId: partyId}).call()?.otherPartyIdList || []))
+            // the matching parties that are directory parties (not personal contacts), not this one nor one marked not a duplicate
+            const directoryIds = (ids) => {
+                const unique = Array.from(new Set(ids)).filter((id) => id && id !== partyId && !notDuplicates.has(id))
+                if (!unique.length) return []
+                return Array.from(ec.entity.find('mantle.party.Party').condition(cf.makeCondition('partyId', 'in', unique))
+                        .condition(cf.makeCondition('privateOwnerUserId', 'equals', null)).selectField('partyId').list()).map((it) => it.partyId)
+            }
 
-            <!-- find matching emails -->
-            <entity-find entity-name="mantle.party.contact.PartyContactMechInfo" list="partyContactMechInfoList">
-                <date-filter/><econdition field-name="partyId"/><econdition field-name="contactMechTypeEnumId" value="CmtEmailAddress"/>
-                <select-field field-name="infoString"/>
-            </entity-find>
-            <entity-find entity-name="mantle.party.contact.ContactMech" list="allDupEmailList">
-                <econdition field-name="contactMechTypeEnumId" value="CmtEmailAddress"/>
-                <econdition field-name="infoString" operator="in" from="partyContactMechInfoList*.infoString"/>
-                <select-field field-name="contactMechId,contactMechTypeEnumId,infoString"/>
-            </entity-find>
-            <iterate list="allDupEmailList" entry="dupEmail">
-                <entity-find entity-name="mantle.party.contact.PartyContactMech" list="dupPcmList">
-                    <date-filter/><econdition field-name="partyId" operator="not-equals"/>
-                    <econdition field-name="contactMechId" from="dupEmail.contactMechId"/>
-                </entity-find>
-                <if condition="dupPcmList"><set field="hasDuplicates" from="true"/><return/></if>
-            </iterate>
+            // find matching identifications
+            // TODO: perhaps filter characters in query somehow? (all non-alphanumeric; dash, dot, comma, space, etc)
+            const idValues = Array.from(ec.entity.find('mantle.party.PartyIdentification').condition('partyId', partyId)
+                    .selectField('idValue,partyIdTypeEnumId').list()).map((it) => it.idValue)
+            if (idValues.length) {
+                const dupIdList = ec.entity.find('mantle.party.PartyIdentification').condition(cf.makeCondition('partyId', 'not-equals', partyId))
+                        .condition(cf.makeCondition('idValue', 'in', idValues)).selectField('partyId,partyIdTypeEnumId,idValue').list()
+                if (directoryIds(Array.from(dupIdList).map((it) => it.partyId)).length) { hasDuplicates = true; return }
+            }
 
-            <!-- find matching birthDate and first/last name -->
-            <entity-find-one entity-name="mantle.party.Person" value-field="person">
-                <field-map field-name="partyId"/></entity-find-one>
-            <if condition="person != null &amp;&amp; person.birthDate != null">
-                <entity-find-count entity-name="mantle.party.Person" count-field="bdCount">
-                    <econdition field-name="partyId" operator="not-equals"/>
-                    <econdition field-name="birthDate" from="person.birthDate"/>
-                    <econdition field-name="firstName" from="person.firstName" ignore-case="true"/>
-                    <econdition field-name="lastName" from="person.lastName" ignore-case="true"/>
-                </entity-find-count>
-            </if>
-            <if condition="bdCount > 0"><set field="hasDuplicates" from="true"/><return/></if>
+            // find matching emails
+            const emails = Array.from(ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition('partyId', partyId)
+                    .condition('contactMechTypeEnumId', 'CmtEmailAddress').condition(cf.makeConditionDate('fromDate', 'thruDate', null))
+                    .selectField('infoString').list()).map((it) => it.infoString).filter((it) => it)
+            if (emails.length) {
+                const dupEmailList = ec.entity.find('mantle.party.contact.ContactMech').condition('contactMechTypeEnumId', 'CmtEmailAddress')
+                        .condition(cf.makeCondition('infoString', 'in', emails)).selectField('contactMechId,contactMechTypeEnumId,infoString').list()
+                for (const dupEmail of dupEmailList) {
+                    const dupPcmList = ec.entity.find('mantle.party.contact.PartyContactMech').condition(cf.makeConditionDate('fromDate', 'thruDate', null))
+                            .condition(cf.makeCondition('partyId', 'not-equals', partyId)).condition('contactMechId', dupEmail.contactMechId).list()
+                    if (directoryIds(Array.from(dupPcmList).map((it) => it.partyId)).length) { hasDuplicates = true; return }
+                }
+            }
 
-            <set field="hasDuplicates" from="false"/>
-        </actions>
+            // find matching birthDate and first/last name
+            const person = ec.entity.find('mantle.party.Person').condition('partyId', partyId).one()
+            if (person != null && person.birthDate != null) {
+                const bdList = ec.entity.find('mantle.party.Person').condition(cf.makeCondition('partyId', 'not-equals', partyId))
+                        .condition('birthDate', person.birthDate)
+                        .condition(cf.makeCondition('firstName', 'equals', person.firstName, false, true))
+                        .condition(cf.makeCondition('lastName', 'equals', person.lastName, false, true)).selectField('partyId').list()
+                if (directoryIds(Array.from(bdList).map((it) => it.partyId)).length) { hasDuplicates = true; return }
+            }
+
+            // a similar name (find#PartyNameMatches leaves out personal contacts and the not-duplicate pairs itself)
+            const nameOut = ec.service.sync().name('mantle.party.DuplicateServices.find#PartyNameMatches').parameters({partyId: partyId, limit: 1}).call()
+            if (nameOut?.matchList?.length) hasDuplicates = true
+        ]]></script></actions>
     </service>
     <service verb="find" noun="PartyDuplicates" authenticate="anonymous-all"><!-- called async in job check#AllPartyDuplicates -->
+        <description>The parties that may be duplicates of a party, each with what matched, and the hasDuplicates and
+            lastDupCheckDate flags of the party and those it matched set again. Reasons, each a matchType on the record:
+            identification (the same id of the same type), email, birthDate (the same birthday, first and last name), phone
+            (with the same first name or organization name), address (likewise) and name (a similar name, find#PartyNameMatches,
+            with its nameScore). Personal contacts are left out, as the party and as a match, and so are disabled parties and the
+            parties marked not duplicates of this one (mark#PartyNotDuplicate).</description>
         <in-parameters><parameter name="partyId" required="true"/></in-parameters>
         <out-parameters>
             <parameter name="matchingInfoByPartyId" type="Map"><description>Key is partyId, value is List of records that match the
-                other party including PartyIdentification, email, telecom number, and postal address.</description></parameter>
+                other party including PartyIdentification, email, telecom number, and postal address, and for a similar name
+                {partyId, matchType: 'name', nameScore, name}. Each record has a matchType: identification, email, birthDate,
+                phone, address or name.</description></parameter>
         </out-parameters>
         <actions>
             <entity-find-one entity-name="mantle.party.PartyDetail" value-field="partyDetail"/>
+            <set field="matchingInfoByPartyId" from="{}"/>
+            <!-- personal contacts (privateOwnerUserId) are left out of the duplicate scan: as the party, and as a match below -->
+            <if condition="partyDetail == null || partyDetail.privateOwnerUserId"><return/></if>
             <set field="firstName" from="partyDetail.firstName"/>
             <set field="organizationName" from="partyDetail.organizationName"/>
-            <set field="matchingInfoByPartyId" from="[:]"/>
 
             <!-- find matching identifications -->
             <entity-find entity-name="mantle.party.PartyIdentification" list="partyIdentificationList">
@@ -78,11 +102,11 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- TODO: perhaps filter characters in query somehow? (all non-alphanumeric; dash, dot, comma, space, etc) -->
             <entity-find entity-name="mantle.party.PartyIdentification" list="allDupIdList">
                 <econdition field-name="partyId" operator="not-equals"/>
-                <econdition field-name="idValue" operator="in" from="partyIdentificationList*.idValue"/></entity-find>
+                <econdition field-name="idValue" operator="in" from="partyIdentificationList.map((it) =&gt; it.idValue)"/></entity-find>
             <iterate list="allDupIdList" entry="dupId">
                 <!-- make sure matches party ID type, don't match for same ID of different type -->
-                <set field="partyIdent" from="partyIdentificationList.find({ it.idValue == dupId.idValue &amp;&amp; it.partyIdTypeEnumId == dupId.partyIdTypeEnumId })"/>
-                <script>if (partyIdent != null) addToListInMap(dupId.partyId, dupId, matchingInfoByPartyId)</script>
+                <set field="partyIdent" from="partyIdentificationList.find((it) =&gt; it.idValue == dupId.idValue &amp;&amp; it.partyIdTypeEnumId == dupId.partyIdTypeEnumId)"/>
+                <script>if (partyIdent != null) (matchingInfoByPartyId[dupId.partyId] ??= []).push(Object.assign({}, dupId.getMap(), {matchType: 'identification'}))</script>
             </iterate>
 
             <!-- find matching emails -->
@@ -92,7 +116,7 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <entity-find entity-name="mantle.party.contact.ContactMech" list="allDupEmailList">
                 <econdition field-name="contactMechTypeEnumId" value="CmtEmailAddress"/>
-                <econdition field-name="infoString" operator="in" from="partyContactMechInfoList*.infoString"/>
+                <econdition field-name="infoString" operator="in" from="partyContactMechInfoList.map((it) =&gt; it.infoString)"/>
                 <select-field field-name="contactMechId,contactMechTypeEnumId,infoString"/>
             </entity-find>
             <iterate list="allDupEmailList" entry="dupEmail">
@@ -100,12 +124,11 @@ along with this software (see the LICENSE.md file). If not, see
                     <date-filter/><econdition field-name="partyId" operator="not-equals"/>
                     <econdition field-name="contactMechId" from="dupEmail.contactMechId"/>
                 </entity-find>
-                <if condition="!dupPcmList"><continue/></if>
+                <if condition="!dupPcmList?.length"><continue/></if>
                 <set field="dupPcm" from="dupPcmList[0]"/>
                 <script>
-                    Map dupEmailInfo = dupEmail.getMap()
-                    dupEmailInfo.put("partyId", dupPcm.partyId)
-                    addToListInMap(dupPcm.partyId, dupEmailInfo, matchingInfoByPartyId)
+                    const dupEmailInfo = Object.assign({}, dupEmail.getMap(), {partyId: dupPcm.partyId, matchType: 'email'})
+                    ;(matchingInfoByPartyId[dupPcm.partyId] ??= []).push(dupEmailInfo)
                 </script>
             </iterate>
 
@@ -119,19 +142,27 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="lastName" from="person.lastName" ignore-case="true"/>
                 </entity-find>
             </if>
-            <iterate list="bdPersonList" entry="bdPerson"><script>addToListInMap(bdPerson.partyId, [partyId:bdPerson.partyId, birthDate:bdPerson.birthDate], matchingInfoByPartyId)</script></iterate>
+            <iterate list="bdPersonList" entry="bdPerson"><script>(matchingInfoByPartyId[bdPerson.partyId] ??= []).push({partyId:bdPerson.partyId, birthDate:bdPerson.birthDate, matchType:'birthDate'})</script></iterate>
 
             <!-- find matching telecom numbers, only include if first name matches? -->
             <entity-find entity-name="mantle.party.contact.PartyContactMechTelecomNumber" list="partyTelecomNumberList">
                 <date-filter/><econdition field-name="partyId"/>
                 <select-field field-name="areaCode,contactNumber"/>
             </entity-find>
-            <set field="dupTelecomIdsFound" from="new HashSet()"/>
+            <set field="dupTelecomIdsFound" from="[]"/>
             <iterate list="partyTelecomNumberList" entry="ptn">
                 <if condition="!ptn.contactNumber"><continue/></if>
-                <service-call name="mantle.party.DuplicateServices.find#TelecomNumbers"
-                        in-map="[partyId:partyId, areaCode:ptn.areaCode, contactNumber:ptn.contactNumber,
-                            matchingInfoByPartyId:matchingInfoByPartyId, dupTelecomIdsFound:dupTelecomIdsFound]"/>
+                <!-- NOTE: service parameters are copied, so add the found numbers here instead of relying on the service changing the passed in map and list -->
+                <service-call name="mantle.party.DuplicateServices.find#TelecomNumbers" out-map="findTelOut" out-map-add-to-existing="false"
+                        in-map="{partyId:partyId, areaCode:ptn.areaCode, contactNumber:ptn.contactNumber,
+                            matchingInfoByPartyId:matchingInfoByPartyId, dupTelecomIdsFound:dupTelecomIdsFound}"/>
+                <script>
+                    for (const dupTelInfo of (findTelOut.telecomNumberList ?? [])) {
+                        if (dupTelecomIdsFound.includes(dupTelInfo.contactMechId)) continue
+                        dupTelecomIdsFound.push(dupTelInfo.contactMechId)
+                        ;(matchingInfoByPartyId[dupTelInfo.partyId] ??= []).push(Object.assign({}, dupTelInfo, {matchType: 'phone'}))
+                    }
+                </script>
             </iterate>
 
             <!-- find matching postal addresses (address1, postal code, country), only include if first name matches? -->
@@ -139,33 +170,336 @@ along with this software (see the LICENSE.md file). If not, see
                 <date-filter/><econdition field-name="partyId"/>
                 <select-field field-name="address1,unitNumber,postalCode,postalCodeExt,countryGeoId"/>
             </entity-find>
-            <set field="dupAddressIdsFound" from="new HashSet()"/>
+            <set field="dupAddressIdsFound" from="[]"/>
             <iterate list="partyPostalAddressList" entry="ppa">
                 <if condition="!ppa.address1 || !ppa.postalCode"><continue/></if>
-                <service-call name="mantle.party.DuplicateServices.find#PostalAddresses"
-                        in-map="[partyId:partyId, address1:ppa.address1, unitNumber:ppa.unitNumber, postalCode:ppa.postalCode,
+                <service-call name="mantle.party.DuplicateServices.find#PostalAddresses" out-map="findAddrOut" out-map-add-to-existing="false"
+                        in-map="{partyId:partyId, address1:ppa.address1, unitNumber:ppa.unitNumber, postalCode:ppa.postalCode,
                             postalCodeExt:ppa.postalCodeExt, countryGeoId:ppa.countryGeoId,
-                            matchingInfoByPartyId:matchingInfoByPartyId, dupAddressIdsFound:dupAddressIdsFound]"/>
+                            matchingInfoByPartyId:matchingInfoByPartyId, dupAddressIdsFound:dupAddressIdsFound}"/>
+                <script>
+                    for (const dupAddrInfo of (findAddrOut.postalAddressList ?? [])) {
+                        if (dupAddressIdsFound.includes(dupAddrInfo.contactMechId)) continue
+                        dupAddressIdsFound.push(dupAddrInfo.contactMechId)
+                        ;(matchingInfoByPartyId[dupAddrInfo.partyId] ??= []).push(Object.assign({}, dupAddrInfo, {matchType: 'address'}))
+                    }
+                </script>
             </iterate>
 
-            <!-- exclude disabled parties -->
-            <set field="matchPartyIdSet" from="new HashSet(matchingInfoByPartyId.keySet())"/>
+            <!-- a similar name, its own reason with a score (after the phone and address passes, which check a name of their
+                own for a party not matched yet) -->
+            <service-call name="mantle.party.DuplicateServices.find#PartyNameMatches" in-map="{partyId:partyId, limit:50}"
+                    out-map="nameOut" out-map-add-to-existing="false"/>
+            <script>
+                for (const match of (nameOut?.matchList ?? [])) (matchingInfoByPartyId[match.partyId] ??= []).push({partyId: match.partyId,
+                    matchType: 'name', nameScore: match.score, name: match.name})
+            </script>
+
+            <!-- exclude the parties marked not duplicates of this one -->
+            <service-call name="mantle.party.DuplicateServices.get#PartyNotDuplicates" in-map="{partyId:partyId}"
+                    out-map="notDupOut" out-map-add-to-existing="false"/>
+            <script>for (const otherId of (notDupOut?.otherPartyIdList ?? [])) delete matchingInfoByPartyId[otherId]</script>
+
+            <!-- exclude disabled parties and personal contacts -->
+            <set field="matchPartyIdSet" from="Object.keys(matchingInfoByPartyId)"/>
             <iterate list="matchPartyIdSet" entry="matchPartyId">
                 <entity-find-one entity-name="mantle.party.Party" value-field="matchParty">
                     <field-map field-name="partyId" from="matchPartyId"/></entity-find-one>
-                <if condition="'Y'.equals(matchParty.disabled)"><script>matchingInfoByPartyId.remove(matchPartyId)</script></if>
+                <if condition="matchParty == null || 'Y' === matchParty.disabled || matchParty.privateOwnerUserId">
+                    <script>delete matchingInfoByPartyId[matchPartyId]</script></if>
             </iterate>
 
-            <set field="dupPartyIds" from="new HashSet(matchingInfoByPartyId.keySet())"/>
-            <script>dupPartyIds.add(partyId)</script>
+            <set field="dupPartyIds" from="Object.keys(matchingInfoByPartyId)"/>
+            <!-- in id order: checks of two matching parties run at once on the job workers, and each updates both rows, so
+                the same order of locks keeps them from deadlocking -->
+            <script>if (!dupPartyIds.includes(partyId)) dupPartyIds.push(partyId); dupPartyIds.sort()</script>
             <iterate list="dupPartyIds" entry="dupPartyId">
                 <entity-find-one entity-name="mantle.party.Party" value-field="dupParty">
                     <field-map field-name="partyId" from="dupPartyId"/></entity-find-one>
-                <set field="dupParty.hasDuplicates" from="matchingInfoByPartyId ? 'Y' : 'N'"/>
-                <set field="dupParty.lastDupCheckDate" from="new Timestamp(System.currentTimeMillis())"/>
+                <set field="dupParty.hasDuplicates" from="Object.keys(matchingInfoByPartyId).length &gt; 0 ? 'Y' : 'N'"/>
+                <set field="dupParty.lastDupCheckDate" from="ec.user.nowTimestamp"/>
                 <entity-update value-field="dupParty"/>
             </iterate>
         </actions>
+    </service>
+
+    <service verb="find" noun="PartyNameMatches">
+        <description>
+            The directory parties with a name like a party's (partyId) or like the names given, each scored from 0 to 100, best
+            first: the name reason of the duplicate scan (find#PartyDuplicates, find#PartyHasDuplicates), and a check for a
+            similar contact before creating one. Names are compared normalized: case, accents and punctuation do not count,
+            nor do an organization's legal suffixes (Inc, LLC, LLP, Ltd, Limited, GmbH, Co, Corp, Company, PLC, AG, SA, BV, Pty
+            and the like) or a leading "The". A person matches on the last name, a Jaro-Winkler similarity of at least 0.9 (spaces
+            left out, so "Van der Berg" is "Vanderberg"), and on the first name or nickname: the same (1), an initial of the
+            other ("J." and "John") or its start ("Kim" and "Kimberly", three letters or more) (0.9), else a Jaro-Winkler
+            similarity of at least 0.85; the score is 60% the last name's similarity and 40% the first name's. An organization
+            matches on the bigram (Dice) similarity of its normalized name, 100 when they are the same. The candidates come
+            from an index-friendly prefilter rather than a scan: a person's last name, or an organization's name (with and
+            without "The"), starts with the same three characters, in the usual capitalizations and with or without accents,
+            and a person's first name or nickname with the same letter. Personal contacts and disabled parties are never
+            matches, nor, with partyId, a party marked not a duplicate of it (mark#PartyNotDuplicate).
+        </description>
+        <in-parameters>
+            <parameter name="partyId"><description>The party whose names are matched; it is not its own match, and a personal
+                contact has none</description></parameter>
+            <parameter name="partyTypeEnumId"><description>Without partyId: PtyPerson or PtyOrganization; empty is an
+                organization when only organizationName is given</description></parameter>
+            <parameter name="firstName"/><parameter name="lastName"/><parameter name="nickname"/>
+            <parameter name="organizationName"/>
+            <parameter name="minScore" type="Integer" default="85"/>
+            <parameter name="limit" type="Integer" default="20"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="matchList" type="List"><parameter name="match" type="Map"><description>partyId, pseudoId,
+                partyTypeEnumId, name, score</description></parameter></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            matchList = []
+            const cf = ec.entity.conditionFactory
+            let isOrg = false
+            let names = {}
+            const excluded = new Set()
+            if (partyId) {
+                const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one()
+                if (party == null || party.privateOwnerUserId) return
+                isOrg = party.partyTypeEnumId === 'PtyOrganization'
+                names = {firstName: party.firstName, lastName: party.lastName, nickname: party.nickname, organizationName: party.organizationName}
+                excluded.add(partyId)
+                const notDupOut = ec.service.sync().name('mantle.party.DuplicateServices.get#PartyNotDuplicates').parameters({partyId: partyId}).call()
+                for (const otherId of (notDupOut?.otherPartyIdList ?? [])) excluded.add(otherId)
+            } else {
+                isOrg = partyTypeEnumId ? partyTypeEnumId === 'PtyOrganization' : (!!organizationName && !firstName && !lastName)
+                names = {firstName: firstName, lastName: lastName, nickname: nickname, organizationName: organizationName}
+            }
+            const min = minScore == null ? 85 : Number(minScore)
+            const max = Math.max(1, Number(limit || 20))
+
+            // lower case without accents or punctuation; letters and digits of any script, words split by single spaces
+            const stripAccents = (text) => typeof text.normalize === 'function' ? text.normalize('NFD').replace(/[̀-ͯ]/g, '') : text
+            const fold = (text) => stripAccents(String(text ?? '').toLowerCase())
+                    .replace(/ß/g, 'ss').replace(/æ/g, 'ae').replace(/œ/g, 'oe').replace(/ø/g, 'o').replace(/ł/g, 'l').replace(/đ/g, 'd').replace(/þ/g, 'th')
+                    .replace(/['’.]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+            const suffixes = new Set(['inc', 'incorporated', 'llc', 'llp', 'lp', 'ltd', 'limited', 'gmbh', 'mbh', 'co', 'corp', 'corporation',
+                'company', 'plc', 'ag', 'sa', 'sas', 'sarl', 'srl', 'spa', 'bv', 'nv', 'pty', 'pte', 'oy', 'ab', 'kg', 'kk', 'ug', 'lda'])
+            const orgKey = (name) => {
+                const words = fold(name).split(' ').filter((word) => word)
+                if (words.length > 1 && words[0] === 'the') words.shift()
+                while (words.length > 1 && suffixes.has(words[words.length - 1])) words.pop()
+                return words.join(' ')
+            }
+            const lastKey = (name) => fold(name).replace(/ /g, '')
+            const firstKey = (name) => fold(name).split(' ')[0] || ''
+
+            const jaroWinkler = (a, b) => {
+                if (a === b) return 1
+                if (!a || !b) return 0
+                const range = Math.max(0, Math.floor(Math.max(a.length, b.length) / 2) - 1)
+                const aMatched = new Array(a.length).fill(false)
+                const bMatched = new Array(b.length).fill(false)
+                let matches = 0
+                for (let i = 0; i < a.length; i++) {
+                    for (let j = Math.max(0, i - range); j < Math.min(b.length, i + range + 1); j++) {
+                        if (bMatched[j] || a[i] !== b[j]) continue
+                        aMatched[i] = true; bMatched[j] = true; matches++
+                        break
+                    }
+                }
+                if (!matches) return 0
+                let transpositions = 0
+                let k = 0
+                for (let i = 0; i < a.length; i++) {
+                    if (!aMatched[i]) continue
+                    while (!bMatched[k]) k++
+                    if (a[i] !== b[k]) transpositions++
+                    k++
+                }
+                const jaro = (matches / a.length + matches / b.length + (matches - transpositions / 2) / matches) / 3
+                let prefix = 0
+                while (prefix < 4 && prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++
+                return jaro + prefix * 0.1 * (1 - jaro)
+            }
+            const dice = (a, b) => {
+                const x = a.replace(/ /g, '')
+                const y = b.replace(/ /g, '')
+                if (x === y) return 1
+                if (x.length < 2 || y.length < 2) return 0
+                const grams = new Map()
+                for (let i = 0; i < x.length - 1; i++) { const gram = x.substring(i, i + 2); grams.set(gram, (grams.get(gram) || 0) + 1) }
+                let shared = 0
+                for (let i = 0; i < y.length - 1; i++) {
+                    const gram = y.substring(i, i + 2)
+                    const left = grams.get(gram) || 0
+                    if (left > 0) { shared++; grams.set(gram, left - 1) }
+                }
+                return 2 * shared / (x.length - 1 + y.length - 1)
+            }
+            const firstSimilarity = (a, b) => {
+                if (!a || !b) return 0
+                if (a === b) return 1
+                const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a]
+                if (shorter.length === 1) return longer[0] === shorter ? 0.9 : 0
+                if (shorter.length >= 3 && longer.startsWith(shorter)) return 0.9
+                return jaroWinkler(a, b)
+            }
+
+            // the prefilter: LIKE 'abc%' on the indexed name columns, in the usual capitalizations, with and without accents
+            const capitalizations = (prefix) => {
+                if (!prefix || /[%_]/.test(prefix)) return []
+                const lower = prefix.toLowerCase()
+                return [prefix, lower, prefix.toUpperCase(), lower.charAt(0).toUpperCase() + lower.substring(1),
+                    lower.replace(/(^|\s)(\S)/g, (all, space, letter) => space + letter.toUpperCase())]
+            }
+            const prefixes = (texts, length) => {
+                const found = new Set()
+                for (const text of texts) {
+                    const value = String(text ?? '').trim()
+                    if (!value) continue
+                    for (const variant of [value, stripAccents(value)]) for (const prefix of capitalizations(variant.substring(0, length))) found.add(prefix)
+                }
+                return Array.from(found)
+            }
+            const startsWithAny = (field, list) => cf.makeCondition(list.map((prefix) => cf.makeCondition(field, 'like', prefix + '%')), 'or')
+            const directory = (find) => find.condition(cf.makeCondition('privateOwnerUserId', 'equals', null))
+                    .condition(cf.makeCondition('disabled', 'not-equals', 'Y', true))
+
+            const scored = []
+            if (isOrg) {
+                const key = orgKey(names.organizationName)
+                if (key.length < 2) return
+                const raw = String(names.organizationName ?? '').trim()
+                const withoutThe = raw.replace(/^the\s+/i, '')
+                // the name as it starts, without its "The", and with one ("Lund Labs" finds "The Lund Labs")
+                const list = prefixes([raw, withoutThe], 3).concat(withoutThe ? prefixes(['The ' + withoutThe], 7) : [])
+                if (!list.length) return
+                const candidates = directory(ec.entity.find('mantle.party.PartyDetail').condition('partyTypeEnumId', 'PtyOrganization'))
+                        .condition(startsWithAny('organizationName', Array.from(new Set(list))))
+                        .selectField('partyId,pseudoId,partyTypeEnumId,organizationName').orderBy('partyId').limit(500).list()
+                for (const candidate of candidates) {
+                    if (excluded.has(candidate.partyId)) continue
+                    const otherKey = orgKey(candidate.organizationName)
+                    if (!otherKey) continue
+                    const score = Math.round(100 * dice(key, otherKey))
+                    if (score >= min) scored.push({candidate, score})
+                }
+            } else {
+                const last = lastKey(names.lastName)
+                const firsts = [firstKey(names.firstName), firstKey(names.nickname)].filter((name) => name)
+                if (!last || !firsts.length) return
+                const lastPrefixes = prefixes([names.lastName], 3)
+                const firstPrefixes = prefixes([names.firstName, names.nickname], 1)
+                if (!lastPrefixes.length || !firstPrefixes.length) return
+                const candidates = directory(ec.entity.find('mantle.party.PartyDetail').condition('partyTypeEnumId', 'PtyPerson'))
+                        .condition(startsWithAny('lastName', lastPrefixes))
+                        .condition(cf.makeCondition([startsWithAny('firstName', firstPrefixes), startsWithAny('nickname', firstPrefixes)], 'or'))
+                        .selectField('partyId,pseudoId,partyTypeEnumId,firstName,lastName,nickname').orderBy('partyId').limit(500).list()
+                for (const candidate of candidates) {
+                    if (excluded.has(candidate.partyId)) continue
+                    const lastSimilarity = jaroWinkler(last, lastKey(candidate.lastName))
+                    if (lastSimilarity < 0.9) continue
+                    const otherFirsts = [firstKey(candidate.firstName), firstKey(candidate.nickname)].filter((name) => name)
+                    let best = 0
+                    for (const mine of firsts) for (const theirs of otherFirsts) best = Math.max(best, firstSimilarity(mine, theirs))
+                    if (best < 0.85) continue
+                    const score = Math.round(100 * (0.6 * lastSimilarity + 0.4 * best))
+                    if (score >= min) scored.push({candidate, score})
+                }
+            }
+            scored.sort((a, b) => b.score - a.score || String(a.candidate.partyId).localeCompare(String(b.candidate.partyId)))
+            matchList = scored.slice(0, max).map(({candidate, score}) => ({partyId: candidate.partyId, pseudoId: candidate.pseudoId || candidate.partyId,
+                partyTypeEnumId: candidate.partyTypeEnumId, name: (ec.resource.expand('PartyNameOnlyTemplate', '', candidate.getMap()) || '').trim(),
+                score: score}))
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="PartyNotDuplicates">
+        <description>The parties marked not duplicates of a party (PartyNotDuplicate, the party on either side), latest first.</description>
+        <in-parameters><parameter name="partyId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="otherPartyIdList" type="List"><parameter name="otherPartyId"/></parameter>
+            <parameter name="notDuplicateList" type="List"><parameter name="notDuplicate" type="Map"><description>otherPartyId,
+                decidedByUserId, decidedDate, comments</description></parameter></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const rows = Array.from(ec.entity.find('mantle.party.PartyNotDuplicate').condition(cf.makeCondition([
+                    cf.makeCondition('partyId', 'equals', partyId), cf.makeCondition('otherPartyId', 'equals', partyId)], 'or'))
+                    .orderBy('-decidedDate').list())
+            notDuplicateList = rows.map((row) => ({otherPartyId: row.partyId === partyId ? row.otherPartyId : row.partyId,
+                decidedByUserId: row.decidedByUserId, decidedDate: row.decidedDate, comments: row.comments}))
+            otherPartyIdList = notDuplicateList.map((row) => row.otherPartyId)
+        ]]></script></actions>
+    </service>
+    <service verb="mark" noun="PartyNotDuplicate">
+        <description>
+            Records that two directory parties are not duplicates (one PartyNotDuplicate row for the pair, whichever comes
+            first; marking it again records who decided and when anew), then checks both again (find#PartyDuplicates), so their
+            hasDuplicates flags no longer count each other and the scan leaves the pair out. Each party must be one the user may
+            see: another user's personal contact is "not found", and the user's own personal contact is not in the duplicate
+            scan at all. A disabled (merged or deleted) party cannot be marked.
+        </description>
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="otherPartyId" required="true"/>
+            <parameter name="comments"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const userId = ec.user.userId || null
+            if (partyId === otherPartyId) { ec.message.addError('Choose two different parties'); return }
+            for (const id of [partyId, otherPartyId]) {
+                // the party as the user may see it: the entity filters, and a personal contact only its owner's
+                const party = ec.entity.find('mantle.party.Party').condition('partyId', id).one()
+                if (party == null || (party.privateOwnerUserId && party.privateOwnerUserId !== userId)) { ec.message.addError(`Party ${id} not found`); return }
+                if (party.privateOwnerUserId) { ec.message.addError(`Party ${id} is a personal contact, which the duplicate scan leaves out`); return }
+                if (party.disabled === 'Y') { ec.message.addError(`Party ${id} is disabled`); return }
+            }
+            const [lowId, highId] = partyId < otherPartyId ? [partyId, otherPartyId] : [otherPartyId, partyId]
+            const now = ec.user.nowTimestamp
+            const existing = ec.entity.find('mantle.party.PartyNotDuplicate').condition('partyId', lowId).condition('otherPartyId', highId).one()
+            if (existing != null) {
+                existing.set('decidedByUserId', userId)
+                existing.set('decidedDate', now)
+                if (comments != null) existing.set('comments', comments || null)
+                existing.update()
+            } else {
+                ec.service.sync().name('create#mantle.party.PartyNotDuplicate').parameters({partyId: lowId, otherPartyId: highId,
+                    decidedByUserId: userId, decidedDate: now, comments: comments || null}).call()
+                if (ec.message.hasError()) return
+            }
+            for (const id of [partyId, otherPartyId]) {
+                ec.service.sync().name('mantle.party.DuplicateServices.find#PartyDuplicates').parameters({partyId: id}).call()
+                if (ec.message.hasError()) return
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="unmark" noun="PartyNotDuplicate">
+        <description>Removes the decision that two parties are not duplicates (either order) and checks both again
+            (find#PartyDuplicates), so the pair may be found again. Each party must be one the user may see, as for
+            mark#PartyNotDuplicate.</description>
+        <in-parameters>
+            <parameter name="partyId" required="true"/>
+            <parameter name="otherPartyId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="removed" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            removed = false
+            const userId = ec.user.userId || null
+            const parties = []
+            for (const id of [partyId, otherPartyId]) {
+                const party = ec.entity.find('mantle.party.Party').condition('partyId', id).one()
+                if (party == null || (party.privateOwnerUserId && party.privateOwnerUserId !== userId)) { ec.message.addError(`Party ${id} not found`); return }
+                parties.push(party)
+            }
+            const [lowId, highId] = partyId < otherPartyId ? [partyId, otherPartyId] : [otherPartyId, partyId]
+            const existing = ec.entity.find('mantle.party.PartyNotDuplicate').condition('partyId', lowId).condition('otherPartyId', highId).one()
+            if (existing == null) return
+            existing.delete()
+            removed = true
+            for (const party of parties) {
+                if (party.disabled === 'Y' || party.privateOwnerUserId) continue
+                ec.service.sync().name('mantle.party.DuplicateServices.find#PartyDuplicates').parameters({partyId: party.partyId}).call()
+                if (ec.message.hasError()) return
+            }
+        ]]></script></actions>
     </service>
 
     <service verb="find" noun="TelecomNumbers">
@@ -185,14 +519,21 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <script><![CDATA[
-                contactNumber = replaceNonAlphaNumeric(contactNumber, '%' as char)
+                // replaces each run of non-letter, non-digit characters becomes one replacement
+                function replaceNonAlphaNumeric(text, chr) {
+                    if (text == null || text === '') return text
+                    return String(text).replace(/[^\p{L}\p{Nd}]+/gu, chr)
+                }
+                // Java's String.equalsIgnoreCase: false when either is null
+                function equalsIgnoreCase(a, b) { return a != null && b != null && String(a).toLowerCase() === String(b).toLowerCase() }
+                contactNumber = replaceNonAlphaNumeric(contactNumber, '%')
                 // NOTE: the following is USA phone number specific (3 digit area code, 7 digit number with 3/4 separator)
-                if (!areaCode && contactNumber.length() > 8) {
+                if (!areaCode && contactNumber.length > 8) {
                     areaCode = contactNumber.substring(0,3)
                     contactNumber = contactNumber.substring(3)
-                    if (contactNumber.charAt(0) == '%') contactNumber = contactNumber.substring(1)
+                    if (contactNumber.charAt(0) === '%') contactNumber = contactNumber.substring(1)
                 }
-                if (!contactNumber.contains('%') && contactNumber.length() > 3) { contactNumber = contactNumber.substring(0,3) + '%' + contactNumber.substring(3) }
+                if (!contactNumber.includes('%') && contactNumber.length > 3) { contactNumber = contactNumber.substring(0,3) + '%' + contactNumber.substring(3) }
                 fullNumber = (areaCode ? areaCode + '%' : '') + contactNumber
             ]]></script>
             <set field="telecomNumberList" from="[]"/>
@@ -207,7 +548,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="contactMechPurposeId" ignore-if-empty="true"/>
                     <econdition field-name="trustLevelEnumId" operator="in" ignore-if-empty="true"/>
                 </entity-find>
-                <script>telecomNumberList.addAll(existingList)</script>
+                <script>for (const existing of existingList) telecomNumberList.push(existing)</script>
             </then><else>
                 <entity-find entity-name="mantle.party.contact.ContactMechTelecomNumber" list="dupTelNumList">
                     <econdition field-name="trustLevelEnumId" operator="in" ignore-if-empty="true"/>
@@ -219,28 +560,27 @@ along with this software (see the LICENSE.md file). If not, see
                     <select-field field-name="contactMechId,countryCode,areaCode,contactNumber"/>
                 </entity-find>
                 <iterate list="dupTelNumList" entry="dupTelNum">
-                    <if condition="dupTelecomIdsFound != null &amp;&amp; dupTelecomIdsFound.contains(dupTelNum.contactMechId)"><continue/></if>
+                    <if condition="dupTelecomIdsFound != null &amp;&amp; dupTelecomIdsFound.includes(dupTelNum.contactMechId)"><continue/></if>
                     <entity-find entity-name="mantle.party.contact.PartyContactMech" list="dupPcmList">
                         <date-filter/><econdition field-name="partyId" operator="not-equals"/>
                         <econdition field-name="contactMechId" from="dupTelNum.contactMechId"/>
                     </entity-find>
-                    <if condition="!dupPcmList"><continue/></if>
+                    <if condition="!dupPcmList?.length"><continue/></if>
                     <set field="dupPcm" from="dupPcmList[0]"/>
-                    <if condition="matchingInfoByPartyId == null || !matchingInfoByPartyId.containsKey(dupPcm.partyId)">
+                    <if condition="matchingInfoByPartyId == null || !Object.hasOwn(matchingInfoByPartyId, dupPcm.partyId)">
                         <entity-find-one entity-name="mantle.party.PartyDetail" value-field="dupPartyDetail">
                             <field-map field-name="partyId" from="dupPcm.partyId"/></entity-find-one>
-                        <if condition="(firstName &amp;&amp; !firstName.equalsIgnoreCase(dupPartyDetail.firstName)) ||
-                                (organizationName &amp;&amp; !organizationName.equalsIgnoreCase(dupPartyDetail.organizationName))">
+                        <if condition="(firstName &amp;&amp; !equalsIgnoreCase(firstName, dupPartyDetail.firstName)) ||
+                                (organizationName &amp;&amp; !equalsIgnoreCase(organizationName, dupPartyDetail.organizationName))">
                             <continue/></if>
                     </if>
                     <script>
-                        Map dupTelInfo = dupTelNum.getMap()
-                        dupTelInfo.put("partyId", dupPcm.partyId)
+                        const dupTelInfo = Object.assign({}, dupTelNum.getMap(), {partyId: dupPcm.partyId})
 
-                        if (matchingInfoByPartyId != null) addToListInMap(dupPcm.partyId, dupTelInfo, matchingInfoByPartyId)
-                        if (dupTelecomIdsFound != null) dupTelecomIdsFound.add(dupTelNum.contactMechId)
+                        if (matchingInfoByPartyId != null) (matchingInfoByPartyId[dupPcm.partyId] ??= []).push(dupTelInfo)
+                        if (dupTelecomIdsFound != null) dupTelecomIdsFound.push(dupTelNum.contactMechId)
 
-                        telecomNumberList.add(dupTelInfo)
+                        telecomNumberList.push(dupTelInfo)
                     </script>
                 </iterate>
             </else></if>
@@ -268,10 +608,17 @@ along with this software (see the LICENSE.md file). If not, see
             <!-- TODO: more flexible matching for other common strings... and for different languages? -->
             <!-- for these if abbreviated is prefixed just replace with prefix + %, similar pattern for others -->
             <script><![CDATA[
-                    address1 = address1.replace("Road","R%d%").replace("Rd","R%d%").replace("Street","St%").replace("Avenue","Av%").replace("North","N%").replace("South","S%").replace("East","E%").replace("West","W%")
-                    address1 = replaceNonAlphaNumeric(address1, '%' as char) + '%'
-                    unitNumber = unitNumber ? '%' + replaceNonAlphaNumeric(unitNumber, '%' as char) : null
-                ]]></script>
+                // replaces each run of non-letter, non-digit characters becomes one replacement
+                function replaceNonAlphaNumeric(text, chr) {
+                    if (text == null || text === '') return text
+                    return String(text).replace(/[^\p{L}\p{Nd}]+/gu, chr)
+                }
+                // Java's String.equalsIgnoreCase: false when either is null
+                function equalsIgnoreCase(a, b) { return a != null && b != null && String(a).toLowerCase() === String(b).toLowerCase() }
+                address1 = address1.replaceAll("Road","R%d%").replaceAll("Rd","R%d%").replaceAll("Street","St%").replaceAll("Avenue","Av%").replaceAll("North","N%").replaceAll("South","S%").replaceAll("East","E%").replaceAll("West","W%")
+                address1 = replaceNonAlphaNumeric(address1, '%') + '%'
+                unitNumber = unitNumber ? '%' + replaceNonAlphaNumeric(unitNumber, '%') : null
+            ]]></script>
             <set field="postalAddressList" from="[]"/>
             <if condition="toPartyId"><then>
                 <entity-find entity-name="mantle.party.contact.PartyContactMechPostalAddressOnly" list="existingList">
@@ -284,7 +631,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <econdition field-name="contactMechPurposeId" ignore-if-empty="true"/>
                     <econdition field-name="trustLevelEnumId" operator="in" ignore-if-empty="true"/>
                 </entity-find>
-                <script>postalAddressList.addAll(existingList)</script>
+                <script>for (const existing of existingList) postalAddressList.push(existing)</script>
             </then><else>
                 <entity-find entity-name="mantle.party.contact.ContactMechPostalAddress" list="dupAddressList">
                     <econdition field-name="trustLevelEnumId" operator="in" ignore-if-empty="true"/>
@@ -298,28 +645,27 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- <log level="warn" message="dup addresses address1 ${address1} unitNumber ${replaceNonAlphaNumeric(unitNumber, '%' as char)} postalCode ${postalCode}\n${dupAddressList}"/> -->
                 <!-- <log level="warn" message="${dupAddressList_xafind}"/> -->
                 <iterate list="dupAddressList" entry="dupAddress">
-                    <if condition="dupAddressIdsFound != null &amp;&amp; dupAddressIdsFound.contains(dupAddress.contactMechId)"><continue/></if>
+                    <if condition="dupAddressIdsFound != null &amp;&amp; dupAddressIdsFound.includes(dupAddress.contactMechId)"><continue/></if>
                     <entity-find entity-name="mantle.party.contact.PartyContactMech" list="dupPcmList" limit="1">
                         <date-filter/><econdition field-name="partyId" operator="not-equals"/>
                         <econdition field-name="contactMechId" from="dupAddress.contactMechId"/>
                     </entity-find>
-                    <if condition="!dupPcmList"><continue/></if>
+                    <if condition="!dupPcmList?.length"><continue/></if>
                     <set field="dupPcm" from="dupPcmList[0]"/>
-                    <if condition="matchingInfoByPartyId == null || !matchingInfoByPartyId.containsKey(dupPcm.partyId)">
+                    <if condition="matchingInfoByPartyId == null || !Object.hasOwn(matchingInfoByPartyId, dupPcm.partyId)">
                         <entity-find-one entity-name="mantle.party.PartyDetail" value-field="dupPartyDetail">
                             <field-map field-name="partyId" from="dupPcm.partyId"/></entity-find-one>
-                        <if condition="(firstName &amp;&amp; !firstName.trim().equalsIgnoreCase(dupPartyDetail.firstName?.trim())) ||
-                                (organizationName &amp;&amp; !organizationName.trim().equalsIgnoreCase(dupPartyDetail.organizationName?.trim()))">
+                        <if condition="(firstName &amp;&amp; !equalsIgnoreCase(firstName.trim(), dupPartyDetail.firstName?.trim())) ||
+                                (organizationName &amp;&amp; !equalsIgnoreCase(organizationName.trim(), dupPartyDetail.organizationName?.trim()))">
                             <continue/></if>
                     </if>
                     <script>
-                        Map dupAddrInfo = dupAddress.getMap()
-                        dupAddrInfo.put("partyId", dupPcm.partyId)
+                        const dupAddrInfo = Object.assign({}, dupAddress.getMap(), {partyId: dupPcm.partyId})
 
-                        if (matchingInfoByPartyId != null) addToListInMap(dupPcm.partyId, dupAddrInfo, matchingInfoByPartyId)
-                        if (dupAddressIdsFound != null) dupAddressIdsFound.add(dupAddress.contactMechId)
+                        if (matchingInfoByPartyId != null) (matchingInfoByPartyId[dupPcm.partyId] ??= []).push(dupAddrInfo)
+                        if (dupAddressIdsFound != null) dupAddressIdsFound.push(dupAddress.contactMechId)
 
-                        postalAddressList.add(dupAddrInfo)
+                        postalAddressList.push(dupAddrInfo)
                     </script>
                 </iterate>
             </else></if>
@@ -329,71 +675,89 @@ along with this software (see the LICENSE.md file). If not, see
     <service verb="check" noun="AllPartyDuplicates" transaction-timeout="3600" authenticate="anonymous-all">
         <actions>
             <script><![CDATA[
-                import org.moqui.entity.EntityList
-                import org.moqui.entity.EntityValue
-                import java.util.concurrent.Future
-
-                long startTime = System.currentTimeMillis()
-                long oneDayAgo = startTime - (24 * 60 * 60 * 1000)
-                int threads = 10
+                const startTime = Date.now()
+                const oneDayAgo = startTime - (24 * 60 * 60 * 1000)
+                const threads = 10
                 duplicatesFound = 0
                 partiesChecked = 0
+                const cf = ec.entity.conditionFactory
                 // NOTE: no limit on this query, for really big databases this may blow up!
-                EntityList partyList = ec.entity.find("mantle.party.Party")
-                        .condition((org.moqui.entity.EntityCondition) ec.entity.conditionFactory.makeActionConditionDirect("disabled", "equals", null, "N", null, false, false, true, "false"))
-                        .condition((org.moqui.entity.EntityCondition) ec.entity.conditionFactory.makeActionConditionDirect("hasDuplicates", "equals", null, "N", null, false, false, true, "false"))
-                        .condition((org.moqui.entity.EntityCondition) ec.entity.conditionFactory.makeActionConditionDirect("lastDupCheckDate", "less", new Timestamp(oneDayAgo), null, null, false, false, true, "false"))
+                // personal contacts (privateOwnerUserId) are left out of the duplicate scan
+                const partyList = ec.entity.find("mantle.party.Party")
+                        .condition(cf.makeCondition("privateOwnerUserId", "equals", null))
+                        .condition(cf.makeActionConditionDirect("disabled", "equals", null, "N", null, false, false, true, "false"))
+                        .condition(cf.makeActionConditionDirect("hasDuplicates", "equals", null, "N", null, false, false, true, "false"))
+                        .condition(cf.makeActionConditionDirect("lastDupCheckDate", "less", String(oneDayAgo), null, null, false, false, true, "false"))
                         .selectField("partyId").list()
-                ec.logger.info("Found ${partyList.size()} parties to check for duplicates")
-                ArrayList partyIdList = new ArrayList(threads)
-                Iterator<EntityValue> iterator = partyList.iterator()
-                while (iterator.hasNext()) {
-                    EntityValue party = iterator.next()
-                    partyIdList.add(party.partyId)
-                    int partyIdListSize = partyIdList.size()
-                    if (partyIdListSize == threads || !iterator.hasNext()) {
-                        ArrayList<Future> futureList = new ArrayList(partyIdListSize)
-                        for (int i = 0; i < partyIdListSize; i++) {
-                            String partyId = partyIdList.get(i)
+                ec.logger.info(`Found ${partyList.length} parties to check for duplicates`)
+                // check in batches of parallel async calls; a party whose check fails is logged and the rest are checked
+                let partyIdList = []
+                let failed = 0
+                for (let partyIdx = 0; partyIdx < partyList.length; partyIdx++) {
+                    partyIdList.push(partyList[partyIdx].partyId)
+                    if (partyIdList.length === threads || partyIdx === partyList.length - 1) {
+                        const futureList = []
+                        for (const checkPartyId of partyIdList) {
                             // party may have already been checked since the original query
-                            EntityValue curParty = ec.entity.find("mantle.party.Party").condition("partyId", partyId).one()
-                            if (curParty == null || curParty.hasDuplicates == "Y") continue
-                            Future curFuture = ec.service.async().name("mantle.party.DuplicateServices.find#PartyDuplicates")
-                                    .parameters([partyId:partyId]).callFuture()
-                            futureList.add(curFuture)
+                            const curParty = ec.entity.find("mantle.party.Party").condition("partyId", checkPartyId).one()
+                            if (curParty == null || curParty.hasDuplicates === "Y") continue
+                            futureList.push({partyId: checkPartyId, future: ec.service.async().name("mantle.party.DuplicateServices.find#PartyDuplicates")
+                                    .parameters({partyId:checkPartyId}).callFuture()})
                         }
-                        for (Future dupFuture in futureList) { try {
-                            Map dupOut = dupFuture.get()
-                            if (ec.message.hasError()) return
-                            if (dupOut?.matchingInfoByPartyId) duplicatesFound = (duplicatesFound + 1)
-                            partiesChecked = (partiesChecked + 1)
-                        } catch (Throwable t) { ec.logger.log("warn", "Error checking party duplicate results", t) } }
-                        if (partiesChecked % 100 == 0) ec.logger.log("info", "Progress: checked ${partiesChecked} parties at ${System.currentTimeMillis() - startTime}ms, found ${duplicatesFound} duplicates", null)
+                        for (const {partyId: checkedPartyId, future} of futureList) {
+                            try {
+                                const dupOut = future.get()
+                                if (ec.message.hasError()) {
+                                    ec.logger.error(`Duplicate check of party ${checkedPartyId} failed: ${ec.message.getErrorsString()}`)
+                                    ec.message.clearErrors()
+                                    failed++
+                                    continue
+                                }
+                                if (dupOut?.matchingInfoByPartyId && Object.keys(dupOut.matchingInfoByPartyId).length > 0) duplicatesFound = (duplicatesFound + 1)
+                                partiesChecked = (partiesChecked + 1)
+                            } catch (t) {
+                                ec.logger.log("error", `Duplicate check of party ${checkedPartyId} failed`, t)
+                                failed++
+                            }
+                        }
+                        if (partiesChecked % 100 === 0) ec.logger.log("info", `Progress: checked ${partiesChecked} parties at ${Date.now() - startTime}ms, found ${duplicatesFound} duplicates`, null)
                         // clear out list for next set
-                        partyIdList.clear()
+                        partyIdList = []
                     }
                 }
-                if (partyList instanceof org.moqui.entity.EntityListIterator) partyList.close()
-                ec.logger.log("info", "Completed. Checked ${partiesChecked} parties in ${System.currentTimeMillis() - startTime}ms, found ${duplicatesFound} duplicates", null)
-                ]]></script>
+                ec.logger.log("info", `Completed. Checked ${partiesChecked} parties in ${Date.now() - startTime}ms, found ${duplicatesFound} duplicates${failed ? `, ${failed} failed` : ''}`, null)
+            ]]></script>
         </actions>
     </service>
 
     <service verb="merge" noun="AllDuplicateParties">
-        <description>NOTE: automatically merging all is dangerous as they may be false matches! This is mostly for testing purposes</description>
+        <description>NOTE: automatically merging all is dangerous as they may be false matches! This is mostly for testing
+            purposes. Each party flagged as having duplicates (hasDuplicates Y, up to 100) is merged with the duplicates
+            find#PartyDuplicates finds for it, except those matched only by a similar name (that reason is for a person to
+            review). With partyIdList only those parties are merged, and only with each other.</description>
+        <in-parameters>
+            <parameter name="partyIdList" type="List"><description>Limit the merge to these parties</description>
+                <parameter name="partyId"/></parameter>
+        </in-parameters>
         <actions>
             <entity-find entity-name="mantle.party.Party" list="partyList" limit="100"><!-- <=== change limit -->
-                <econdition field-name="disabled" value="N" or-null="true"/><econdition field-name="hasDuplicates" value="Y"/></entity-find>
+                <econdition field-name="disabled" value="N" or-null="true"/><econdition field-name="hasDuplicates" value="Y"/>
+                <econdition field-name="privateOwnerUserId" from="null"/>
+                <econdition field-name="partyId" operator="in" from="partyIdList" ignore-if-empty="true"/></entity-find>
+            <set field="onlyPartyIds" from="partyIdList ? Array.from(partyIdList).map((id) =&gt; String(id)) : null"/>
             <iterate list="partyList" entry="party">
                 <!-- see if party is now disabled, may have been merged into another party -->
-                <script>party.refresh()</script>
+                <entity-find-one entity-name="mantle.party.Party" value-field="party">
+                    <field-map field-name="partyId" from="party.partyId"/></entity-find-one>
                 <if condition="party.mergedToPartyId || party.disabled == 'Y'"><continue/></if>
-                <service-call name="mantle.party.DuplicateServices.find#PartyDuplicates" in-map="[partyId:party.partyId]"
+                <service-call name="mantle.party.DuplicateServices.find#PartyDuplicates" in-map="{partyId:party.partyId}"
                         out-map="dupOut" out-map-add-to-existing="false"/>
-                <if condition="dupOut?.matchingInfoByPartyId">
-                    <iterate list="dupOut.matchingInfoByPartyId.keySet()" entry="dupPartyId">
+                <if condition="dupOut?.matchingInfoByPartyId &amp;&amp; Object.keys(dupOut.matchingInfoByPartyId).length &gt; 0">
+                    <iterate list="Object.keys(dupOut.matchingInfoByPartyId)" entry="dupPartyId">
+                        <if condition="onlyPartyIds != null &amp;&amp; !onlyPartyIds.includes(dupPartyId)"><continue/></if>
+                        <if condition="!dupOut.matchingInfoByPartyId[dupPartyId].some((info) =&gt; info.matchType !== 'name')"><continue/></if>
                         <service-call name="mantle.party.DuplicateServices.merge#Parties"
-                                in-map="[toPartyId:party.partyId, fromPartyId:dupPartyId]"/>
+                                in-map="{toPartyId:party.partyId, fromPartyId:dupPartyId}"/>
                     </iterate>
                 </if>
             </iterate>
@@ -412,15 +776,20 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find-one entity-name="mantle.party.Party" value-field="fromParty" for-update="true">
                 <field-map field-name="partyId" from="fromPartyId"/></entity-find-one>
 
+            <!-- someone else's personal contact (privateOwnerUserId) is not found, with or without an entity filter -->
+            <if condition="toParty?.privateOwnerUserId &amp;&amp; toParty.privateOwnerUserId != ec.user.userId"><set field="toParty" from="null"/></if>
+            <if condition="fromParty?.privateOwnerUserId &amp;&amp; fromParty.privateOwnerUserId != ec.user.userId"><set field="fromParty" from="null"/></if>
             <if condition="toParty == null"><return message="Cannot merge, To Party ${toPartyId} not found"/></if>
             <if condition="fromParty == null"><return message="Cannot merge, From Party ${fromPartyId} not found"/></if>
+            <if condition="toParty.privateOwnerUserId &amp;&amp; !fromParty.privateOwnerUserId">
+                <return error="true" message="Directory party ${fromPartyId} cannot be merged into personal contact ${toPartyId}; link the personal contact to the directory instead"/></if>
 
             <if condition="toParty.disabled == 'Y'"><return message="To Party ${toPartyId} is disabled, not merging into it"/></if>
             <if condition="fromParty.mergedToPartyId"><return message="From Party ${fromPartyId} already merged to Party ${fromParty.mergedToPartyId}"/></if>
 
             <log level="info" message="Merging Party ${fromPartyId} to Party ${toPartyId}"/>
             <!-- disable from Party and set mergedToPartyId -->
-            <service-call name="update#mantle.party.Party" in-map="[partyId:fromPartyId, disabled:'Y', mergedToPartyId:toPartyId]"/>
+            <service-call name="update#mantle.party.Party" in-map="{partyId:fromPartyId, disabled:'Y', mergedToPartyId:toPartyId}"/>
 
             <!-- Non-Duplicate ContactMech.infoString (email/other) -->
             <!-- get all purposes, dedup to share contactMechId? -->
@@ -434,10 +803,10 @@ along with this software (see the LICENSE.md file). If not, see
                     <date-filter/><econdition field-name="partyId" from="toPartyId"/>
                     <econdition field-name="contactMechTypeEnumId" from="pcmInfo.contactMechTypeEnumId"/>
                     <econdition field-name="infoString" from="pcmInfo.infoString"/></entity-find>
-                <if condition="existingList"><continue/></if>
+                <if condition="(existingList?.length > 0)"><continue/></if>
                 <!-- NOTE: reusing existing ContactMech record -->
                 <service-call name="create#mantle.party.contact.PartyContactMech"
-                        in-map="pcmInfo + [partyId:toPartyId, fromDate:ec.user.nowTimestamp, thruDate:null]"/>
+                        in-map="Object.assign({}, pcmInfo, {partyId:toPartyId, fromDate:ec.user.nowTimestamp, thruDate:null})"/>
             </iterate>
 
             <!-- Non-Duplicate TelecomNumber -->
@@ -447,11 +816,11 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="partyTelecomNumberList" entry="ptn">
                 <if condition="!ptn.contactNumber"><continue/></if>
                 <service-call name="mantle.party.DuplicateServices.find#TelecomNumbers" out-map="findOut" out-map-add-to-existing="false"
-                        in-map="[toPartyId:toPartyId, areaCode:ptn.areaCode, contactNumber:ptn.contactNumber]"/>
-                <if condition="findOut.telecomNumberList"><continue/></if>
+                        in-map="{toPartyId:toPartyId, areaCode:ptn.areaCode, contactNumber:ptn.contactNumber}"/>
+                <if condition="findOut.telecomNumberList?.length &gt; 0"><continue/></if>
                 <!-- NOTE: reusing existing ContactMech record -->
                 <service-call name="create#mantle.party.contact.PartyContactMech"
-                        in-map="ptn + [partyId:toPartyId, fromDate:ec.user.nowTimestamp, thruDate:null]"/>
+                        in-map="Object.assign({}, ptn, {partyId:toPartyId, fromDate:ec.user.nowTimestamp, thruDate:null})"/>
             </iterate>
 
             <!-- Non-Duplicate PostalAddress -->
@@ -461,19 +830,17 @@ along with this software (see the LICENSE.md file). If not, see
             <iterate list="partyPostalAddressList" entry="ppa">
                 <if condition="!ppa.address1 || !ppa.postalCode"><continue/></if>
                 <service-call name="mantle.party.DuplicateServices.find#PostalAddresses" out-map="findOut" out-map-add-to-existing="false"
-                        in-map="[toPartyId:toPartyId, contactMechPurposeId:ppa.contactMechPurposeId, address1:ppa.address1,
-                            unitNumber:ppa.unitNumber, postalCode:ppa.postalCode, postalCodeExt:ppa.postalCodeExt, countryGeoId:ppa.countryGeoId]"/>
-                <if condition="findOut.postalAddressList"><continue/></if>
+                        in-map="{toPartyId:toPartyId, contactMechPurposeId:ppa.contactMechPurposeId, address1:ppa.address1,
+                            unitNumber:ppa.unitNumber, postalCode:ppa.postalCode, postalCodeExt:ppa.postalCodeExt, countryGeoId:ppa.countryGeoId}"/>
+                <if condition="findOut.postalAddressList?.length &gt; 0"><continue/></if>
                 <!-- NOTE: reusing existing ContactMech record -->
                 <service-call name="create#mantle.party.contact.PartyContactMech"
-                        in-map="ppa + [partyId:toPartyId, fromDate:ec.user.nowTimestamp, thruDate:null]"/>
+                        in-map="Object.assign({}, ppa, {partyId:toPartyId, fromDate:ec.user.nowTimestamp, thruDate:null})"/>
             </iterate>
 
             <script><![CDATA[
-                import org.moqui.context.ExecutionContext
-                import org.moqui.entity.EntityValue
-                ExecutionContext ec = context.ec
-                boolean eecaWasDisabled = ec.artifactExecution.disableEntityEca()
+                // TODO: the Groovy original disabled entity ECAs for the merge (disableEntityEca and
+                //     enableEntityEca on the artifact execution facade), the script runtime does not have them so they run here
 
                 // Party fields
                 if (fromParty.externalId && !toParty.externalId) toParty.externalId = fromParty.externalId
@@ -481,79 +848,85 @@ along with this software (see the LICENSE.md file). If not, see
                 if (fromParty.comments && !toParty.comments) toParty.comments = fromParty.comments
                 toParty.update()
 
-                // Person, Organization fields
-                boolean toIsOrg = toParty.partyTypeEnumId == 'PtyOrganization'
-                boolean fromIsOrg = fromParty.partyTypeEnumId == 'PtyOrganization'
-                EntityValue toPerson = !toIsOrg ? ec.entity.find("mantle.party.Person").condition("partyId", toPartyId).one() : null
-                EntityValue fromPerson = !fromIsOrg ? ec.entity.find("mantle.party.Person").condition("partyId", fromPartyId).one() : null
-                EntityValue toOrganization = toIsOrg ? ec.entity.find("mantle.party.Organization").condition("partyId", toPartyId).one() : null
-                EntityValue fromOrganization = fromIsOrg ? ec.entity.find("mantle.party.Organization").condition("partyId", fromPartyId).one() : null
+                // copy a value to the to Party if there is not already one with the same primary key (the original EntityValue.refresh())
+                const copyToParty = (value) => {
+                    const newVal = value.cloneValue()
+                    newVal.partyId = toPartyId
+                    if (ec.entity.find(newVal.getEntityName()).condition(newVal.getPrimaryKeys()).one() == null) newVal.create()
+                    return newVal
+                }
+                // change one field of all records matching another, returns the count (what EntityFind.updateAll did)
+                const moveAll = (entityName, matchField, changeField) => {
+                    let count = 0
+                    for (const value of ec.entity.find(entityName).condition(matchField, fromPartyId).list()) {
+                        value.set(changeField, toPartyId)
+                        value.update()
+                        count++
+                    }
+                    return count
+                }
+                // merge fields of the from record into the to record where the to record has none
+                const fillMissing = (toValue, fromValue) => {
+                    for (const [name, fromFieldValue] of Object.entries(fromValue.getMap())) {
+                        if (fromFieldValue == null) continue
+                        if (toValue.get(name) != null) continue
+                        toValue.set(name, fromFieldValue)
+                    }
+                    toValue.update()
+                }
 
-                if (toIsOrg && toOrganization == null) toOrganization = ec.entity.makeValue("mantle.party.Organization").set("partyId", toPartyId).create()
+                // Person, Organization fields
+                const toIsOrg = toParty.partyTypeEnumId === 'PtyOrganization'
+                const fromIsOrg = fromParty.partyTypeEnumId === 'PtyOrganization'
+                const toPerson = !toIsOrg ? ec.entity.find("mantle.party.Person").condition("partyId", toPartyId).one() : null
+                const fromPerson = !fromIsOrg ? ec.entity.find("mantle.party.Person").condition("partyId", fromPartyId).one() : null
+                let toOrganization = toIsOrg ? ec.entity.find("mantle.party.Organization").condition("partyId", toPartyId).one() : null
+                const fromOrganization = fromIsOrg ? ec.entity.find("mantle.party.Organization").condition("partyId", fromPartyId).one() : null
+
+                if (toIsOrg && toOrganization == null) {
+                    toOrganization = ec.entity.makeValue("mantle.party.Organization")
+                    toOrganization.set("partyId", toPartyId)
+                    toOrganization.create()
+                }
                 if (toPerson != null && fromPerson != null) {
-                    for (Map.Entry entry in fromPerson.entrySet()) {
-                        if (entry.value == null) continue
-                        if (toPerson.get(entry.key) != null) continue
-                        toPerson.put((String) entry.key, entry.value)
-                    }
-                    toPerson.update()
+                    fillMissing(toPerson, fromPerson)
                 } else if (toOrganization != null && fromOrganization != null) {
-                    for (Map.Entry entry in fromOrganization.entrySet()) {
-                        if (entry.value == null) continue
-                        if (toOrganization.get(entry.key) != null) continue
-                        toOrganization.put((String) entry.key, entry.value)
-                    }
-                    toOrganization.update()
+                    fillMissing(toOrganization, fromOrganization)
                 } else if (fromPerson != null && toOrganization != null) {
                     if (!toOrganization.organizationName) {
-                        toOrganization.organizationName = "${fromPerson.firstName?:''}${fromPerson.middleName ? ' ' + fromPerson.middleName : ''}${fromPerson.lastName ? ' ' + fromPerson.lastName : ''}"
+                        toOrganization.organizationName = `${fromPerson.firstName ?? ''}${fromPerson.middleName ? ' ' + fromPerson.middleName : ''}${fromPerson.lastName ? ' ' + fromPerson.lastName : ''}`
                         toOrganization.update()
                     }
                 }
 
                 // PartyClassificationAppl
-                for (EntityValue value in ec.entity.find("mantle.party.PartyClassificationAppl").condition("partyId", fromPartyId).list()) {
+                for (const value of ec.entity.find("mantle.party.PartyClassificationAppl").condition("partyId", fromPartyId).list()) {
                     // see if to Party already has a PartyClassification of the same type
-                    EntityValue partyClassification = (EntityValue) value.classification
-                    long pcaCount = ec.entity.find("mantle.party.PartyClassificationAndAppl").condition("partyId", toPartyId)
+                    const partyClassification = value.classification
+                    const pcaCount = ec.entity.find("mantle.party.PartyClassificationAndAppl").condition("partyId", toPartyId)
                             .condition("classificationTypeEnumId", partyClassification.classificationTypeEnumId)
-                            .conditionDate(null, null, null).count()
-                    if (pcaCount == 0) {
-                        EntityValue newVal = value.cloneValue()
-                        newVal.partyId = toPartyId
-                        if (!newVal.refresh()) newVal.create()
-                        // value.delete()
-                    }
+                            .condition(ec.entity.conditionFactory.makeConditionDate("fromDate", "thruDate", null)).count()
+                    if (pcaCount === 0) copyToParty(value)
                 }
 
                 // PartyContent
-                contentCount = ec.entity.find("mantle.party.PartyContent").condition("partyId", fromPartyId).updateAll([partyId:toPartyId])
-                if (contentCount) ec.message.addMessage("Moved ${contentCount} Content records from Party ${fromPartyId} to ${toPartyId}")
+                contentCount = moveAll("mantle.party.PartyContent", "partyId", "partyId")
+                if (contentCount) ec.message.addMessage(`Moved ${contentCount} Content records from Party ${fromPartyId} to ${toPartyId}`)
 
                 // PartyIdentification
-                for (EntityValue value in ec.entity.find("mantle.party.PartyIdentification").condition("partyId", fromPartyId).list()) {
-                    EntityValue newVal = value.cloneValue()
-                    newVal.partyId = toPartyId
-                    if (!newVal.refresh()) newVal.create()
-                    // value.delete()
-                }
+                for (const value of ec.entity.find("mantle.party.PartyIdentification").condition("partyId", fromPartyId).list()) copyToParty(value)
 
                 // PartyNote
-                for (EntityValue value in ec.entity.find("mantle.party.PartyNote").condition("partyId", fromPartyId).list()) {
-                    EntityValue newVal = value.cloneValue()
-                    newVal.partyId = toPartyId
-                    if (!newVal.refresh()) newVal.create()
-                    // value.delete()
-                }
+                for (const value of ec.entity.find("mantle.party.PartyNote").condition("partyId", fromPartyId).list()) copyToParty(value)
 
                 // PartyRelationship
-                relCount = ec.entity.find("mantle.party.PartyRelationship").condition("fromPartyId", fromPartyId).updateAll([fromPartyId:toPartyId])
-                relCount += ec.entity.find("mantle.party.PartyRelationship").condition("toPartyId", fromPartyId).updateAll([toPartyId:toPartyId])
-                if (relCount) ec.message.addMessage("Moved ${relCount} Relationships from Party ${fromPartyId} to ${toPartyId}")
+                relCount = moveAll("mantle.party.PartyRelationship", "fromPartyId", "fromPartyId")
+                relCount += moveAll("mantle.party.PartyRelationship", "toPartyId", "toPartyId")
+                if (relCount) ec.message.addMessage(`Moved ${relCount} Relationships from Party ${fromPartyId} to ${toPartyId}`)
 
                 // PartyRole (add all on to party that it doesn't already have)
                 roleCount = 0
-                for (EntityValue partyRole in ec.entity.find("mantle.party.PartyRole").condition("partyId", fromPartyId).list()) {
+                for (const partyRole of ec.entity.find("mantle.party.PartyRole").condition("partyId", fromPartyId).list()) {
                     if (ec.entity.find("mantle.party.PartyRole").condition("partyId", toPartyId).condition("roleTypeId", partyRole.roleTypeId).one() == null) {
                         ec.service.sync().name("create#mantle.party.PartyRole").parameter("partyId", toPartyId).parameter("roleTypeId", partyRole.roleTypeId).call()
                         roleCount++
@@ -561,62 +934,129 @@ along with this software (see the LICENSE.md file). If not, see
                 }
 
                 // PartySetting
-                for (EntityValue value in ec.entity.find("mantle.party.PartySetting").condition("partyId", fromPartyId).list()) {
-                    EntityValue newVal = value.cloneValue()
-                    newVal.partyId = toPartyId
-                    if (!newVal.refresh()) newVal.create()
-                    // value.delete()
-                }
+                for (const value of ec.entity.find("mantle.party.PartySetting").condition("partyId", fromPartyId).list()) copyToParty(value)
 
                 // UserAccount
-                ec.entity.find("moqui.security.UserAccount").condition("partyId", fromPartyId).updateAll([partyId:toPartyId])
+                moveAll("moqui.security.UserAccount", "partyId", "partyId")
 
                 // CommunicationEvent
-                commCount = ec.entity.find("mantle.party.communication.CommunicationEvent").condition("fromPartyId", fromPartyId).updateAll([fromPartyId:toPartyId])
-                commCount += ec.entity.find("mantle.party.communication.CommunicationEvent").condition("toPartyId", fromPartyId).updateAll([toPartyId:toPartyId])
-                if (commCount) ec.message.addMessage("Moved ${commCount} Communication Events from Party ${fromPartyId} to ${toPartyId}")
+                commCount = moveAll("mantle.party.communication.CommunicationEvent", "fromPartyId", "fromPartyId")
+                commCount += moveAll("mantle.party.communication.CommunicationEvent", "toPartyId", "toPartyId")
+                if (commCount) ec.message.addMessage(`Moved ${commCount} Communication Events from Party ${fromPartyId} to ${toPartyId}`)
 
                 // PaymentMethod
-                methodCount = ec.entity.find("mantle.account.method.PaymentMethod").condition("ownerPartyId", fromPartyId).updateAll([ownerPartyId:toPartyId])
-                if (methodCount) ec.message.addMessage("Moved ${methodCount} Payment Methods from Party ${fromPartyId} to ${toPartyId}")
+                methodCount = moveAll("mantle.account.method.PaymentMethod", "ownerPartyId", "ownerPartyId")
+                if (methodCount) ec.message.addMessage(`Moved ${methodCount} Payment Methods from Party ${fromPartyId} to ${toPartyId}`)
 
                 // OrderPart
-                orderCount = ec.entity.find("mantle.order.OrderPart").condition("vendorPartyId", fromPartyId).updateAll([vendorPartyId:toPartyId])
-                orderCount += ec.entity.find("mantle.order.OrderPart").condition("customerPartyId", fromPartyId).updateAll([customerPartyId:toPartyId])
-                for (EntityValue opp in ec.entity.find("mantle.order.OrderPartParty").condition("partyId", fromPartyId).list()) {
-                    EntityValue newOpp = opp.cloneValue()
-                    newOpp.partyId = toPartyId
-                    if (!newOpp.refresh()) newOpp.create()
+                orderCount = moveAll("mantle.order.OrderPart", "vendorPartyId", "vendorPartyId")
+                orderCount += moveAll("mantle.order.OrderPart", "customerPartyId", "customerPartyId")
+                for (const opp of ec.entity.find("mantle.order.OrderPartParty").condition("partyId", fromPartyId).list()) {
+                    copyToParty(opp)
                     opp.delete()
                 }
-                if (orderCount) ec.message.addMessage("Moved ${orderCount} Orders from Party ${fromPartyId} to ${toPartyId}")
+                if (orderCount) ec.message.addMessage(`Moved ${orderCount} Orders from Party ${fromPartyId} to ${toPartyId}`)
 
                 // Shipment
-                shipmentCount = ec.entity.find("mantle.shipment.Shipment").condition("fromPartyId", fromPartyId).updateAll([fromPartyId:toPartyId])
-                shipmentCount += ec.entity.find("mantle.shipment.Shipment").condition("toPartyId", fromPartyId).updateAll([toPartyId:toPartyId])
-                if (shipmentCount) ec.message.addMessage("Moved ${shipmentCount} Shipments from Party ${fromPartyId} to ${toPartyId}")
+                shipmentCount = moveAll("mantle.shipment.Shipment", "fromPartyId", "fromPartyId")
+                shipmentCount += moveAll("mantle.shipment.Shipment", "toPartyId", "toPartyId")
+                if (shipmentCount) ec.message.addMessage(`Moved ${shipmentCount} Shipments from Party ${fromPartyId} to ${toPartyId}`)
 
                 // Invoice
-                invoiceCount = ec.entity.find("mantle.account.invoice.Invoice").condition("fromPartyId", fromPartyId).updateAll([fromPartyId:toPartyId])
-                invoiceCount += ec.entity.find("mantle.account.invoice.Invoice").condition("toPartyId", fromPartyId).updateAll([toPartyId:toPartyId])
-                for (EntityValue inp in ec.entity.find("mantle.account.invoice.InvoiceParty").condition("partyId", fromPartyId).list()) {
-                    EntityValue newInp = inp.cloneValue()
-                    newInp.partyId = toPartyId
-                    if (!newInp.refresh()) newInp.create()
+                invoiceCount = moveAll("mantle.account.invoice.Invoice", "fromPartyId", "fromPartyId")
+                invoiceCount += moveAll("mantle.account.invoice.Invoice", "toPartyId", "toPartyId")
+                for (const inp of ec.entity.find("mantle.account.invoice.InvoiceParty").condition("partyId", fromPartyId).list()) {
+                    copyToParty(inp)
                     inp.delete()
                 }
-                if (invoiceCount) ec.message.addMessage("Moved ${invoiceCount} Invoices from Party ${fromPartyId} to ${toPartyId}")
+                if (invoiceCount) ec.message.addMessage(`Moved ${invoiceCount} Invoices from Party ${fromPartyId} to ${toPartyId}`)
 
                 // Payment
-                paymentCount = ec.entity.find("mantle.account.payment.Payment").condition("fromPartyId", fromPartyId).updateAll([fromPartyId:toPartyId])
-                paymentCount += ec.entity.find("mantle.account.payment.Payment").condition("toPartyId", fromPartyId).updateAll([toPartyId:toPartyId])
-                if (paymentCount) ec.message.addMessage("Moved ${paymentCount} Payments from Party ${fromPartyId} to ${toPartyId}")
+                paymentCount = moveAll("mantle.account.payment.Payment", "fromPartyId", "fromPartyId")
+                paymentCount += moveAll("mantle.account.payment.Payment", "toPartyId", "toPartyId")
+                if (paymentCount) ec.message.addMessage(`Moved ${paymentCount} Payments from Party ${fromPartyId} to ${toPartyId}`)
 
-                if (!eecaWasDisabled) ec.artifactExecution.enableEntityEca()
+                // rows with the party in their primary key: each is copied to the to Party unless it already has the same
+                // row (a key collision keeps the to Party's), then removed from the from Party; returns the count moved
+                const cf = ec.entity.conditionFactory
+                const moveKeyed = (entityName, field, conditions) => {
+                    let count = 0
+                    let find = ec.entity.find(entityName).condition(field, fromPartyId)
+                    for (const [name, value] of Object.entries(conditions || {})) find = find.condition(name, value)
+                    for (const value of find.list()) {
+                        const newVal = value.cloneValue()
+                        newVal.set(field, toPartyId)
+                        if (ec.entity.find(entityName).condition(newVal.getPrimaryKeys()).one() == null) newVal.create()
+                        value.delete()
+                        count++
+                    }
+                    return count
+                }
+
+                // WorkEffortParty, RequestParty, CommunicationEventParty, ContactListParty
+                workCount = moveKeyed("mantle.work.effort.WorkEffortParty", "partyId")
+                if (workCount) ec.message.addMessage(`Moved ${workCount} Work Effort parties from Party ${fromPartyId} to ${toPartyId}`)
+                requestCount = moveKeyed("mantle.request.RequestParty", "partyId")
+                if (requestCount) ec.message.addMessage(`Moved ${requestCount} Request parties from Party ${fromPartyId} to ${toPartyId}`)
+                commPartyCount = moveKeyed("mantle.party.communication.CommunicationEventParty", "partyId")
+                if (commPartyCount) ec.message.addMessage(`Moved ${commPartyCount} Communication Event parties from Party ${fromPartyId} to ${toPartyId}`)
+                listCount = moveKeyed("mantle.marketing.contact.ContactListParty", "partyId")
+                if (listCount) ec.message.addMessage(`Moved ${listCount} Contact List memberships from Party ${fromPartyId} to ${toPartyId}`)
+
+                // PartyConsent (the consent history, kept whole: the merged party's latest rows are as current as the
+                // to Party's) and the unsubscribe link tokens
+                consentCount = moveAll("mantle.party.PartyConsent", "partyId", "partyId")
+                if (consentCount) ec.message.addMessage(`Moved ${consentCount} Consent records from Party ${fromPartyId} to ${toPartyId}`)
+                moveAll("mantle.marketing.contact.ContactListToken", "partyId", "partyId")
+
+                // ContactBookParty: in a book the to Party is already in, its current row stays (a favorite if either was)
+                // and the from Party's current row is removed; every other row moves
+                const bookPartyEntity = "mantle.party.contact.ContactBookParty"
+                const rowKey = (value) => JSON.stringify(value.getPrimaryKeys())
+                const currentRows = (id) => Array.from(ec.entity.find(bookPartyEntity).condition("partyId", id)
+                        .condition(cf.makeConditionDate("fromDate", "thruDate", null)).list())
+                const toCurrentByBook = new Map(currentRows(toPartyId).map((row) => [row.contactBookId, row]))
+                const fromCurrentKeys = new Set(currentRows(fromPartyId).map(rowKey))
+                bookCount = 0
+                for (const row of ec.entity.find(bookPartyEntity).condition("partyId", fromPartyId).list()) {
+                    const toRow = fromCurrentKeys.has(rowKey(row)) ? toCurrentByBook.get(row.contactBookId) : null
+                    if (toRow != null) {
+                        if (row.isFavorite === "Y" && toRow.isFavorite !== "Y") { toRow.set("isFavorite", "Y"); toRow.update() }
+                    } else {
+                        const newVal = row.cloneValue()
+                        newVal.set("partyId", toPartyId)
+                        if (ec.entity.find(bookPartyEntity).condition(newVal.getPrimaryKeys()).one() == null) newVal.create()
+                    }
+                    row.delete()
+                    bookCount++
+                }
+                bookCount += moveKeyed("mantle.party.contact.ContactBookGroupParty", "partyId")
+                if (bookCount) ec.message.addMessage(`Moved ${bookCount} Contact Book and group memberships from Party ${fromPartyId} to ${toPartyId}`)
+
+                // the generic record links and followers of the party record
+                linkCount = moveKeyed("mantle.party.communication.CommunicationEventRecord", "recordId", {recordEntityName: "mantle.party.Party"})
+                linkCount += moveKeyed("mantle.work.effort.WorkEffortRecord", "recordId", {recordEntityName: "mantle.party.Party"})
+                linkCount += moveKeyed("mantle.party.communication.RecordFollower", "recordId", {recordEntityName: "mantle.party.Party"})
+                if (linkCount) ec.message.addMessage(`Moved ${linkCount} record links and followers from Party ${fromPartyId} to ${toPartyId}`)
+
+                // PartyNotDuplicate: the from Party's decisions become the to Party's (the lower id first); one between the two is
+                // dropped, as they are now one party
+                for (const row of ec.entity.find("mantle.party.PartyNotDuplicate").condition(cf.makeCondition([
+                        cf.makeCondition("partyId", "equals", fromPartyId), cf.makeCondition("otherPartyId", "equals", fromPartyId)], "or")).list()) {
+                    const otherId = row.partyId === fromPartyId ? row.otherPartyId : row.partyId
+                    if (otherId !== toPartyId) {
+                        const [lowId, highId] = toPartyId < otherId ? [toPartyId, otherId] : [otherId, toPartyId]
+                        if (ec.entity.find("mantle.party.PartyNotDuplicate").condition("partyId", lowId).condition("otherPartyId", highId).one() == null) {
+                            ec.service.sync().name("create#mantle.party.PartyNotDuplicate").parameters({partyId: lowId, otherPartyId: highId,
+                                decidedByUserId: row.decidedByUserId, decidedDate: row.decidedDate, comments: row.comments}).call()
+                        }
+                    }
+                    row.delete()
+                }
             ]]></script>
 
             <!-- recheck to Party for duplicates -->
-            <service-call name="mantle.party.DuplicateServices.find#PartyDuplicates" in-map="[partyId:toPartyId]"/>
+            <service-call name="mantle.party.DuplicateServices.find#PartyDuplicates" in-map="{partyId:toPartyId}"/>
         </actions>
     </service>
 </services>

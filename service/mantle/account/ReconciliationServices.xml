@@ -31,30 +31,28 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
 
             <!-- types to ignore for Payment records (still match against AcctgTrans) -->
-            <set field="ignoreTypeSet" from="new HashSet(['INT', 'DIV', 'FEE', 'SRVCHG'])"/>
+            <set field="ignoreTypeSet" from="['INT', 'DIV', 'FEE', 'SRVCHG']"/>
 
             <iterate list="bankAccountTransList" entry="bankAccountTrans">
-                <if condition="!bankAccountTrans.transAmount || !bankAccountTrans.postedDate"><continue/></if>
+                <if condition="bankAccountTrans.transAmount == null || toDecimal(bankAccountTrans.transAmount).isZero() || !bankAccountTrans.postedDate"><continue/></if>
+                <set field="transAmount" from="toDecimal(bankAccountTrans.transAmount)"/>
+                <set field="absTransAmount" from="transAmount.compare(0) &lt; 0 ? transAmount.multiply(-1) : transAmount"/>
                 <set field="payment" from="null"/>
                 <set field="acctgTransAndEntry" from="null"/>
 
-                <script>
-                    Calendar lookBackCal = ec.user.nowCalendar
-                    lookBackCal.setTimeInMillis(bankAccountTrans.postedDate.time)
-                    lookBackCal.add(Calendar.DAY_OF_YEAR, -lookBackDays)
-                    lookBackTs = new java.sql.Timestamp(lookBackCal.getTimeInMillis())
-                </script>
+                <!-- look back lookBackDays days before the posted date; a timestamp in a script is epoch millis text -->
+                <set field="lookBackTs" from="String(Number(bankAccountTrans.postedDate) - lookBackDays * 86400000)"/>
 
 
                 <!-- find matching Payment, ignore certain transType values for payments -->
-                <if condition="!bankAccountTrans.paymentId &amp;&amp; !ignoreTypeSet.contains(bankAccountTrans.transType)">
+                <if condition="!bankAccountTrans.paymentId &amp;&amp; !ignoreTypeSet.includes(bankAccountTrans.transType)">
                     <!-- only look for Payments not yet reconciled -->
-                    <set field="findPmt" from="[reconcileStatusId:'PmtrNot']"/>
+                    <set field="findPmt" from="{reconcileStatusId:'PmtrNot'}"/>
 
                     <!-- if transType is DEBIT PaymentMethod.ownerPartyId is fromPartyId, if CREDIT then is toPartyId;
                         OR just look at sign of transAmount? (- fromPartyId, + toPartyId) -->
                     <!-- match against Payment.paymentMethodId or toPaymentMethodId -->
-                    <if condition="bankAccountTrans.transAmount &gt;= 0">
+                    <if condition="transAmount.compare(0) &gt;= 0">
                         <then>
                             <set field="findPmt.toPartyId" from="paymentMethod.ownerPartyId"/>
                             <set field="findPmt.toPaymentMethodId" from="paymentMethodId"/>
@@ -70,32 +68,32 @@ along with this software (see the LICENSE.md file). If not, see
                         <!-- TODO: what if we match on this and amounts differ... handle differently? -->
                         <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
                             <econdition-object field="findPmt"/>
-                            <econdition field-name="paymentRefNum" from="bankAccountTrans.checkNumber ?: bankAccountTrans.refNumber"/>
+                            <econdition field-name="paymentRefNum" from="bankAccountTrans.checkNumber || bankAccountTrans.refNumber"/>
                         </entity-find>
-                        <set field="payment" from="paymentList ? paymentList[0] : null"/>
+                        <set field="payment" from="paymentList?.length ? paymentList[0] : null"/>
                     </if>
 
                     <!-- otherwise match against transAmount, postedDate (within X number of days after Payment.effectiveDate?) -->
                     <if condition="!payment">
                         <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
                             <econdition-object field="findPmt"/>
-                            <econdition field-name="amount" from="bankAccountTrans.transAmount.abs()"/>
+                            <econdition field-name="amount" from="absTransAmount"/>
                             <econdition field-name="amountUomId" from="paymentMethod.currencyUomId" ignore-if-empty="true"/>
                             <econdition field-name="effectiveDate" operator="less-equals" from="bankAccountTrans.postedDate"/>
                             <econdition field-name="effectiveDate" operator="greater-equals" from="lookBackTs"/>
                         </entity-find>
-                        <set field="payment" from="paymentList ? paymentList[0] : null"/>
+                        <set field="payment" from="paymentList?.length ? paymentList[0] : null"/>
                     </if>
                     <!-- nothing found? match against originalCurrencyAmount, originalCurrencyUomId -->
                     <if condition="!payment &amp;&amp; paymentMethod.currencyUomId">
                         <entity-find entity-name="mantle.account.payment.Payment" list="paymentList">
                             <econdition-object field="findPmt"/>
-                            <econdition field-name="originalCurrencyAmount" from="bankAccountTrans.transAmount.abs()"/>
+                            <econdition field-name="originalCurrencyAmount" from="absTransAmount"/>
                             <econdition field-name="originalCurrencyUomId" from="paymentMethod.currencyUomId"/>
                             <econdition field-name="effectiveDate" operator="less-equals" from="bankAccountTrans.postedDate"/>
                             <econdition field-name="effectiveDate" operator="greater-equals" from="lookBackTs"/>
                         </entity-find>
-                        <set field="payment" from="paymentList ? paymentList[0] : null"/>
+                        <set field="payment" from="paymentList?.length ? paymentList[0] : null"/>
                     </if>
                 </if>
                 <if condition="!bankAccountTrans.acctgTransId &amp;&amp; paymentMethod.glAccountId">
@@ -103,7 +101,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- look for AcctgTransEntry.reconcileStatusId=AterNot -->
 
                     <!-- if transAmount positive debitCreditFlag=D, else debitCreditFlag=C -->
-                    <set field="debitCreditFlag" from="bankAccountTrans.transAmount &gt;= 0 ? 'D' : 'C'"/>
+                    <set field="debitCreditFlag" from="transAmount.compare(0) &gt;= 0 ? 'D' : 'C'"/>
 
                     <!-- if we have a paymentId, look up AcctgTrans by paymentId -->
                     <if condition="payment">
@@ -113,7 +111,7 @@ along with this software (see the LICENSE.md file). If not, see
                             <econdition field-name="debitCreditFlag"/>
                             <econdition field-name="paymentId" from="payment.paymentId"/>
                         </entity-find>
-                        <set field="acctgTransAndEntry" from="ataeList ? ataeList[0] : null"/>
+                        <set field="acctgTransAndEntry" from="ataeList?.length ? ataeList[0] : null"/>
                     </if>
                     <!-- otherwise match against transAmount, postedDate (within X number of days after AcctgTrans.transactionDate?) -->
                     <!-- look for abs of transAmount -->
@@ -123,12 +121,12 @@ along with this software (see the LICENSE.md file). If not, see
                             <econdition field-name="reconcileStatusId" value="AterNot" or-null="true"/>
                             <econdition field-name="debitCreditFlag"/>
 
-                            <econdition field-name="amount" from="bankAccountTrans.transAmount.abs()"/>
+                            <econdition field-name="amount" from="absTransAmount"/>
                             <econdition field-name="amountUomId" from="paymentMethod.currencyUomId" ignore-if-empty="true"/>
                             <econdition field-name="transactionDate" operator="less-equals" from="bankAccountTrans.postedDate"/>
                             <econdition field-name="transactionDate" operator="greater-equals" from="lookBackTs"/>
                         </entity-find>
-                        <set field="acctgTransAndEntry" from="ataeList ? ataeList[0] : null"/>
+                        <set field="acctgTransAndEntry" from="ataeList?.length ? ataeList[0] : null"/>
                     </if>
                     <!-- nothing found? match against originalCurrencyAmount, originalCurrencyUomId -->
                     <if condition="!acctgTransAndEntry &amp;&amp; paymentMethod.currencyUomId">
@@ -137,20 +135,20 @@ along with this software (see the LICENSE.md file). If not, see
                             <econdition field-name="reconcileStatusId" value="AterNot" or-null="true"/>
                             <econdition field-name="debitCreditFlag"/>
 
-                            <econdition field-name="originalCurrencyAmount" from="bankAccountTrans.transAmount.abs()"/>
+                            <econdition field-name="originalCurrencyAmount" from="absTransAmount"/>
                             <econdition field-name="originalCurrencyUomId" from="paymentMethod.currencyUomId"/>
                             <econdition field-name="transactionDate" operator="less-equals" from="bankAccountTrans.postedDate"/>
                             <econdition field-name="transactionDate" operator="greater-equals" from="lookBackTs"/>
                         </entity-find>
-                        <set field="acctgTransAndEntry" from="ataeList ? ataeList[0] : null"/>
+                        <set field="acctgTransAndEntry" from="ataeList?.length ? ataeList[0] : null"/>
                     </if>
                 </if>
                 <if condition="payment || acctgTransAndEntry">
                     <service-call name="mantle.account.ReconciliationServices.reconcile#PaymentMethodTrans"
-                            in-map="[paymentMethodId:paymentMethodId, fitId:bankAccountTrans.fitId,
+                            in-map="{paymentMethodId:paymentMethodId, fitId:bankAccountTrans.fitId,
                                 bankAccountTrans:bankAccountTrans, paymentId:payment?.paymentId, payment:payment,
                                 acctgTransId:acctgTransAndEntry?.acctgTransId,
-                                acctgTransEntrySeqId:acctgTransAndEntry?.acctgTransEntrySeqId, acctgTransEntry:acctgTransEntry]"/>
+                                acctgTransEntrySeqId:acctgTransAndEntry?.acctgTransEntrySeqId}"/>
                 </if>
             </iterate>
         </actions>
@@ -167,8 +165,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="fitId" from="ec.entity.sequencedIdPrimary('mantle.account.method.PaymentMethodTrans.' + paymentMethodId, 1, 10)"/></if>
 
             <!-- update everything except paymentId, acctgTransId, acctgTransEntrySeqId -->
-            <set field="createMap" from="new HashMap(context)"/>
-            <script>createMap.remove("paymentId"); createMap.remove("acctgTransId"); createMap.remove("acctgTransEntrySeqId"); createMap.remove("noReconcile")</script>
+            <set field="createMap" from="Object.assign({}, context)"/>
+            <script>delete createMap.paymentId; delete createMap.acctgTransId; delete createMap.acctgTransEntrySeqId; delete createMap.noReconcile</script>
             <service-call name="create#mantle.account.method.PaymentMethodTrans" in-map="createMap"/>
 
             <!-- call reconcile service to update payment and acctgTrans/Entry -->
@@ -185,8 +183,8 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <!-- update everything except paymentId, acctgTransId, acctgTransEntrySeqId -->
-            <set field="updateMap" from="new HashMap(context)"/>
-            <script>updateMap.remove("paymentId"); updateMap.remove("acctgTransId"); updateMap.remove("acctgTransEntrySeqId"); updateMap.remove("noReconcile")</script>
+            <set field="updateMap" from="Object.assign({}, context)"/>
+            <script>delete updateMap.paymentId; delete updateMap.acctgTransId; delete updateMap.acctgTransEntrySeqId; delete updateMap.noReconcile</script>
             <service-call name="update#mantle.account.method.PaymentMethodTrans" in-map="updateMap"/>
 
             <!-- call reconcile service to update payment and acctgTrans/Entry -->
@@ -286,7 +284,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <econdition field-name="reversedByAcctgTransId" from="null"/>
                         <econdition field-name="reverseOfAcctgTransId" from="null"/>
                     </entity-find>
-                    <if condition="existingTransList"><set field="acctgTransId" from="existingTransList[0].acctgTransId"/></if>
+                    <if condition="(existingTransList?.length > 0)"><set field="acctgTransId" from="existingTransList[0].acctgTransId"/></if>
                 </if>
             </if>
 
@@ -298,7 +296,7 @@ along with this software (see the LICENSE.md file). If not, see
                         <econdition field-name="glAccountId" from="paymentMethod.glAccountId"/>
                         <order-by field-name="acctgTransEntrySeqId"/>
                     </entity-find>
-                    <if condition="ateList">
+                    <if condition="(ateList?.length > 0)">
                         <set field="acctgTransEntry" from="ateList[0]"/>
                         <set field="acctgTransEntrySeqId" from="acctgTransEntry.acctgTransEntrySeqId"/>
                     </if>
@@ -386,7 +384,7 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
             <iterate list="existingTransList" entry="existingTrans">
                 <service-call name="mantle.account.ReconciliationServices.unreconcile#PaymentMethodTrans"
-                        in-map="[paymentMethodId:existingTrans.paymentMethodId, fitId:existingTrans.fitId]"/>
+                        in-map="{paymentMethodId:existingTrans.paymentMethodId, fitId:existingTrans.fitId}"/>
             </iterate>
         </actions>
     </service>

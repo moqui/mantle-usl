@@ -1,0 +1,1507 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<!-- The reports of IronStone Projects (design-projects.md §11 Reports, §15 Reports services; impl-projects.md P4a for the sprint
+    reports, P9 for the rest). A sprint's numbers are in its project's estimate unit (WstEstimateUnit): story points
+    (estimatedPoints), or hours (estimatedWorkTime for the size of an item, remainingWorkTime, else the estimate, for what is
+    left of it). The history comes from the WeatSprint memberships' from and thru dates and the audit log of the items'
+    statusId, estimatedPoints, estimatedWorkTime and remainingWorkTime: a value at a time is the last one logged by then, else
+    the first logged after it (its old value, else its new one), else the item's value now. Done is Complete or Closed;
+    a cancelled item is left nothing to do but is not counted as completed. -->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="get" noun="SprintBurndown">
+        <description>
+            A sprint's burndown and numbers (SprintDetail, the sprint report, get#SprintVelocity). committed: the size of the
+            items in it when it started (for a planned sprint, of those in it now); added and removed: the size of the items put
+            in or taken out after the start (scopeChangeList: each change with the item, when and by whom, from the audit rows
+            TaskServices.set#TaskSprint writes); completed: the size of its items done when it completed (else now); remaining:
+            what is left of its items not done; carriedOver: the size of the items still open when it completed, which went to
+            another sprint or the backlog. dayList (withDays): a first point at the start, then one per day from the start day
+            through the end day (or the completion day when later) with the remaining work at the end of that day (null for a day
+            still to come) and the ideal line from the remaining at the start down to 0 on the end day by working days (Monday to
+            Friday). daysLeft: the working days from today through the end day while in progress. itemList: each item it has had,
+            with its size and what became of it.
+        </description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="withDays" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="sprint" type="Map"/>
+            <parameter name="estimateUnit"/>
+            <parameter name="capacity" type="BigDecimal"/>
+            <parameter name="committed" type="BigDecimal"/>
+            <parameter name="added" type="BigDecimal"/>
+            <parameter name="removed" type="BigDecimal"/>
+            <parameter name="completed" type="BigDecimal"/>
+            <parameter name="remaining" type="BigDecimal"/>
+            <parameter name="carriedOver" type="BigDecimal"/>
+            <parameter name="itemCount" type="Integer"/>
+            <parameter name="doneCount" type="Integer"/>
+            <parameter name="daysLeft" type="Integer"/>
+            <parameter name="workDays" type="Integer"/>
+            <parameter name="dayList" type="List"/>
+            <parameter name="itemList" type="List"/>
+            <parameter name="scopeChangeList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            dayList = []; itemList = []; scopeChangeList = []
+            committed = 0; added = 0; removed = 0; completed = 0; remaining = 0; carriedOver = 0; itemCount = 0; doneCount = 0; daysLeft = 0; workDays = 0
+            const row = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (row == null || row.workEffortTypeEnumId !== 'WetSprint') { ec.message.addError(ec.resource.expand('Sprint ${workEffortId} not found', '', {workEffortId})); return }
+            // only for one who sees its project and is no client contact, sprints being the team's (impl-projects.md F111); an
+            // internal caller (authorization disabled) is not checked
+            if (!ec.artifactExecution.authzDisabled()) {
+                const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+                if (vis.isClient || !(vis.allProjects || Array.from(vis.visibleProjectIds || []).includes(row.rootWorkEffortId))) {
+                    ec.message.addError(ec.resource.expand('Sprint ${workEffortId} not found', '', {workEffortId})); return
+                }
+            }
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                const text = String(value)
+                if (/^-?\d+$/.test(text)) return Number(text)
+                const parsed = Date.parse(text)
+                return Number.isNaN(parsed) ? null : parsed
+            }
+            const num = (value) => value == null || value === '' ? null : Number(String(value))
+            const round = (value) => Math.round(value * 100) / 100
+            const settings = ec.service.sync().name('mantle.work.ProjectServices.get#ProjectSettings').parameters({workEffortId: row.rootWorkEffortId}).call()?.settings || {}
+            estimateUnit = settings.WstEstimateUnit === 'points' ? 'points' : 'hours'
+            const points = estimateUnit === 'points'
+            capacity = num(points ? row.estimatedPoints : row.totalTimeAllowed)
+            const statusId = row.statusId
+            const started = !['WeInPlanning', 'WeApproved'].includes(statusId)
+            const closed = ['WeComplete', 'WeClosed'].includes(statusId)
+            const nowMs = toMillis(ec.user.nowTimestamp)
+            const startMs = started ? (toMillis(row.actualStartDate) ?? toMillis(row.estimatedStartDate)) : toMillis(row.estimatedStartDate)
+            const endMs = toMillis(row.estimatedCompletionDate)
+            const completionMs = closed ? (toMillis(row.actualCompletionDate) ?? endMs ?? nowMs) : null
+            // the time the actuals run to: the completion, or now; none for a planned sprint
+            const cutoff = !started ? null : (closed ? completionMs : nowMs)
+            sprint = {workEffortId: row.workEffortId, workEffortName: row.workEffortName || row.workEffortId, rootWorkEffortId: row.rootWorkEffortId,
+                statusId: statusId, description: row.description || null, estimatedStartDate: row.estimatedStartDate ?? null,
+                estimatedCompletionDate: row.estimatedCompletionDate ?? null, actualStartDate: row.actualStartDate ?? null,
+                actualCompletionDate: row.actualCompletionDate ?? null, started: started, closed: closed}
+
+            const assocs = Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', workEffortId)
+                    .condition('workEffortAssocTypeEnumId', 'WeatSprint').orderBy('fromDate').list())
+                    .map((assoc) => ({toId: assoc.toWorkEffortId, from: toMillis(assoc.fromDate), thru: toMillis(assoc.thruDate)}))
+            const ids = Array.from(new Set(assocs.map((assoc) => assoc.toId)))
+            const items = {}
+            if (ids.length) for (const item of ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', 'in', ids).list()) items[item.workEffortId] = item
+            const fields = ['statusId', 'estimatedPoints', 'estimatedWorkTime', 'remainingWorkTime']
+            const history = {}
+            if (ids.length) for (const log of ec.entity.find('moqui.entity.EntityAuditLog').condition('changedEntityName', 'mantle.work.effort.WorkEffort')
+                    .condition('pkPrimaryValue', 'in', ids).condition('changedFieldName', 'in', fields).orderBy('changedDate').disableAuthz().list()) {
+                const key = log.pkPrimaryValue + '|' + log.changedFieldName
+                ;(history[key] || (history[key] = [])).push({at: toMillis(log.changedDate), oldValue: log.oldValueText ?? null, newValue: log.newValueText ?? null})
+            }
+            const valueAt = (id, field, at) => {
+                const rows = history[id + '|' + field]
+                if (at == null || !rows || !rows.length) return items[id]?.[field] ?? null
+                let found
+                for (const entry of rows) { if (entry.at <= at) found = entry; else break }
+                if (found) return found.newValue
+                return rows[0].oldValue ?? rows[0].newValue
+            }
+            const doneAt = (id, at) => ['WeComplete', 'WeClosed'].includes(valueAt(id, 'statusId', at))
+            const endedAt = (id, at) => ['WeComplete', 'WeClosed', 'WeCancelled'].includes(valueAt(id, 'statusId', at))
+            // an item's size (points, or its estimate in hours) and what is left of it (nothing when it is done or cancelled)
+            const sizeAt = (id, at) => num(valueAt(id, points ? 'estimatedPoints' : 'estimatedWorkTime', at)) || 0
+            const leftAt = (id, at) => endedAt(id, at) ? 0 : (points ? sizeAt(id, at) : (num(valueAt(id, 'remainingWorkTime', at)) ?? sizeAt(id, at)))
+            // carried over: still in the sprint when it completed, its membership ended then
+            const carried = (assoc) => completionMs != null && assoc.thru != null && assoc.thru >= completionMs
+            const memberAt = (assoc, at) => assoc.from <= at && (assoc.thru == null || assoc.thru > at || carried(assoc))
+            const membersAt = (at) => {
+                const seen = new Set()
+                return assocs.filter((assoc) => memberAt(assoc, at) && !seen.has(assoc.toId) && seen.add(assoc.toId))
+            }
+
+            if (started && startMs != null) {
+                for (const assoc of membersAt(startMs)) committed += sizeAt(assoc.toId, startMs)
+                for (const assoc of assocs) {
+                    if (assoc.from > startMs && assoc.from <= cutoff) added += sizeAt(assoc.toId, assoc.from)
+                    if (assoc.thru != null && assoc.thru > startMs && assoc.thru <= cutoff && !carried(assoc)) removed += sizeAt(assoc.toId, assoc.thru)
+                }
+            } else {
+                // planned: what is in it now
+                for (const assoc of assocs) if (assoc.thru == null) committed += sizeAt(assoc.toId, null)
+            }
+            const atCut = cutoff != null ? cutoff : nowMs
+            const members = assocs.filter((assoc) => memberAt(assoc, atCut) && (cutoff != null || assoc.thru == null))
+            const seenNow = new Set()
+            for (const assoc of members) {
+                if (seenNow.has(assoc.toId)) continue
+                seenNow.add(assoc.toId)
+                itemCount++
+                if (doneAt(assoc.toId, atCut)) { doneCount++; completed += sizeAt(assoc.toId, atCut) }
+                remaining += leftAt(assoc.toId, atCut)
+                if (carried(assoc) && !endedAt(assoc.toId, completionMs)) carriedOver += sizeAt(assoc.toId, completionMs)
+            }
+
+            // each item it has had
+            const kind = (assoc) => carried(assoc) ? (endedAt(assoc.toId, completionMs) ? 'done' : 'carried') : assoc.thru != null && (cutoff == null || assoc.thru <= cutoff) ? 'removed'
+                    : (endedAt(assoc.toId, atCut) ? (doneAt(assoc.toId, atCut) ? 'done' : 'cancelled') : 'open')
+            for (const assoc of assocs) {
+                const item = items[assoc.toId]
+                if (!item) continue
+                itemList.push({workEffortId: assoc.toId, workEffortName: item.workEffortName || assoc.toId, statusId: item.statusId || null,
+                    size: round(sizeAt(assoc.toId, assoc.thru != null ? assoc.thru : atCut)), outcome: kind(assoc),
+                    addedAfterStart: started && startMs != null && assoc.from > startMs, fromDate: assoc.from, thruDate: assoc.thru})
+            }
+
+            // the scope changes after the start, with who made them (the audit rows of set#TaskSprint)
+            if (started && startMs != null) {
+                const audits = Array.from(ec.entity.find('moqui.entity.EntityAuditLog').condition('changedEntityName', 'mantle.work.effort.WorkEffortAssoc')
+                        .condition('pkPrimaryValue', workEffortId).condition('changedFieldName', 'in', ['fromDate', 'thruDate']).disableAuthz().list())
+                        .map((log) => ({toId: log.pkSecondaryValue, field: log.changedFieldName, at: toMillis(log.changedDate), userId: log.changedByUserId || null}))
+                const userNames = {}
+                const byOf = (toId, field, at) => {
+                    const near = audits.filter((log) => log.toId === toId && log.field === field && Math.abs(log.at - at) <= 60000)
+                            .sort((left, right) => Math.abs(left.at - at) - Math.abs(right.at - at))[0]
+                    if (!near || !near.userId) return {userId: null, userName: null}
+                    if (userNames[near.userId] === undefined) {
+                        const account = ec.entity.find('moqui.security.UserAccount').condition('userId', near.userId).disableAuthz().one()
+                        userNames[near.userId] = account ? (account.userFullName || account.username || near.userId) : near.userId
+                    }
+                    return {userId: near.userId, userName: userNames[near.userId]}
+                }
+                for (const assoc of assocs) {
+                    const name = items[assoc.toId]?.workEffortName || assoc.toId
+                    if (assoc.from > startMs && assoc.from <= cutoff)
+                        scopeChangeList.push(Object.assign({workEffortId: assoc.toId, workEffortName: name, change: 'added', changedDate: assoc.from,
+                            size: round(sizeAt(assoc.toId, assoc.from))}, byOf(assoc.toId, 'fromDate', assoc.from)))
+                    if (assoc.thru != null && assoc.thru > startMs && assoc.thru <= cutoff && !carried(assoc))
+                        scopeChangeList.push(Object.assign({workEffortId: assoc.toId, workEffortName: name, change: 'removed', changedDate: assoc.thru,
+                            size: round(sizeAt(assoc.toId, assoc.thru))}, byOf(assoc.toId, 'thruDate', assoc.thru)))
+                }
+                scopeChangeList.sort((left, right) => left.changedDate - right.changedDate || String(left.workEffortId).localeCompare(String(right.workEffortId)))
+            }
+
+            // the days, by the days of the user's time zone
+            const dayText = (millis) => ec.l10n.format(String(millis), 'yyyy-MM-dd')
+            const dayStart = (text) => toMillis(ec.l10n.parseTimestamp(text + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'))
+            const addDays = (text, days) => { const d = new Date(text + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().substring(0, 10) }
+            const workday = (text) => { const day = new Date(text + 'T12:00:00Z').getUTCDay(); return day !== 0 && day !== 6 }
+            if (startMs != null && endMs != null) {
+                const firstDay = dayText(startMs)
+                const endDay = dayText(endMs)
+                let lastDay = endDay
+                if (completionMs != null && dayText(completionMs) > lastDay) lastDay = dayText(completionMs)
+                const days = []
+                for (let day = firstDay, guard = 0; day <= lastDay && guard < 400; day = addDays(day, 1), guard++) days.push(day)
+                workDays = days.filter((day) => day <= endDay && workday(day)).length
+                if (statusId === 'WeInProgress') {
+                    const today = dayText(nowMs)
+                    daysLeft = days.filter((day) => day >= today && day <= endDay && workday(day)).length
+                } else if (!started) daysLeft = workDays
+                if (withDays) {
+                    // the ideal starts from what was left at the start (a planned sprint: its committed size)
+                    let startLeft = committed
+                    if (started) { startLeft = 0; for (const assoc of membersAt(startMs)) startLeft += leftAt(assoc.toId, startMs) }
+                    const leftOn = (at) => { let sum = 0; for (const assoc of membersAt(at)) sum += leftAt(assoc.toId, at); return round(sum) }
+                    dayList.push({day: firstDay, start: true, remaining: started ? round(startLeft) : null, ideal: round(startLeft)})
+                    days.forEach((day) => {
+                        const after = days.filter((other) => other > day && other <= endDay && workday(other)).length
+                        const ideal = workDays ? round(startLeft * after / workDays) : 0
+                        const dayEnd = dayStart(addDays(day, 1)) - 1
+                        let left = null
+                        if (cutoff != null && dayStart(day) <= cutoff) left = leftOn(Math.min(dayEnd, cutoff))
+                        dayList.push({day: day, start: false, remaining: left, ideal: day > endDay ? 0 : ideal, workday: workday(day)})
+                    })
+                }
+            }
+            committed = round(committed); added = round(added); removed = round(removed); completed = round(completed)
+            remaining = round(remaining); carriedOver = round(carriedOver)
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="SprintVelocity">
+        <description>The velocity of a project's last sprints (sprintCount, the latest first; the sprint report, SprintDetail):
+            each completed sprint's committed, added, removed, completed and carried-over size in the project's estimate unit
+            (get#SprintBurndown), with the active ones too when includeActive; averageCompleted over the completed ones. A
+            sprint whose numbers fail is logged and left out. Nothing for a user who does not see the project or is a client
+            contact (impl-projects.md F111).</description>
+        <in-parameters>
+            <parameter name="rootWorkEffortId" required="true"/>
+            <parameter name="sprintCount" type="Integer" default="6"/>
+            <parameter name="includeActive" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="estimateUnit"/>
+            <parameter name="sprintList" type="List"/>
+            <parameter name="averageCompleted" type="BigDecimal"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            sprintList = []; averageCompleted = null
+            // only for one who sees the project and is no client contact (impl-projects.md F111); an internal caller (authorization
+            // disabled) is not checked
+            if (!ec.artifactExecution.authzDisabled()) {
+                const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+                if (vis.isClient || !(vis.allProjects || Array.from(vis.visibleProjectIds || []).includes(rootWorkEffortId))) return
+            }
+            const settings = ec.service.sync().name('mantle.work.ProjectServices.get#ProjectSettings').parameters({workEffortId: rootWorkEffortId}).call()?.settings || {}
+            estimateUnit = settings.WstEstimateUnit === 'points' ? 'points' : 'hours'
+            const statuses = ['WeComplete', 'WeClosed'].concat(includeActive ? ['WeInProgress'] : [])
+            const rows = Array.from(ec.entity.find('mantle.work.effort.WorkEffort').condition('rootWorkEffortId', rootWorkEffortId)
+                    .condition('workEffortTypeEnumId', 'WetSprint').condition('statusId', 'in', statuses)
+                    .orderBy('-actualCompletionDate').orderBy('-actualStartDate').limit(Math.max(1, Math.min(Number(sprintCount) || 6, 50))).list())
+            let sum = 0, count = 0
+            for (const row of rows) {
+                try {
+                    ec.message.pushErrors()
+                    const out = ec.service.sync().name('mantle.work.ProjectReportServices.get#SprintBurndown').parameters({workEffortId: row.workEffortId, withDays: false}).call() || {}
+                    if (ec.message.hasError()) { ec.logger.error(`Sprint velocity of ${rootWorkEffortId}: ${row.workEffortId} left out: ${ec.message.getErrorsString()}`); continue }
+                    sprintList.push({workEffortId: row.workEffortId, workEffortName: row.workEffortName || row.workEffortId, statusId: row.statusId,
+                        actualStartDate: row.actualStartDate ?? null, actualCompletionDate: row.actualCompletionDate ?? null, capacity: out.capacity ?? null,
+                        committed: out.committed, added: out.added, removed: out.removed, completed: out.completed, carriedOver: out.carriedOver})
+                    if (row.statusId !== 'WeInProgress') { sum += Number(String(out.completed || 0)); count++ }
+                } catch (err) {
+                    ec.logger.error(`Sprint velocity of ${rootWorkEffortId}: ${row.workEffortId} left out: ${err && err.message ? err.message : err}`)
+                } finally {
+                    ec.message.clearErrors()
+                    ec.message.popErrors()
+                }
+            }
+            if (count) averageCompleted = Math.round(sum / count * 100) / 100
+        ]]></script></actions>
+    </service>
+
+    <!-- ===== P9: the reports of design-projects.md §11. Each reads only what the user may: the projects the user sees
+        (get#VisibleProjectInfo, impl-projects.md F1; templates left out), time by the rule of TimeServices.find#TimeEntries, and money
+        (amounts, rates, budgets in currency, cost, value, billed, margin) only for those who manage money (ADMIN and holders of
+        TIME_ENTRY_RATE). Each measure, row and chart part is computed on its own: one that fails is logged by name and left out. -->
+
+    <service verb="get" noun="ReportScope">
+        <description>What the reports may read for the current user: the projects (allProjects for ADMIN, else visibleProjectIds,
+            managedProjectIds and restrictedItemIds of get#VisibleProjectInfo), whose time (seesAllTime for ADMIN and, when the user's
+            timesheet policy has approvers any, TIMESHEET_APPROVE holders; else timePartyIds: the user and those the user is the line
+            manager of, PrtManager, beside the time on managedProjectIds) and money (moneyShown: ADMIN or TIME_ENTRY_RATE).</description>
+        <out-parameters>
+            <parameter name="allProjects" type="Boolean"/>
+            <parameter name="userPartyId"/>
+            <parameter name="visibleProjectIds" type="List"/>
+            <parameter name="managedProjectIds" type="List"/>
+            <parameter name="restrictedItemIds" type="List"/>
+            <parameter name="seesAllTime" type="Boolean"/>
+            <parameter name="timePartyIds" type="List"/>
+            <parameter name="moneyShown" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+            allProjects = !!vis.allProjects
+            userPartyId = vis.userPartyId || null
+            visibleProjectIds = Array.from(vis.visibleProjectIds || [])
+            managedProjectIds = Array.from(vis.managedProjectIds || [])
+            restrictedItemIds = Array.from(vis.restrictedItemIds || [])
+            const isAdmin = !!ec.user.userId && ec.user.isInGroup('ADMIN')
+            moneyShown = !!ec.user.userId && (isAdmin || ec.user.hasPermission('TIME_ENTRY_RATE'))
+            timePartyIds = []
+            seesAllTime = isAdmin
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                if (!isAdmin && ec.user.hasPermission('TIMESHEET_APPROVE')) seesAllTime = ec.service.sync().name('mantle.work.TimesheetServices.get#TimesheetPolicy')
+                        .call()?.policy?.approvers === 'any'
+                ec.message.clearErrors()
+                if (userPartyId) {
+                    timePartyIds.push(userPartyId)
+                    for (const row of ec.entity.find('mantle.party.PartyRelationship').condition('relationshipTypeEnumId', 'PrtManager')
+                            .condition('fromPartyId', userPartyId).conditionDate('fromDate', 'thruDate', null).list())
+                        if (!timePartyIds.includes(row.toPartyId)) timePartyIds.push(row.toPartyId)
+                }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="TimeReport">
+        <description>
+            Time by up to three criteria and a period (design-projects.md §11 TimeReport, §3 Home's Hours by project). The entries whose
+            fromDate is from fromDate through thruDate (days in the user's time zone; default the last four weeks to today) that the
+            user may see (get#ReportScope: the user's own and their reports' time, the time on the projects they manage, everyone's for
+            ADMIN and an any-approver; always within the projects the user sees, time on no project only by the person rule), narrowed
+            by rootWorkEffortId (the project and its items), workEffortId (an item and its subtree), partyId, workTypeEnumId,
+            clientPartyId (the entry's client, else its project's Customer) and billable (Y or N: rate type not RatpNoCharge, or it).
+
+            criteria (a list or comma text, in order, at most three; default project) of project, topItem (the item's top-level
+            ancestor; the project itself for time on the project), parent (the item's parent), workItem, person, workType, client,
+            billable. period: week (Monday weeks), month or none.
+
+            periodList [{key, label, fromDay, thruDay}]; rowList, one per combination of the criteria, sorted by their labels: {key,
+            values [{criterion, id, label}], periodHours (hours of each period in order), hours, billableHours, nonBillableHours, and
+            amount (the billable hours at the client rate: the entry's clientHourRate, else its RateAmount's; to the cent per entry)
+            when amountsShown}; totals {periodHours, hours, billableHours, nonBillableHours, entryCount, amount, missingRateCount,
+            currencyUomId, mixedCurrency}; chart {labels (the periods), series [{name, data}] by the first criterion (the eight
+            largest, the rest as Other)}. amountsShown: withAmounts and the user manages money. An item the user may not see
+            (Restricted or Confidential, not theirs, of a project they do not manage) is labeled Restricted item. truncated when more
+            than 50000 entries matched (the first 50000 counted).
+        </description>
+        <in-parameters>
+            <parameter name="fromDate"/>
+            <parameter name="thruDate"/>
+            <parameter name="period" default-value="week"/>
+            <parameter name="criteria" type="Object"/>
+            <parameter name="rootWorkEffortId"/>
+            <parameter name="workEffortId"/>
+            <parameter name="partyId"/>
+            <parameter name="workTypeEnumId"/>
+            <parameter name="clientPartyId"/>
+            <parameter name="billable"/>
+            <parameter name="withAmounts" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fromDay"/>
+            <parameter name="thruDay"/>
+            <parameter name="criteriaList" type="List"/>
+            <parameter name="periodList" type="List"/>
+            <parameter name="rowList" type="List"/>
+            <parameter name="totals" type="Map"/>
+            <parameter name="chart" type="Map"/>
+            <parameter name="amountsShown" type="Boolean"/>
+            <parameter name="truncated" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const cf = ec.entity.conditionFactory
+            const round = (value) => Math.round(value * 100) / 100
+            const num = (value) => value == null || value === '' ? null : Number(String(value))
+            const dayNum = (text) => Math.floor(Date.parse(String(text).slice(0, 10) + 'T00:00:00Z') / 86400000)
+            const dayText = (n) => new Date(n * 86400000).toISOString().slice(0, 10)
+            const isoDayOf = (text) => { const js = new Date(String(text).slice(0, 10) + 'T12:00:00Z').getUTCDay(); return js === 0 ? 7 : js }
+            const dayOf = (value) => {
+                if (value == null || value === '') return null
+                const text = String(value)
+                if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10)
+                return ec.l10n.format(/^-?\d+$/.test(text) ? text : value, 'yyyy-MM-dd')
+            }
+            const stampOf = (day) => ec.l10n.parseTimestamp(day + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')
+            const labelOfDay = (day, pattern) => ec.l10n.format(ec.l10n.parseTimestamp(day + ' 12:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'), pattern)
+            const allowed = ['project', 'topItem', 'parent', 'workItem', 'person', 'workType', 'client', 'billable']
+            const asked = criteria == null ? [] : (typeof criteria === 'string' ? String(criteria).split(',') : Array.from(criteria)).map((one) => String(one || '').trim())
+            criteriaList = []
+            for (const one of asked) if (allowed.includes(one) && !criteriaList.includes(one) && criteriaList.length < 3) criteriaList.push(one)
+            if (!criteriaList.length) criteriaList.push('project')
+            const today = ec.l10n.format(ec.user.nowTimestamp, 'yyyy-MM-dd')
+            thruDay = dayOf(thruDate) || today
+            fromDay = dayOf(fromDate) || dayText(dayNum(thruDay) - 27)
+            if (fromDay > thruDay) { const swap = fromDay; fromDay = thruDay; thruDay = swap }
+            if (dayNum(thruDay) - dayNum(fromDay) > 3660) fromDay = dayText(dayNum(thruDay) - 3660)
+            const mode = ['week', 'month', 'none'].includes(period) ? period : 'week'
+            // the periods
+            periodList = []
+            if (mode === 'week') {
+                for (let start = dayNum(fromDay) - (isoDayOf(fromDay) - 1); start <= dayNum(thruDay); start += 7) {
+                    const key = dayText(start)
+                    periodList.push({key: key, label: labelOfDay(key, 'MMM d'), fromDay: key, thruDay: dayText(start + 6)})
+                }
+            } else if (mode === 'month') {
+                let month = fromDay.slice(0, 7)
+                while (month <= thruDay.slice(0, 7) && periodList.length < 130) {
+                    const first = month + '-01'
+                    const next = new Date(first + 'T12:00:00Z'); next.setUTCMonth(next.getUTCMonth() + 1)
+                    const nextFirst = next.toISOString().slice(0, 10)
+                    periodList.push({key: month, label: labelOfDay(first, 'MMM yyyy'), fromDay: first, thruDay: dayText(dayNum(nextFirst) - 1)})
+                    month = nextFirst.slice(0, 7)
+                }
+            } else periodList.push({key: 'all', label: L('Hours'), fromDay: fromDay, thruDay: thruDay})
+            const periodIndex = {}
+            periodList.forEach((one, i) => { periodIndex[one.key] = i })
+            const periodOf = (day) => mode === 'week' ? dayText(dayNum(day) - (isoDayOf(day) - 1)) : mode === 'month' ? day.slice(0, 7) : 'all'
+
+            rowList = []
+            totals = {periodHours: periodList.map(() => 0), hours: 0, billableHours: 0, nonBillableHours: 0, entryCount: 0, amount: null, missingRateCount: 0,
+                currencyUomId: null, mixedCurrency: false}
+            chart = {labels: periodList.map((one) => one.label), series: []}
+            truncated = false
+            const scope = ec.service.sync().name('mantle.work.ProjectReportServices.get#ReportScope').call() || {}
+            amountsShown = !!withAmounts && !!scope.moneyShown
+            if (amountsShown) totals.amount = 0
+            if (!scope.allProjects && !Array.from(scope.visibleProjectIds || []).length && !scope.userPartyId) return
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const visible = Array.from(scope.visibleProjectIds || [])
+                const managed = Array.from(scope.managedProjectIds || [])
+                const conds = [cf.makeCondition('fromDate', 'greater-equals', stampOf(fromDay)), cf.makeCondition('fromDate', 'less-than', stampOf(dayText(dayNum(thruDay) + 1)))]
+                if (!scope.allProjects) {
+                    const ids = visible.length ? visible : ['_NA_']
+                    conds.push(cf.makeCondition([cf.makeCondition('rootWorkEffortId', 'in', ids), cf.makeCondition('workEffortId', 'in', ids),
+                        cf.makeCondition('workEffortId', 'is-null', null)], 'or'))
+                }
+                if (!scope.seesAllTime) {
+                    const seen = [cf.makeCondition('partyId', 'in', Array.from(scope.timePartyIds || []).length ? Array.from(scope.timePartyIds) : ['_NA_'])]
+                    if (managed.length) { seen.push(cf.makeCondition('rootWorkEffortId', 'in', managed)); seen.push(cf.makeCondition('workEffortId', 'in', managed)) }
+                    conds.push(cf.makeCondition(seen, 'or'))
+                }
+                if (rootWorkEffortId) conds.push(cf.makeCondition([cf.makeCondition('rootWorkEffortId', 'equals', rootWorkEffortId),
+                    cf.makeCondition('workEffortId', 'equals', rootWorkEffortId)], 'or'))
+                if (workEffortId) {
+                    // the item and its subtree
+                    const item = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+                    const subtree = [workEffortId]
+                    if (item && item.workEffortTypeEnumId !== 'WetProject' && item.rootWorkEffortId) {
+                        const children = {}
+                        for (const row of ec.entity.find('mantle.work.effort.WorkEffort').condition('rootWorkEffortId', item.rootWorkEffortId)
+                                .condition('parentWorkEffortId', 'is-not-null', null).selectField('workEffortId').selectField('parentWorkEffortId').list())
+                            (children[row.parentWorkEffortId] || (children[row.parentWorkEffortId] = [])).push(row.workEffortId)
+                        for (let i = 0; i < subtree.length && subtree.length < 20000; i++) for (const child of children[subtree[i]] || []) subtree.push(child)
+                    }
+                    conds.push(cf.makeCondition('workEffortId', 'in', subtree))
+                }
+                if (partyId) conds.push(cf.makeCondition('partyId', 'equals', partyId))
+                if (workTypeEnumId) conds.push(cf.makeCondition('workTypeEnumId', 'equals', workTypeEnumId))
+                if (billable === 'Y') conds.push(cf.makeCondition('rateTypeEnumId', 'not-equals', 'RatpNoCharge', true))
+                if (billable === 'N') conds.push(cf.makeCondition('rateTypeEnumId', 'equals', 'RatpNoCharge'))
+                const entries = Array.from(ec.entity.find('mantle.work.time.TimeEntryAndWorkEffort').condition(cf.makeCondition(conds, 'and'))
+                        .selectField('timeEntryId').selectField('partyId').selectField('workEffortId').selectField('workEffortTypeEnumId')
+                        .selectField('rootWorkEffortId').selectField('parentWorkEffortId').selectField('fromDate').selectField('hours').selectField('rateTypeEnumId')
+                        .selectField('workTypeEnumId').selectField('clientPartyId').selectField('rateAmountId').selectField('clientHourRate')
+                        .orderBy('fromDate').orderBy('timeEntryId').limit(50001).list())
+                if (entries.length > 50000) { truncated = true; entries.length = 50000; ec.logger.warn('Time report: more than 50000 entries, the first 50000 counted') }
+
+                // names and the items' ancestry
+                const projectOf = (entry) => entry.workEffortTypeEnumId === 'WetProject' ? entry.workEffortId : (entry.rootWorkEffortId || null)
+                const efforts = {}
+                const loadEfforts = (ids) => {
+                    const missing = Array.from(new Set(ids.filter((id) => id && !(id in efforts))))
+                    for (let i = 0; i < missing.length; i += 1000) {
+                        for (const id of missing.slice(i, i + 1000)) efforts[id] = null
+                        for (const row of ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', 'in', missing.slice(i, i + 1000))
+                                .selectField('workEffortId').selectField('workEffortName').selectField('parentWorkEffortId').selectField('rootWorkEffortId')
+                                .selectField('workEffortTypeEnumId').selectField('visibilityEnumId').list()) efforts[row.workEffortId] = row
+                    }
+                }
+                loadEfforts(entries.map((entry) => entry.workEffortId).concat(entries.map(projectOf)))
+                if (criteriaList.includes('topItem')) {
+                    for (let guard = 0; guard < 30; guard++) {
+                        const parents = Object.values(efforts).filter((row) => row && row.parentWorkEffortId && !(row.parentWorkEffortId in efforts)).map((row) => row.parentWorkEffortId)
+                        if (!parents.length) break
+                        loadEfforts(parents)
+                    }
+                }
+                const restricted = new Set(Array.from(scope.restrictedItemIds || []))
+                const managedSet = new Set(managed)
+                const hidden = (row) => !scope.allProjects && row && ['WevRestricted', 'WevConfidential'].includes(row.visibilityEnumId)
+                        && !restricted.has(row.workEffortId) && !managedSet.has(row.rootWorkEffortId)
+                const itemLabel = (id) => {
+                    if (!id) return L('None')
+                    const row = efforts[id]
+                    if (hidden(row)) return L('Restricted item')
+                    return row ? id + ' ' + (row.workEffortName || '') : id
+                }
+                const topOf = (id) => {
+                    let row = efforts[id]
+                    for (let guard = 0; row && row.parentWorkEffortId && efforts[row.parentWorkEffortId] && guard < 40; guard++) row = efforts[row.parentWorkEffortId]
+                    return row ? row.workEffortId : id
+                }
+                const names = {}
+                const partyName = (id) => {
+                    if (!id) return L('None')
+                    if (!(id in names)) {
+                        const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', id).one()
+                        names[id] = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || party.pseudoId || id) : id
+                    }
+                    return names[id]
+                }
+                const clientOfProject = {}
+                const projectClient = (projectId) => {
+                    if (!projectId) return null
+                    if (!(projectId in clientOfProject)) clientOfProject[projectId] = Array.from(ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', projectId)
+                            .condition('roleTypeId', 'in', ['Customer', 'CustomerBillTo']).conditionDate('fromDate', 'thruDate', null).orderBy('fromDate').list())[0]?.partyId || null
+                    return clientOfProject[projectId]
+                }
+                const typeLabels = {}
+                for (const type of ec.entity.find('moqui.basic.Enumeration').condition('enumTypeId', 'WorkType').useCache(true).list()) typeLabels[type.enumId] = type.description || type.enumId
+                const valueOf = (criterion, entry) => {
+                    const project = projectOf(entry)
+                    const isItem = entry.workEffortId && entry.workEffortTypeEnumId !== 'WetProject'
+                    switch (criterion) {
+                        case 'project': return {id: project, label: project ? (efforts[project]?.workEffortName || project) + ' (' + project + ')' : L('No project')}
+                        case 'topItem': return isItem ? {id: topOf(entry.workEffortId), label: itemLabel(topOf(entry.workEffortId))} : {id: null, label: L('The project itself')}
+                        case 'parent': return isItem && entry.parentWorkEffortId ? {id: entry.parentWorkEffortId, label: itemLabel(entry.parentWorkEffortId)}
+                            : {id: null, label: isItem ? L('Top level') : L('The project itself')}
+                        case 'workItem': return isItem ? {id: entry.workEffortId, label: itemLabel(entry.workEffortId)} : {id: null, label: L('The project itself')}
+                        case 'person': return {id: entry.partyId, label: partyName(entry.partyId)}
+                        case 'workType': return {id: entry.workTypeEnumId || null, label: entry.workTypeEnumId ? (typeLabels[entry.workTypeEnumId] || entry.workTypeEnumId) : L('No work type')}
+                        case 'client': { const client = entry.clientPartyId || projectClient(project); return {id: client, label: client ? partyName(client) : L('No client')} }
+                        case 'billable': { const yes = entry.rateTypeEnumId !== 'RatpNoCharge'; return {id: yes ? 'Y' : 'N', label: yes ? L('Billable') : L('Not billable')} }
+                    }
+                    return {id: null, label: ''}
+                }
+                if (clientPartyId) {
+                    for (let i = entries.length - 1; i >= 0; i--) if ((entries[i].clientPartyId || projectClient(projectOf(entries[i]))) !== clientPartyId) entries.splice(i, 1)
+                }
+                const rates = {}
+                const rateOf = (entry) => {
+                    if (num(entry.clientHourRate) != null) return {amount: num(entry.clientHourRate), uom: null}
+                    if (!entry.rateAmountId) return null
+                    if (!(entry.rateAmountId in rates)) {
+                        const rate = ec.entity.find('mantle.humanres.rate.RateAmount').condition('rateAmountId', entry.rateAmountId).useCache(true).one()
+                        rates[entry.rateAmountId] = rate && rate.rateAmount != null ? {amount: num(rate.rateAmount), uom: rate.rateCurrencyUomId || null} : null
+                    }
+                    return rates[entry.rateAmountId]
+                }
+                const rows = {}
+                const currencies = new Set()
+                for (const entry of entries) {
+                    try {
+                        const day = ec.l10n.format(entry.fromDate, 'yyyy-MM-dd')
+                        const index = periodIndex[periodOf(day)]
+                        if (index == null) continue
+                        const hours = num(entry.hours) || 0
+                        const isBillable = entry.rateTypeEnumId !== 'RatpNoCharge'
+                        const values = criteriaList.map((criterion) => Object.assign({criterion: criterion}, valueOf(criterion, entry)))
+                        const key = values.map((value) => value.id == null ? '' : String(value.id)).join('|')
+                        const row = rows[key] || (rows[key] = {key: key, values: values, periodHours: periodList.map(() => 0), hours: 0, billableHours: 0, nonBillableHours: 0,
+                            amount: amountsShown ? 0 : undefined})
+                        row.periodHours[index] += hours
+                        row.hours += hours
+                        totals.periodHours[index] += hours
+                        totals.hours += hours
+                        totals.entryCount++
+                        if (isBillable) { row.billableHours += hours; totals.billableHours += hours } else { row.nonBillableHours += hours; totals.nonBillableHours += hours }
+                        if (amountsShown && isBillable) {
+                            const rate = rateOf(entry)
+                            if (rate == null) totals.missingRateCount++
+                            else {
+                                const amount = round(hours * rate.amount)
+                                row.amount += amount
+                                totals.amount += amount
+                                if (rate.uom) currencies.add(rate.uom)
+                            }
+                        }
+                    } catch (err) {
+                        ec.logger.error(`Time report: entry ${entry.timeEntryId} left out: ${err && err.message ? err.message : err}`)
+                    }
+                }
+                for (const row of Object.values(rows)) {
+                    row.periodHours = row.periodHours.map(round)
+                    row.hours = round(row.hours); row.billableHours = round(row.billableHours); row.nonBillableHours = round(row.nonBillableHours)
+                    if (amountsShown) row.amount = round(row.amount); else delete row.amount
+                    rowList.push(row)
+                }
+                rowList.sort((a, b) => {
+                    for (let i = 0; i < a.values.length; i++) {
+                        const diff = String(a.values[i].label).localeCompare(String(b.values[i].label))
+                        if (diff) return diff
+                    }
+                    return 0
+                })
+                totals.periodHours = totals.periodHours.map(round)
+                totals.hours = round(totals.hours); totals.billableHours = round(totals.billableHours); totals.nonBillableHours = round(totals.nonBillableHours)
+                if (amountsShown) {
+                    totals.amount = round(totals.amount)
+                    totals.mixedCurrency = currencies.size > 1
+                    totals.currencyUomId = currencies.size === 1 ? Array.from(currencies)[0] : (currencies.size ? null : 'USD')
+                }
+                // the chart: the first criterion's eight largest, the rest as Other
+                try {
+                    const byFirst = {}
+                    for (const row of rowList) {
+                        const first = row.values[0]
+                        const key = first.id == null ? '' : String(first.id)
+                        const series = byFirst[key] || (byFirst[key] = {name: first.label, id: first.id, data: periodList.map(() => 0), hours: 0})
+                        row.periodHours.forEach((hours, i) => { series.data[i] += hours })
+                        series.hours += row.hours
+                    }
+                    const sorted = Object.values(byFirst).sort((a, b) => b.hours - a.hours)
+                    const shown = sorted.slice(0, 8)
+                    if (sorted.length > 8) {
+                        const other = {name: L('Other'), id: null, data: periodList.map(() => 0), hours: 0}
+                        for (const series of sorted.slice(8)) { series.data.forEach((hours, i) => { other.data[i] += hours }); other.hours += series.hours }
+                        shown.push(other)
+                    }
+                    chart.series = shown.map((series) => ({name: series.name, id: series.id, data: series.data.map(round), hours: round(series.hours)}))
+                } catch (err) { ec.logger.error(`Time report: the chart left out: ${err && err.message ? err.message : err}`) }
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="WorkItemSummary">
+        <description>
+            Work item counts (design-projects.md §11 WorkItemReport) over the work items (WetTask) the user may see (get#VisibleProjectInfo:
+            of the projects the user sees, a Restricted or Confidential one only for its parties and its project's managers; template
+            projects left out), narrowed by rootWorkEffortId or rootWorkEffortIds and purposeEnumId (the type). The period is fromDate
+            through thruDate (days in the user's time zone; default the last twelve weeks to today).
+
+            counts: open (not Complete, Closed or Cancelled, now), created (made in the period: the first audit row of its statusId, else
+            its first party's fromDate), resolved (first reaching Complete or Closed in the period, by the audit log of statusId, else its
+            actualCompletionDate), overdue (open and due, estimatedCompletionDate, before today). weekList [{weekStart, label, created,
+            resolved}] by Monday weeks of the period. openByStatus and openByType [{id, label, count}].
+
+            rowList by groupBy (status, type, assignee: each assignee of the item, Unassigned when none; priority; component; project):
+            {groupId, groupLabel, statusCounts {statusId: count}, total, open, overdue, resolved (in the period), averageCycleDays}, the
+            counts over every item of the scope by its status now; statusList [{statusId, label}] the statuses in the rows, in flow
+            order; totals the same over all. Cycle time is the days from first entering In Progress to first reaching Complete or Closed
+            (the audit log of statusId), averaged over the items resolved in the period that went through In Progress (averageCycleDays
+            in totals). Each measure is computed on its own; one that fails is logged and left empty.
+        </description>
+        <in-parameters>
+            <parameter name="rootWorkEffortId"/>
+            <parameter name="rootWorkEffortIds" type="List"/>
+            <parameter name="purposeEnumId"/>
+            <parameter name="fromDate"/>
+            <parameter name="thruDate"/>
+            <parameter name="groupBy" default-value="status"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fromDay"/>
+            <parameter name="thruDay"/>
+            <parameter name="counts" type="Map"/>
+            <parameter name="weekList" type="List"/>
+            <parameter name="openByStatus" type="List"/>
+            <parameter name="openByType" type="List"/>
+            <parameter name="statusList" type="List"/>
+            <parameter name="rowList" type="List"/>
+            <parameter name="totals" type="Map"/>
+            <parameter name="itemCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const round = (value) => Math.round(value * 100) / 100
+            const dayNum = (text) => Math.floor(Date.parse(String(text).slice(0, 10) + 'T00:00:00Z') / 86400000)
+            const dayText = (n) => new Date(n * 86400000).toISOString().slice(0, 10)
+            const isoDayOf = (text) => { const js = new Date(String(text).slice(0, 10) + 'T12:00:00Z').getUTCDay(); return js === 0 ? 7 : js }
+            const dayOf = (value) => {
+                if (value == null || value === '') return null
+                const text = String(value)
+                if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10)
+                return ec.l10n.format(/^-?\d+$/.test(text) ? text : value, 'yyyy-MM-dd')
+            }
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                const text = String(value)
+                if (/^-?\d+$/.test(text)) return Number(text)
+                const parsed = Date.parse(text)
+                return Number.isNaN(parsed) ? null : parsed
+            }
+            const today = ec.l10n.format(ec.user.nowTimestamp, 'yyyy-MM-dd')
+            thruDay = dayOf(thruDate) || today
+            fromDay = dayOf(fromDate) || dayText(dayNum(thruDay) - 83)
+            if (fromDay > thruDay) { const swap = fromDay; fromDay = thruDay; thruDay = swap }
+            counts = {open: 0, created: 0, resolved: 0, overdue: 0}
+            weekList = []
+            for (let start = dayNum(fromDay) - (isoDayOf(fromDay) - 1); start <= dayNum(thruDay) && weekList.length < 160; start += 7) {
+                const key = dayText(start)
+                weekList.push({weekStart: key, label: ec.l10n.format(ec.l10n.parseTimestamp(key + ' 12:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'), 'MMM d'), created: 0, resolved: 0})
+            }
+            const weekIndex = {}
+            weekList.forEach((week, i) => { weekIndex[week.weekStart] = i })
+            const weekOf = (day) => dayText(dayNum(day) - (isoDayOf(day) - 1))
+            openByStatus = []; openByType = []; statusList = []; rowList = []; itemCount = 0
+            totals = {groupId: null, groupLabel: L('Total'), statusCounts: {}, total: 0, open: 0, overdue: 0, resolved: 0, averageCycleDays: null}
+            const done = ['WeComplete', 'WeClosed']
+            const ended = ['WeComplete', 'WeClosed', 'WeCancelled']
+            const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+            const all = !!vis.allProjects
+            const visible = Array.from(vis.visibleProjectIds || [])
+            const managed = new Set(Array.from(vis.managedProjectIds || []))
+            const restricted = new Set(Array.from(vis.restrictedItemIds || []))
+            let scopeIds = rootWorkEffortIds != null && Array.from(rootWorkEffortIds).length ? Array.from(rootWorkEffortIds).map(String) : (rootWorkEffortId ? [rootWorkEffortId] : null)
+            if (scopeIds && !all) scopeIds = scopeIds.filter((id) => visible.includes(id))
+            if (!scopeIds && !all) scopeIds = visible
+            if (scopeIds && !scopeIds.length) return
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                // the projects (templates left out)
+                let projectFind = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortTypeEnumId', 'WetProject')
+                if (scopeIds) projectFind = projectFind.condition('workEffortId', 'in', scopeIds)
+                const projects = {}
+                for (const row of projectFind.selectField('workEffortId').selectField('workEffortName').selectField('isTemplate').limit(5000).list())
+                    if (row.isTemplate !== 'Y') projects[row.workEffortId] = row.workEffortName || row.workEffortId
+                const projectIds = Object.keys(projects)
+                if (!projectIds.length) return
+                let itemFind = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortTypeEnumId', 'WetTask').condition('rootWorkEffortId', 'in', projectIds)
+                if (purposeEnumId) itemFind = itemFind.condition('purposeEnumId', purposeEnumId)
+                const items = Array.from(itemFind.selectField('workEffortId').selectField('rootWorkEffortId').selectField('statusId').selectField('purposeEnumId')
+                        .selectField('priority').selectField('visibilityEnumId').selectField('estimatedCompletionDate').selectField('actualCompletionDate').limit(50000).list())
+                        .filter((item) => all || !['WevRestricted', 'WevConfidential'].includes(item.visibilityEnumId) || managed.has(item.rootWorkEffortId) || restricted.has(item.workEffortId))
+                itemCount = items.length
+                if (!items.length) return
+                const ids = items.map((item) => item.workEffortId)
+                // the status history: first created, first In Progress, first done
+                const history = {}
+                try {
+                    for (let i = 0; i < ids.length; i += 1000) for (const log of ec.entity.find('moqui.entity.EntityAuditLog').condition('changedEntityName', 'mantle.work.effort.WorkEffort')
+                            .condition('pkPrimaryValue', 'in', ids.slice(i, i + 1000)).condition('changedFieldName', 'statusId').orderBy('changedDate')
+                            .selectField('pkPrimaryValue').selectField('oldValueText').selectField('newValueText').selectField('changedDate').list()) {
+                        const at = toMillis(log.changedDate)
+                        const one = history[log.pkPrimaryValue] || (history[log.pkPrimaryValue] = {created: null, started: null, resolved: null})
+                        if (one.created == null) one.created = at
+                        if (one.started == null && log.newValueText === 'WeInProgress') one.started = at
+                        if (one.resolved == null && done.includes(log.newValueText)) one.resolved = at
+                    }
+                } catch (err) { ec.logger.error(`Work item summary: the status history left out: ${err && err.message ? err.message : err}`) }
+                // items with no audit row: the first party's fromDate as the created time
+                const noHistory = ids.filter((id) => !history[id] || history[id].created == null)
+                const firstParty = {}
+                try {
+                    for (let i = 0; i < noHistory.length; i += 1000) for (const row of ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', 'in', noHistory.slice(i, i + 1000))
+                            .selectField('workEffortId').selectField('fromDate').list()) {
+                        const at = toMillis(row.fromDate)
+                        if (at != null && (firstParty[row.workEffortId] == null || at < firstParty[row.workEffortId])) firstParty[row.workEffortId] = at
+                    }
+                } catch (err) { ec.logger.error(`Work item summary: the parties' dates left out: ${err && err.message ? err.message : err}`) }
+                const dayOfMs = (ms) => ms == null ? null : ec.l10n.format(String(ms), 'yyyy-MM-dd')
+                // the grouping values
+                const enumLabels = {}
+                const enumText = (id) => {
+                    if (!id) return ''
+                    if (!(id in enumLabels)) enumLabels[id] = ec.entity.find('moqui.basic.Enumeration').condition('enumId', id).useCache(true).one()?.description || id
+                    return enumLabels[id]
+                }
+                const statusLabels = {}
+                const statusText = (id) => {
+                    if (!id) return ''
+                    if (!(id in statusLabels)) statusLabels[id] = ec.entity.find('moqui.basic.StatusItem').condition('statusId', id).useCache(true).one()?.description || id
+                    return statusLabels[id]
+                }
+                const statusOrder = {}
+                for (const row of ec.entity.find('moqui.basic.StatusItem').condition('statusTypeId', 'WorkEffort').useCache(true).list())
+                    statusOrder[row.statusId] = row.sequenceNum != null ? Number(String(row.sequenceNum)) : 999
+                const by = ['status', 'type', 'assignee', 'priority', 'component', 'project'].includes(groupBy) ? groupBy : 'status'
+                const groupsOf = {}
+                const groupLabels = {}
+                try {
+                    if (by === 'assignee') {
+                        const names = {}
+                        for (let i = 0; i < ids.length; i += 1000) for (const row of ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', 'in', ids.slice(i, i + 1000))
+                                .condition('roleTypeId', 'Assignee').conditionDate('fromDate', 'thruDate', null).selectField('workEffortId').selectField('partyId').list()) {
+                            const list = groupsOf[row.workEffortId] || (groupsOf[row.workEffortId] = [])
+                            if (!list.includes(row.partyId)) list.push(row.partyId)
+                            if (!(row.partyId in names)) {
+                                const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', row.partyId).one()
+                                names[row.partyId] = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || row.partyId) : row.partyId
+                            }
+                            groupLabels[row.partyId] = names[row.partyId]
+                        }
+                    } else if (by === 'component') {
+                        for (let i = 0; i < ids.length; i += 1000) for (const row of ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('toWorkEffortId', 'in', ids.slice(i, i + 1000))
+                                .condition('workEffortAssocTypeEnumId', 'WeatComponent').conditionDate('fromDate', 'thruDate', null).selectField('workEffortId').selectField('toWorkEffortId').list()) {
+                            const list = groupsOf[row.toWorkEffortId] || (groupsOf[row.toWorkEffortId] = [])
+                            if (!list.includes(row.workEffortId)) list.push(row.workEffortId)
+                        }
+                        const componentIds = Array.from(new Set(Object.values(groupsOf).flat()))
+                        if (componentIds.length) for (const row of ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', 'in', componentIds)
+                                .selectField('workEffortId').selectField('workEffortName').list()) groupLabels[row.workEffortId] = row.workEffortName || row.workEffortId
+                    }
+                } catch (err) { ec.logger.error(`Work item summary: the ${by} groups left out: ${err && err.message ? err.message : err}`) }
+                const noneLabel = {assignee: L('Unassigned'), component: L('No component'), type: L('No type'), priority: L('No priority'), status: L('No status'), project: L('No project')}[by]
+                const groupKeys = (item) => {
+                    switch (by) {
+                        case 'status': return [item.statusId || '']
+                        case 'type': return [item.purposeEnumId || '']
+                        case 'priority': return [item.priority != null && item.priority !== '' ? String(item.priority) : '']
+                        case 'project': return [item.rootWorkEffortId || '']
+                        default: { const list = groupsOf[item.workEffortId]; return list && list.length ? list : [''] }
+                    }
+                }
+                const labelOf = (key) => {
+                    if (key === '') return noneLabel
+                    switch (by) {
+                        case 'status': return statusText(key)
+                        case 'type': return enumText(key)
+                        case 'priority': return ec.resource.expand('Priority ${priority}', '', {priority: key})
+                        case 'project': return (projects[key] || key) + ' (' + key + ')'
+                        default: return groupLabels[key] || key
+                    }
+                }
+                const rows = {}
+                const cycleOf = {}
+                let cycleSum = 0, cycleCount = 0
+                const openStatus = {}, openType = {}
+                const statusesSeen = new Set()
+                for (const item of items) {
+                    try {
+                        const isOpen = !ended.includes(item.statusId)
+                        const due = item.estimatedCompletionDate != null ? ec.l10n.format(item.estimatedCompletionDate, 'yyyy-MM-dd') : null
+                        const overdue = isOpen && due != null && due < today
+                        const one = history[item.workEffortId] || {}
+                        const createdDay = dayOfMs(one.created != null ? one.created : firstParty[item.workEffortId])
+                        const resolvedMs = one.resolved != null ? one.resolved : (done.includes(item.statusId) ? toMillis(item.actualCompletionDate) : null)
+                        const resolvedDay = dayOfMs(resolvedMs)
+                        const resolvedIn = resolvedDay != null && resolvedDay >= fromDay && resolvedDay <= thruDay
+                        if (isOpen) {
+                            counts.open++
+                            const status = openStatus[item.statusId || ''] || (openStatus[item.statusId || ''] = {id: item.statusId || null, label: statusText(item.statusId) || L('No status'), count: 0})
+                            status.count++
+                            const type = openType[item.purposeEnumId || ''] || (openType[item.purposeEnumId || ''] = {id: item.purposeEnumId || null, label: enumText(item.purposeEnumId) || L('No type'), count: 0})
+                            type.count++
+                        }
+                        if (overdue) counts.overdue++
+                        if (createdDay != null && createdDay >= fromDay && createdDay <= thruDay) {
+                            counts.created++
+                            const index = weekIndex[weekOf(createdDay)]
+                            if (index != null) weekList[index].created++
+                        }
+                        if (resolvedIn) {
+                            counts.resolved++
+                            const index = weekIndex[weekOf(resolvedDay)]
+                            if (index != null) weekList[index].resolved++
+                        }
+                        let cycle = null
+                        if (resolvedIn && one.started != null && resolvedMs != null && resolvedMs >= one.started) {
+                            cycle = (resolvedMs - one.started) / 86400000
+                            cycleSum += cycle; cycleCount++
+                        }
+                        statusesSeen.add(item.statusId || '')
+                        for (const key of groupKeys(item)) {
+                            const row = rows[key] || (rows[key] = {groupId: key || null, groupLabel: labelOf(key), statusCounts: {}, total: 0, open: 0, overdue: 0, resolved: 0,
+                                cycleSum: 0, cycleCount: 0})
+                            row.statusCounts[item.statusId || ''] = (row.statusCounts[item.statusId || ''] || 0) + 1
+                            row.total++
+                            if (isOpen) row.open++
+                            if (overdue) row.overdue++
+                            if (resolvedIn) row.resolved++
+                            if (cycle != null) { row.cycleSum += cycle; row.cycleCount++ }
+                        }
+                        totals.statusCounts[item.statusId || ''] = (totals.statusCounts[item.statusId || ''] || 0) + 1
+                        totals.total++
+                        if (isOpen) totals.open++
+                        if (overdue) totals.overdue++
+                        if (resolvedIn) totals.resolved++
+                    } catch (err) {
+                        ec.logger.error(`Work item summary: ${item.workEffortId} left out: ${err && err.message ? err.message : err}`)
+                    }
+                }
+                totals.averageCycleDays = cycleCount ? round(cycleSum / cycleCount) : null
+                statusList = Array.from(statusesSeen).sort((a, b) => (statusOrder[a] ?? 999) - (statusOrder[b] ?? 999) || a.localeCompare(b))
+                        .map((id) => ({statusId: id || null, label: id ? statusText(id) : L('No status')}))
+                rowList = Object.values(rows).map((row) => {
+                    const out = {groupId: row.groupId, groupLabel: row.groupLabel, statusCounts: row.statusCounts, total: row.total, open: row.open, overdue: row.overdue,
+                        resolved: row.resolved, averageCycleDays: row.cycleCount ? round(row.cycleSum / row.cycleCount) : null}
+                    return out
+                })
+                if (by === 'status') rowList.sort((a, b) => (statusOrder[a.groupId] ?? 999) - (statusOrder[b.groupId] ?? 999))
+                else if (by === 'priority') rowList.sort((a, b) => (a.groupId == null) - (b.groupId == null) || Number(a.groupId) - Number(b.groupId))
+                else rowList.sort((a, b) => (a.groupId == null) - (b.groupId == null) || b.total - a.total || String(a.groupLabel).localeCompare(String(b.groupLabel)))
+                openByStatus = Object.values(openStatus).sort((a, b) => (statusOrder[a.id] ?? 999) - (statusOrder[b.id] ?? 999))
+                openByType = Object.values(openType).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="PortfolioStatus">
+        <description>
+            Every project's status (design-projects.md §11 PortfolioReport): the projects the user sees (template projects left out),
+            by default those not Closed or Cancelled (statusId: a comma list of statuses instead, or all), narrowed by managerPartyId
+            (a current ProjectManager or Manager), clientPartyId (a current Customer or CustomerBillTo) and parentWorkEffortId (the
+            program: its sub-projects, and itself).
+
+            projectList, by name, each on its own (one that fails is logged and left out): workEffortId, workEffortName, statusId,
+            statusLabel, healthEnumId, healthLabel, managerNames, clientName, parentWorkEffortId and parentName; the work:
+            estimatedHours, actualHours, remainingHours, percentComplete ((estimate less remaining) over the estimate, 0 to 100; null
+            with no estimate), hoursBudget (totalTimeAllowed), hoursUsedPercent (actual over the hours budget); the schedule:
+            targetDate (the project's estimatedCompletionDate, a day), forecastDate (the latest due date of its open items), late
+            (the forecast after the target), openCount, overdueCount (open items due before today); the warnings of
+            get#ProjectStats: overEstimate (actual and remaining past the estimate, only with an estimate), overHours (past the hours
+            budget), atRisk (health At risk or Off track, a warning or danger of get#ProjectStats, or late). With money (moneyShown:
+            ADMIN or TIME_ENTRY_RATE) also clientBudget (totalClientCostAllowed), actualClientCost and budgetUsedPercent (actual
+            client cost over the client budget, §11), overBudget. totals: projectCount, atRiskCount, lateCount, openCount,
+            overdueCount, estimatedHours, actualHours, remainingHours, hoursBudget.
+        </description>
+        <in-parameters>
+            <parameter name="statusId"/>
+            <parameter name="managerPartyId"/>
+            <parameter name="clientPartyId"/>
+            <parameter name="parentWorkEffortId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="projectList" type="List"/>
+            <parameter name="totals" type="Map"/>
+            <parameter name="moneyShown" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const round = (value) => Math.round(value * 100) / 100
+            const num = (value) => value == null || value === '' ? null : Number(String(value))
+            projectList = []
+            totals = {projectCount: 0, atRiskCount: 0, lateCount: 0, openCount: 0, overdueCount: 0, estimatedHours: 0, actualHours: 0, remainingHours: 0, hoursBudget: 0}
+            const scope = ec.service.sync().name('mantle.work.ProjectReportServices.get#ReportScope').call() || {}
+            moneyShown = !!scope.moneyShown
+            const visible = Array.from(scope.visibleProjectIds || [])
+            if (!scope.allProjects && !visible.length) return
+            const today = ec.l10n.format(ec.user.nowTimestamp, 'yyyy-MM-dd')
+            const ended = ['WeComplete', 'WeClosed', 'WeCancelled']
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                let find = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortTypeEnumId', 'WetProject')
+                if (!scope.allProjects) find = find.condition('workEffortId', 'in', visible)
+                const statuses = statusId ? String(statusId).split(',').map((one) => one.trim()).filter((one) => one) : []
+                if (statuses.length && !statuses.includes('all')) find = find.condition('statusId', 'in', statuses)
+                else if (!statuses.includes('all')) find = find.condition('statusId', 'not-in', ['WeClosed', 'WeCancelled'])
+                if (parentWorkEffortId) find = find.condition(ec.entity.conditionFactory.makeCondition([
+                    ec.entity.conditionFactory.makeCondition('parentWorkEffortId', 'equals', parentWorkEffortId),
+                    ec.entity.conditionFactory.makeCondition('workEffortId', 'equals', parentWorkEffortId)], 'or'))
+                let projects = Array.from(find.orderBy('workEffortName').limit(2000).list()).filter((row) => row.isTemplate !== 'Y')
+                if (!projects.length) return
+                let ids = projects.map((row) => row.workEffortId)
+                // the managers and clients
+                const managers = {}, clients = {}
+                for (const row of ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', 'in', ids)
+                        .condition('roleTypeId', 'in', ['ProjectManager', 'Manager', 'Customer', 'CustomerBillTo']).conditionDate('fromDate', 'thruDate', null).orderBy('fromDate').list()) {
+                    const map = row.roleTypeId.startsWith('Customer') ? clients : managers
+                    const list = map[row.workEffortId] || (map[row.workEffortId] = [])
+                    if (!list.includes(row.partyId)) list.push(row.partyId)
+                }
+                if (managerPartyId) projects = projects.filter((row) => (managers[row.workEffortId] || []).includes(managerPartyId))
+                if (clientPartyId) projects = projects.filter((row) => (clients[row.workEffortId] || []).includes(clientPartyId))
+                ids = projects.map((row) => row.workEffortId)
+                if (!ids.length) return
+                const names = {}
+                const partyName = (id) => {
+                    if (!id) return ''
+                    if (!(id in names)) {
+                        const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', id).one()
+                        names[id] = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || party.pseudoId || id) : id
+                    }
+                    return names[id]
+                }
+                const textCache = {}
+                const cached = (entity, field, id, textField) => {
+                    if (!id) return ''
+                    const key = entity + '|' + id
+                    if (!(key in textCache)) textCache[key] = ec.entity.find(entity).condition(field, id).useCache(true).one()?.[textField] || id
+                    return textCache[key]
+                }
+                // the open items: count, overdue and the latest due date
+                const work = {}
+                try {
+                    for (const item of ec.entity.find('mantle.work.effort.WorkEffort').condition('rootWorkEffortId', 'in', ids).condition('workEffortTypeEnumId', 'WetTask')
+                            .condition('statusId', 'not-in', ended).selectField('rootWorkEffortId').selectField('estimatedCompletionDate').limit(100000).list()) {
+                        const one = work[item.rootWorkEffortId] || (work[item.rootWorkEffortId] = {open: 0, overdue: 0, forecast: null})
+                        one.open++
+                        if (item.estimatedCompletionDate != null) {
+                            const due = ec.l10n.format(item.estimatedCompletionDate, 'yyyy-MM-dd')
+                            if (due < today) one.overdue++
+                            if (one.forecast == null || due > one.forecast) one.forecast = due
+                        }
+                    }
+                } catch (err) { ec.logger.error(`Portfolio: the open items left out: ${err && err.message ? err.message : err}`) }
+                const parentNames = {}
+                for (const project of projects) {
+                    ec.message.pushErrors()
+                    try {
+                        const id = project.workEffortId
+                        const stats = ec.service.sync().name('mantle.work.ProjectServices.get#ProjectStats').parameters({workEffort: project}).call() || {}
+                        if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                        const estimate = num(project.estimatedWorkTime)
+                        const actual = num(project.actualWorkTime) || 0
+                        const remaining = num(project.remainingWorkTime) || 0
+                        const budget = num(project.totalTimeAllowed)
+                        const one = work[id] || {open: 0, overdue: 0, forecast: null}
+                        const target = project.estimatedCompletionDate != null ? ec.l10n.format(project.estimatedCompletionDate, 'yyyy-MM-dd') : null
+                        const late = target != null && one.forecast != null && one.forecast > target
+                        const risky = ['WehAtRisk', 'WehOffTrack'].includes(project.healthEnumId) || !!stats.projectWarning || !!stats.projectDanger || late
+                        if (project.parentWorkEffortId && !(project.parentWorkEffortId in parentNames))
+                            parentNames[project.parentWorkEffortId] = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', project.parentWorkEffortId).one()?.workEffortName || project.parentWorkEffortId
+                        const row = {workEffortId: id, workEffortName: project.workEffortName || id, statusId: project.statusId,
+                            statusLabel: cached('moqui.basic.StatusItem', 'statusId', project.statusId, 'description'), healthEnumId: project.healthEnumId || null,
+                            healthLabel: project.healthEnumId ? cached('moqui.basic.Enumeration', 'enumId', project.healthEnumId, 'description') : '',
+                            managerNames: (managers[id] || []).map(partyName).join(', '), clientName: (clients[id] || []).map(partyName).join(', '),
+                            parentWorkEffortId: project.parentWorkEffortId || null, parentName: project.parentWorkEffortId ? parentNames[project.parentWorkEffortId] : '',
+                            estimatedHours: estimate, actualHours: round(actual), remainingHours: round(remaining),
+                            percentComplete: estimate ? Math.max(0, Math.min(100, round((estimate - remaining) * 100 / estimate))) : null,
+                            hoursBudget: budget, hoursUsedPercent: budget ? round(actual * 100 / budget) : null,
+                            targetDate: target, forecastDate: one.forecast, late: late, openCount: one.open, overdueCount: one.overdue,
+                            overEstimate: !!estimate && actual + remaining > estimate + 0.001, overHours: !!budget && actual + remaining > budget + 0.001, atRisk: risky}
+                        if (moneyShown) {
+                            const clientBudget = num(project.totalClientCostAllowed)
+                            const actualClient = num(project.actualClientCost) || 0
+                            row.clientBudget = clientBudget
+                            row.actualClientCost = round(actualClient)
+                            row.budgetUsedPercent = clientBudget ? round(actualClient * 100 / clientBudget) : null
+                            row.overBudget = !!stats.clientActualOverBudget
+                            row.currencyUomId = project.costUomId || null
+                        }
+                        projectList.push(row)
+                        totals.projectCount++
+                        if (risky) totals.atRiskCount++
+                        if (late) totals.lateCount++
+                        totals.openCount += one.open
+                        totals.overdueCount += one.overdue
+                        totals.estimatedHours += estimate || 0
+                        totals.actualHours += actual
+                        totals.remainingHours += remaining
+                        totals.hoursBudget += budget || 0
+                    } catch (err) {
+                        ec.logger.error(`Portfolio: project ${project.workEffortId} left out: ${err && err.message ? err.message : err}`)
+                    } finally { ec.message.clearErrors(); ec.message.popErrors() }
+                }
+                for (const key of ['estimatedHours', 'actualHours', 'remainingHours', 'hoursBudget']) totals[key] = round(totals[key])
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="ProjectProfitability">
+        <description>
+            The money of each project (design-projects.md §11 ProfitabilityReport), for those who manage money (ADMIN and holders of
+            TIME_ENTRY_RATE; anyone else gets an error), over the projects they see (template projects left out), narrowed by
+            rootWorkEffortId and clientPartyId (the project's current Customer or CustomerBillTo); the time and invoices from fromDate
+            through thruDate (days in the user's time zone; none: all of them).
+
+            The measures of §11, each per project from its time entries (on the project and its items) and invoices (WorkEffortInvoice
+            and those of its time): cost is the hours at the workers' rates (the entry's vendorHourRate, else its vendor RateAmount;
+            costMissingCount the entries with neither) plus expenses (the project's expense invoices: not to the client, not from the
+            vendor, not cancelled, by invoice date); billableValue is the billable hours (rate type not RatpNoCharge) at the client
+            rates (clientHourRate, else the RateAmount; valueMissingCount those with neither) plus the expenses (billable through, as
+            create#ProjectInvoiceItems bills them); billed is the client invoices (to its client, not cancelled, by invoice date);
+            unbilled the billable time with no client invoice; margin is billableValue less cost (basis billed: billed less cost) and
+            marginPercent margin over that value. budget is the client budget (totalClientCostAllowed) and budgetUsedPercent the actual
+            client cost (actualClientCost, rolled up from all the time) over it, as get#ProjectMoneySummary. Amounts are rounded to the
+            cent per entry.
+
+            projectList (each on its own: one that fails is logged and left out), by client then project: workEffortId,
+            workEffortName, clientPartyId, clientName, currencyUomId, hours, billableHours, timeCost, expenses, cost, timeValue,
+            billableValue, billed, unbilled, margin, marginPercent, budget, actualClientCost, budgetUsedPercent, costMissingCount,
+            valueMissingCount. clientList: the same sums by client. totals: the sums, with currencyUomId (null and mixedCurrency
+            when the projects are in more than one currency).
+        </description>
+        <in-parameters>
+            <parameter name="fromDate"/>
+            <parameter name="thruDate"/>
+            <parameter name="rootWorkEffortId"/>
+            <parameter name="clientPartyId"/>
+            <parameter name="basis" default-value="billable"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fromDay"/>
+            <parameter name="thruDay"/>
+            <parameter name="projectList" type="List"/>
+            <parameter name="clientList" type="List"/>
+            <parameter name="totals" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            const cf = ec.entity.conditionFactory
+            const round = (value) => Math.round(value * 100) / 100
+            const num = (value) => value == null || value === '' ? null : Number(String(value))
+            const dayNum = (text) => Math.floor(Date.parse(String(text).slice(0, 10) + 'T00:00:00Z') / 86400000)
+            const dayText = (n) => new Date(n * 86400000).toISOString().slice(0, 10)
+            const dayOf = (value) => {
+                if (value == null || value === '') return null
+                const text = String(value)
+                if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10)
+                return ec.l10n.format(/^-?\d+$/.test(text) ? text : value, 'yyyy-MM-dd')
+            }
+            const stampOf = (day) => ec.l10n.parseTimestamp(day + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')
+            projectList = []; clientList = []
+            const sumKeys = ['hours', 'billableHours', 'timeCost', 'expenses', 'cost', 'timeValue', 'billableValue', 'billed', 'unbilled', 'margin', 'budget', 'actualClientCost',
+                'costMissingCount', 'valueMissingCount']
+            const blank = () => { const out = {}; for (const key of sumKeys) out[key] = 0; return out }
+            totals = Object.assign(blank(), {projectCount: 0, marginPercent: null, currencyUomId: null, mixedCurrency: false})
+            fromDay = dayOf(fromDate)
+            thruDay = dayOf(thruDate)
+            if (fromDay && thruDay && fromDay > thruDay) { const swap = fromDay; fromDay = thruDay; thruDay = swap }
+            if (!(ec.user.userId && (ec.user.isInGroup('ADMIN') || ec.user.hasPermission('TIME_ENTRY_RATE')))) {
+                ec.message.addError(L('Only those who manage money see the profitability of projects')); return }
+            const byBilled = basis === 'billed'
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const vis = ec.service.sync().name('mantle.work.ProjectServices.get#VisibleProjectInfo').call() || {}
+                const visible = Array.from(vis.visibleProjectIds || [])
+                if (rootWorkEffortId && !vis.allProjects && !visible.includes(rootWorkEffortId)) {
+                    ec.message.addError(ec.resource.expand('Project ${rootWorkEffortId} is not available', '', {rootWorkEffortId})); return }
+                if (!vis.allProjects && !visible.length) return
+                let find = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortTypeEnumId', 'WetProject')
+                if (rootWorkEffortId) find = find.condition('workEffortId', rootWorkEffortId)
+                else if (!vis.allProjects) find = find.condition('workEffortId', 'in', visible)
+                let projects = Array.from(find.limit(2000).list()).filter((row) => row.isTemplate !== 'Y')
+                if (!projects.length) return
+                let ids = projects.map((row) => row.workEffortId)
+                const parties = {}
+                for (const row of ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', 'in', ids)
+                        .condition('roleTypeId', 'in', ['Customer', 'CustomerBillTo', 'Vendor', 'VendorBillFrom']).conditionDate('fromDate', 'thruDate', null).orderBy('fromDate').list()) {
+                    const one = parties[row.workEffortId] || (parties[row.workEffortId] = {})
+                    const kind = row.roleTypeId.startsWith('Customer') ? 'client' : 'vendor'
+                    if (!one[kind]) one[kind] = row.partyId
+                }
+                if (clientPartyId) projects = projects.filter((row) => parties[row.workEffortId]?.client === clientPartyId)
+                ids = projects.map((row) => row.workEffortId)
+                if (!ids.length) return
+                const names = {}
+                const partyName = (id) => {
+                    if (!id) return L('No client')
+                    if (!(id in names)) {
+                        const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', id).one()
+                        names[id] = party ? (party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || party.pseudoId || id) : id
+                    }
+                    return names[id]
+                }
+                // the time of the projects in the period, by project
+                const timeConds = [cf.makeCondition([cf.makeCondition('rootWorkEffortId', 'in', ids), cf.makeCondition('workEffortId', 'in', ids)], 'or')]
+                if (fromDay) timeConds.push(cf.makeCondition('fromDate', 'greater-equals', stampOf(fromDay)))
+                if (thruDay) timeConds.push(cf.makeCondition('fromDate', 'less-than', stampOf(dayText(dayNum(thruDay) + 1))))
+                const timeOf = {}
+                const invoiceIdsOf = {}
+                try {
+                    for (const entry of ec.entity.find('mantle.work.time.TimeEntryAndWorkEffort').condition(cf.makeCondition(timeConds, 'and'))
+                            .selectField('timeEntryId').selectField('workEffortId').selectField('workEffortTypeEnumId').selectField('rootWorkEffortId').selectField('hours')
+                            .selectField('rateTypeEnumId').selectField('rateAmountId').selectField('clientHourRate').selectField('vendorRateAmountId').selectField('vendorHourRate')
+                            .selectField('invoiceId').limit(100000).list()) {
+                        const root = entry.workEffortTypeEnumId === 'WetProject' ? entry.workEffortId : entry.rootWorkEffortId
+                        if (!root) continue
+                        ;(timeOf[root] || (timeOf[root] = [])).push(entry)
+                        if (entry.invoiceId) (invoiceIdsOf[root] || (invoiceIdsOf[root] = new Set())).add(entry.invoiceId)
+                    }
+                } catch (err) { ec.logger.error(`Profitability: the time left out: ${err && err.message ? err.message : err}`) }
+                for (const row of ec.entity.find('mantle.work.effort.WorkEffortInvoice').condition('workEffortId', 'in', ids).list())
+                    (invoiceIdsOf[row.workEffortId] || (invoiceIdsOf[row.workEffortId] = new Set())).add(row.invoiceId)
+                const rates = {}
+                const rateOf = (own, rateAmountId) => {
+                    if (num(own) != null) return {amount: num(own), uom: null}
+                    if (!rateAmountId) return null
+                    if (!(rateAmountId in rates)) {
+                        const rate = ec.entity.find('mantle.humanres.rate.RateAmount').condition('rateAmountId', rateAmountId).useCache(true).one()
+                        rates[rateAmountId] = rate && rate.rateAmount != null ? {amount: num(rate.rateAmount), uom: rate.rateCurrencyUomId || null} : null
+                    }
+                    return rates[rateAmountId]
+                }
+                const orgCurrency = {}
+                const currencyOfOrg = (orgId) => {
+                    if (!orgId) return null
+                    if (!(orgId in orgCurrency)) orgCurrency[orgId] = ec.entity.find('mantle.ledger.config.PartyAcctgPreference').condition('organizationPartyId', orgId).one()?.baseCurrencyUomId || null
+                    return orgCurrency[orgId]
+                }
+                const inPeriod = (date) => {
+                    if (!fromDay && !thruDay) return true
+                    if (date == null) return false
+                    const day = ec.l10n.format(date, 'yyyy-MM-dd')
+                    return (!fromDay || day >= fromDay) && (!thruDay || day <= thruDay)
+                }
+                const clients = {}
+                const currencies = new Set()
+                for (const project of projects) {
+                    ec.message.pushErrors()
+                    try {
+                        const id = project.workEffortId
+                        const who = parties[id] || {}
+                        const row = Object.assign(blank(), {workEffortId: id, workEffortName: project.workEffortName || id, clientPartyId: who.client || null,
+                            clientName: partyName(who.client), currencyUomId: null, marginPercent: null, budgetUsedPercent: null})
+                        const uoms = new Set()
+                        for (const entry of timeOf[id] || []) {
+                            const hours = num(entry.hours) || 0
+                            row.hours += hours
+                            const vendorRate = rateOf(entry.vendorHourRate, entry.vendorRateAmountId)
+                            if (vendorRate == null) { if (hours) row.costMissingCount++ }
+                            else { row.timeCost += round(hours * vendorRate.amount); if (vendorRate.uom) uoms.add(vendorRate.uom) }
+                            if (entry.rateTypeEnumId === 'RatpNoCharge') continue
+                            row.billableHours += hours
+                            const clientRate = rateOf(entry.clientHourRate, entry.rateAmountId)
+                            if (clientRate == null) { if (hours) row.valueMissingCount++; continue }
+                            const amount = round(hours * clientRate.amount)
+                            row.timeValue += amount
+                            if (clientRate.uom) uoms.add(clientRate.uom)
+                            if (!entry.invoiceId) row.unbilled += amount
+                        }
+                        const invoiceIds = Array.from(invoiceIdsOf[id] || [])
+                        for (let i = 0; i < invoiceIds.length; i += 500) for (const inv of ec.entity.find('mantle.account.invoice.Invoice').condition('invoiceId', 'in', invoiceIds.slice(i, i + 500))
+                                .condition('statusId', 'not-equals', 'InvoiceCancelled').list()) {
+                            if (!inPeriod(inv.invoiceDate)) continue
+                            const total = num(inv.invoiceTotal) || 0
+                            if (who.client && inv.toPartyId === who.client) { row.billed += total; if (inv.currencyUomId) uoms.add(inv.currencyUomId) }
+                            else if (inv.fromPartyId !== who.vendor && inv.toPartyId !== who.client) row.expenses += total
+                        }
+                        row.cost = row.timeCost + row.expenses
+                        row.billableValue = row.timeValue + row.expenses
+                        const basisValue = byBilled ? row.billed : row.billableValue
+                        row.margin = basisValue - row.cost
+                        row.marginPercent = basisValue ? round(row.margin * 100 / basisValue) : null
+                        row.budget = num(project.totalClientCostAllowed) || 0
+                        row.actualClientCost = num(project.actualClientCost) || 0
+                        row.budgetUsedPercent = row.budget ? round(row.actualClientCost * 100 / row.budget) : null
+                        row.currencyUomId = uoms.size === 1 ? Array.from(uoms)[0] : (uoms.size ? null : (project.costUomId || currencyOfOrg(who.vendor) || 'USD'))
+                        row.mixedCurrency = uoms.size > 1
+                        for (const key of sumKeys) if (!key.endsWith('Count')) row[key] = round(row[key])
+                        // a project with no time, invoice or budget in the period is left out unless asked for
+                        if (!rootWorkEffortId && !row.hours && !row.billed && !row.expenses && !row.budget) continue
+                        if (row.currencyUomId) currencies.add(row.currencyUomId); else totals.mixedCurrency = true
+                        projectList.push(row)
+                        const client = clients[row.clientPartyId || ''] || (clients[row.clientPartyId || ''] = Object.assign(blank(), {clientPartyId: row.clientPartyId,
+                            clientName: row.clientName, projectCount: 0, marginPercent: null}))
+                        client.projectCount++
+                        for (const key of sumKeys) { client[key] += row[key]; totals[key] += row[key] }
+                        totals.projectCount++
+                    } catch (err) {
+                        ec.logger.error(`Profitability: project ${project.workEffortId} left out: ${err && err.message ? err.message : err}`)
+                    } finally { ec.message.clearErrors(); ec.message.popErrors() }
+                }
+                const finish = (sums) => {
+                    for (const key of sumKeys) if (!key.endsWith('Count')) sums[key] = round(sums[key])
+                    const basisValue = byBilled ? sums.billed : sums.billableValue
+                    sums.marginPercent = basisValue ? round(sums.margin * 100 / basisValue) : null
+                    sums.budgetUsedPercent = sums.budget ? round(sums.actualClientCost * 100 / sums.budget) : null
+                    return sums
+                }
+                clientList = Object.values(clients).map(finish).sort((a, b) => (a.clientPartyId == null) - (b.clientPartyId == null) || b.billableValue - a.billableValue
+                        || String(a.clientName).localeCompare(String(b.clientName)))
+                finish(totals)
+                if (currencies.size > 1) totals.mixedCurrency = true
+                totals.currencyUomId = totals.mixedCurrency ? null : (Array.from(currencies)[0] || 'USD')
+                projectList.sort((a, b) => (a.clientPartyId == null) - (b.clientPartyId == null) || String(a.clientName).localeCompare(String(b.clientName))
+                        || String(a.workEffortName).localeCompare(String(b.workEffortName)))
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="Utilization">
+        <description>
+            Utilization by person and week (design-projects.md §11 UtilizationReport): the people of ResourceServices.get#TeamPlan (those
+            with a current internal role on the open projects the user sees and those allocated on them; narrowed by partyId,
+            teamPartyId, rootWorkEffortId and roleTypeId) for weeks Monday weeks from fromDate (a day; default the eight weeks to this
+            one). The measures of §11, each per person and week: capacity (get#PartyCapacity: working hours less holidays and leave),
+            logged (all the person's time entries that week, on any project, as the planner counts them), billable (those of rate type
+            not RatpNoCharge), utilization (logged over capacity, a percent) and billableUtilization (billable over capacity), with
+            allocated (their allocated hours). A week to come has no utilization.
+
+            personList [{partyId, name, roleText, weekList [{weekStart, label, capacity, logged, billable, allocated, utilization,
+            billableUtilization}], totals {capacity, logged, billable, allocated, utilization, billableUtilization}}]; rowList the
+            same flat by person and week (for the table and its exports); weekList [{weekStart, label, isCurrent, capacity, logged,
+            billable, allocated, utilization, billableUtilization}] the team's sums by week; totals over the past weeks; options of
+            get#TeamPlan (roles, teams, projects). A person whose numbers fail is logged and left out.
+        </description>
+        <in-parameters>
+            <parameter name="fromDate"/>
+            <parameter name="weeks" type="Integer" default="8"/>
+            <parameter name="partyId"/>
+            <parameter name="teamPartyId"/>
+            <parameter name="rootWorkEffortId"/>
+            <parameter name="roleTypeId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="fromDay"/>
+            <parameter name="thruDay"/>
+            <parameter name="personList" type="List"/>
+            <parameter name="rowList" type="List"/>
+            <parameter name="weekList" type="List"/>
+            <parameter name="totals" type="Map"/>
+            <parameter name="options" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const round = (value) => Math.round(value * 100) / 100
+            const pct = (part, whole) => whole > 0 ? round(part * 100 / whole) : null
+            const dayNum = (text) => Math.floor(Date.parse(String(text).slice(0, 10) + 'T00:00:00Z') / 86400000)
+            const dayText = (n) => new Date(n * 86400000).toISOString().slice(0, 10)
+            const isoDayOf = (text) => { const js = new Date(String(text).slice(0, 10) + 'T12:00:00Z').getUTCDay(); return js === 0 ? 7 : js }
+            const dayOf = (value) => {
+                if (value == null || value === '') return null
+                const text = String(value)
+                if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10)
+                return ec.l10n.format(/^-?\d+$/.test(text) ? text : value, 'yyyy-MM-dd')
+            }
+            const labelOf = (day) => ec.l10n.format(ec.l10n.parseTimestamp(day + ' 12:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS'), 'MMM d')
+            const weekCount = Math.max(1, Math.min(26, Number(weeks) || 8))
+            const today = ec.l10n.format(ec.user.nowTimestamp, 'yyyy-MM-dd')
+            const currentWeek = dayText(dayNum(today) - (isoDayOf(today) - 1))
+            const start = dayOf(fromDate) || dayText(dayNum(currentWeek) - (weekCount - 1) * 7)
+            fromDay = dayText(dayNum(start) - (isoDayOf(start) - 1))
+            thruDay = dayText(dayNum(fromDay) + weekCount * 7 - 1)
+            personList = []; rowList = []; options = null
+            weekList = []
+            for (let i = 0; i < weekCount; i++) {
+                const week = dayText(dayNum(fromDay) + i * 7)
+                weekList.push({weekStart: week, label: labelOf(week), isCurrent: week === currentWeek, past: week <= currentWeek, capacity: 0, logged: 0, billable: 0, allocated: 0,
+                    utilization: null, billableUtilization: null})
+            }
+            totals = {capacity: 0, logged: 0, billable: 0, allocated: 0, utilization: null, billableUtilization: null, personCount: 0}
+            const planOut = ec.service.sync().name('mantle.work.ResourceServices.get#TeamPlan').parameters({fromDate: fromDay, weeks: weekCount,
+                partyIdList: partyId ? [partyId] : null, teamPartyId: teamPartyId || null, rootWorkEffortId: rootWorkEffortId || null, roleTypeId: roleTypeId || null,
+                includePlaceholders: false, withOptions: true}).call() || {}
+            if (ec.message.hasError()) { ec.logger.error(`Utilization: the team plan failed: ${ec.message.getErrorsString()}`); ec.message.clearErrors(); return }
+            const plan = planOut.plan || {}
+            options = plan.options || null
+            const people = Array.from(plan.personList || [])
+            if (!people.length) return
+            // billable hours by person and week
+            const billableOf = {}
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const ids = people.map((person) => person.partyId)
+                const fromStamp = ec.l10n.parseTimestamp(fromDay + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')
+                const thruStamp = ec.l10n.parseTimestamp(dayText(dayNum(thruDay) + 1) + ' 00:00:00.000', 'yyyy-MM-dd HH:mm:ss.SSS')
+                for (const entry of ec.entity.find('mantle.work.time.TimeEntry').condition('partyId', 'in', ids).condition('fromDate', 'greater-equals', fromStamp)
+                        .condition('fromDate', 'less-than', thruStamp).condition(ec.entity.conditionFactory.makeCondition('rateTypeEnumId', 'not-equals', 'RatpNoCharge', true))
+                        .selectField('partyId').selectField('fromDate').selectField('hours').list()) {
+                    const day = ec.l10n.format(entry.fromDate, 'yyyy-MM-dd')
+                    const key = entry.partyId + '|' + dayText(dayNum(day) - (isoDayOf(day) - 1))
+                    billableOf[key] = (billableOf[key] || 0) + Number(String(entry.hours ?? 0))
+                }
+            } catch (err) {
+                ec.logger.error(`Utilization: the billable hours left out: ${err && err.message ? err.message : err}`)
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+            const byWeek = {}
+            for (const week of weekList) byWeek[week.weekStart] = week
+            for (const person of people) {
+                try {
+                    const sums = {capacity: 0, logged: 0, billable: 0, allocated: 0}
+                    const weeksOut = []
+                    for (const one of Array.from(person.weekList || [])) {
+                        const week = byWeek[one.weekStart]
+                        if (!week) continue
+                        const capacity = Number(one.capacity || 0)
+                        const logged = Number(one.logged || 0)
+                        const billable = round(billableOf[person.partyId + '|' + one.weekStart] || 0)
+                        const allocated = Number(one.allocated || 0)
+                        const out = {weekStart: one.weekStart, label: week.label, isCurrent: week.isCurrent, capacity: round(capacity), logged: round(logged), billable: billable,
+                            allocated: round(allocated), utilization: week.past ? pct(logged, capacity) : null, billableUtilization: week.past ? pct(billable, capacity) : null}
+                        weeksOut.push(out)
+                        rowList.push(Object.assign({partyId: person.partyId, name: person.name, roleText: person.roleText || ''}, out))
+                        week.allocated += allocated
+                        if (week.past) {
+                            week.capacity += capacity; week.logged += logged; week.billable += billable
+                            sums.capacity += capacity; sums.logged += logged; sums.billable += billable
+                        }
+                        sums.allocated += allocated
+                    }
+                    personList.push({partyId: person.partyId, name: person.name, roleText: person.roleText || '', weekList: weeksOut,
+                        totals: {capacity: round(sums.capacity), logged: round(sums.logged), billable: round(sums.billable), allocated: round(sums.allocated),
+                            utilization: pct(sums.logged, sums.capacity), billableUtilization: pct(sums.billable, sums.capacity)}})
+                    totals.capacity += sums.capacity; totals.logged += sums.logged; totals.billable += sums.billable; totals.allocated += sums.allocated
+                    totals.personCount++
+                } catch (err) {
+                    ec.logger.error(`Utilization: ${person.partyId} left out: ${err && err.message ? err.message : err}`)
+                }
+            }
+            for (const week of weekList) {
+                week.capacity = round(week.capacity); week.logged = round(week.logged); week.billable = round(week.billable); week.allocated = round(week.allocated)
+                week.utilization = week.past ? pct(week.logged, week.capacity) : null
+                week.billableUtilization = week.past ? pct(week.billable, week.capacity) : null
+            }
+            totals.utilization = pct(totals.logged, totals.capacity)
+            totals.billableUtilization = pct(totals.billable, totals.capacity)
+            totals.capacity = round(totals.capacity); totals.logged = round(totals.logged); totals.billable = round(totals.billable); totals.allocated = round(totals.allocated)
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="ProgressBreakdown">
+        <description>
+            A project's progress (design-projects.md §11 ProgressReport), for one who sees the project: milestoneList (get#ProjectMilestoneSummary,
+            its totals last) and the breakdown by item: the top-level items (or, with fromWorkEffortId, that item's children; or, with
+            parentWorkEffortId, one level under that item, as the tree fetches it) down to depth levels (1 to 6), each row with its
+            subtree's numbers (get#WorkEffortChildStats: estimated, remaining and actual hours and days at timePerDay, the hours budget,
+            act/est, act+rem/est, act/bgt and act+rem/bgt percents; cancelled items left out), parentWorkEffortId (empty at the first
+            level), level (1 at the first), childCount (its children not cancelled) and the row order of a depth-first walk. A
+            Restricted or Confidential item the user may not see is left out (its numbers stay in its parent's). The money fields of
+            the stats (actualCost, actualClientCost, totalClientCostAllowed) are given only to those who manage money. totals: the
+            first level's sums with their percents. Each level is computed on its own: one that fails is logged and left out.
+        </description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="fromWorkEffortId"/>
+            <parameter name="parentWorkEffortId"/>
+            <parameter name="depth" type="Integer" default="1"/>
+            <parameter name="timePerDay" type="BigDecimal" default="8"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="project" type="Map"/>
+            <parameter name="fromItem" type="Map"/>
+            <parameter name="milestoneList" type="List"/>
+            <parameter name="rowList" type="List"/>
+            <parameter name="totals" type="Map"/>
+            <parameter name="moneyShown" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const L = (text) => ec.l10n.localize(text)
+            project = null; fromItem = null; milestoneList = []; rowList = []; totals = null
+            const scope = ec.service.sync().name('mantle.work.ProjectReportServices.get#ReportScope').call() || {}
+            moneyShown = !!scope.moneyShown
+            const money = ['actualCost', 'actualClientCost', 'totalClientCostAllowed']
+            const strip = (stats) => { const out = Object.assign({}, stats); if (!moneyShown) for (const key of money) delete out[key]; return out }
+            const wasDisabled = ec.artifactExecution.disableAuthz()
+            try {
+                const row = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+                if (!row || row.workEffortTypeEnumId !== 'WetProject' || !(scope.allProjects || Array.from(scope.visibleProjectIds || []).includes(workEffortId))) {
+                    ec.message.addError(ec.resource.expand('Project ${workEffortId} is not available', '', {workEffortId})); return }
+                project = {workEffortId: row.workEffortId, workEffortName: row.workEffortName || row.workEffortId, statusId: row.statusId}
+                const restricted = new Set(Array.from(scope.restrictedItemIds || []))
+                const managed = new Set(Array.from(scope.managedProjectIds || []))
+                const seen = (item) => scope.allProjects || !['WevRestricted', 'WevConfidential'].includes(item.visibilityEnumId) || managed.has(workEffortId) || restricted.has(item.workEffortId)
+                const itemOf = (id) => {
+                    const item = id ? ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', id).one() : null
+                    return item && item.rootWorkEffortId === workEffortId && item.workEffortTypeEnumId === 'WetTask' && seen(item) ? item : null
+                }
+                if (fromWorkEffortId) {
+                    const item = itemOf(fromWorkEffortId)
+                    if (!item) { ec.message.addError(ec.resource.expand('Work item ${fromWorkEffortId} is not available', '', {fromWorkEffortId})); return }
+                    fromItem = {workEffortId: item.workEffortId, workEffortName: item.workEffortName || item.workEffortId}
+                }
+                if (!parentWorkEffortId && !fromWorkEffortId) {
+                    try {
+                        ec.message.pushErrors()
+                        milestoneList = Array.from(ec.service.sync().name('mantle.work.ProjectServices.get#ProjectMilestoneSummary').parameters({workEffortId: workEffortId,
+                            timePerDay: timePerDay}).call()?.milestoneStatsList || []).map(strip)
+                        if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    } catch (err) {
+                        milestoneList = []
+                        ec.logger.error(`Progress of ${workEffortId}: the milestones left out: ${err && err.message ? err.message : err}`)
+                    } finally { ec.message.clearErrors(); ec.message.popErrors() }
+                }
+                // the items' children counts and visibility, from one read of the project
+                const childCount = {}
+                const visibility = {}
+                for (const item of ec.entity.find('mantle.work.effort.WorkEffort').condition('rootWorkEffortId', workEffortId).condition('workEffortTypeEnumId', 'WetTask')
+                        .condition('statusId', 'not-equals', 'WeCancelled').selectField('workEffortId').selectField('parentWorkEffortId').selectField('visibilityEnumId').list()) {
+                    visibility[item.workEffortId] = item.visibilityEnumId || null
+                    if (item.parentWorkEffortId) childCount[item.parentWorkEffortId] = (childCount[item.parentWorkEffortId] || 0) + 1
+                }
+                const maxDepth = Math.max(1, Math.min(6, Number(depth) || 1))
+                const startId = parentWorkEffortId ? (itemOf(parentWorkEffortId)?.workEffortId || null) : (fromItem ? fromItem.workEffortId : workEffortId)
+                if (!startId) { ec.message.addError(ec.resource.expand('Work item ${parentWorkEffortId} is not available', '', {parentWorkEffortId})); return }
+                const levelOf = (id) => {
+                    ec.message.pushErrors()
+                    try {
+                        const list = Array.from(ec.service.sync().name('mantle.work.ProjectServices.get#WorkEffortChildStats').parameters({workEffortId: id, timePerDay: timePerDay})
+                                .call()?.childStatsList || [])
+                        if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                        return list
+                    } catch (err) {
+                        ec.logger.error(`Progress of ${workEffortId}: the items under ${id} left out: ${err && err.message ? err.message : err}`)
+                        return null
+                    } finally { ec.message.clearErrors(); ec.message.popErrors() }
+                }
+                const walk = (id, level, parentId) => {
+                    const list = levelOf(id)
+                    if (!list) return []
+                    const out = []
+                    for (const stats of list) {
+                        if (!(stats.workEffortId in visibility)) continue
+                        if (!seen({workEffortId: stats.workEffortId, visibilityEnumId: visibility[stats.workEffortId]})) continue
+                        const one = Object.assign(strip(stats), {parentWorkEffortId: parentId, level: level, childCount: childCount[stats.workEffortId] || 0})
+                        rowList.push(one)
+                        out.push(one)
+                        if (level < maxDepth && one.childCount) walk(stats.workEffortId, level + 1, stats.workEffortId)
+                    }
+                    return out
+                }
+                const first = walk(startId, 1, parentWorkEffortId ? startId : (fromItem ? fromItem.workEffortId : null))
+                // the totals of the first level
+                const keys = ['estimatedWorkTime', 'remainingWorkTime', 'actualWorkTime', 'totalTimeAllowed'].concat(moneyShown ? money : [])
+                const zero = toDecimal(0)
+                const hundred = toDecimal(100)
+                const sum = {workEffortId: null, workEffortName: L('Total')}
+                for (const key of keys) sum[key] = first.reduce((total, one) => total.add(toDecimal(one[key] ?? 0)), zero)
+                const perDay = toDecimal(timePerDay)
+                const est = sum.estimatedWorkTime, budget = sum.totalTimeAllowed, act = sum.actualWorkTime, rem = sum.remainingWorkTime
+                sum.estimatedWorkDays = est.divide(perDay); sum.remainingWorkDays = rem.divide(perDay); sum.actualWorkDays = act.divide(perDay); sum.totalTimeAllowedDays = budget.divide(perDay)
+                sum.workActualPercent = est.isZero() ? zero : act.divide(est).multiply(hundred)
+                sum.workActRemPercent = est.isZero() ? zero : act.add(rem).divide(est).multiply(hundred)
+                sum.budgetActualPercent = budget.isZero() ? zero : act.divide(budget).multiply(hundred)
+                sum.budgetActRemPercent = budget.isZero() ? zero : act.add(rem).divide(budget).multiply(hundred)
+                totals = sum
+            } finally { if (!wasDisabled) ec.artifactExecution.enableAuthz() }
+        ]]></script></actions>
+    </service>
+</services>

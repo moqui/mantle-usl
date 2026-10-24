@@ -1,0 +1,855 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- Contact lists (mantle.marketing.contact.ContactList) and their members (ContactListParty): Marketing's lists and
+        the mailboxes of the internal Inbox. A mailbox is a list of type MAILBOX, a shared list or forum of internal
+        messages: its posts are CommunicationEvents of type Message with its contactListId, threaded by rootCommEventId
+        (mantle.party.CommunicationServices create#Message, reply#CommunicationEvent, find#InternalThreads).
+
+        A member is a current ContactListParty row (fromDate, thruDate) with status CLPT_ACCEPTED; CLPT_PENDING is a join
+        request, CLPT_REJECTED a declined one, and leaving sets thruDate. The row's roleTypeId is ListOwner, ListModerator
+        or empty (a member), its deliveryEnumId CldInbox (each post in the Inbox and its count) or CldMailboxOnly (posts
+        only under the mailbox, with its unread count), empty for the list's defaultDeliveryEnumId (empty is the Inbox).
+
+        Entity filters do not apply to contact lists, so these services check a mailbox's visibility themselves (and the
+        mailbox services of CommunicationServices call get#ContactListAccess): a public mailbox is read and joined by any
+        user; a private one is read only by its members, and a party with a pending request sees only its header. Who
+        may post is postingEnumId: ClpMembers (empty), ClpModerators (owners and moderators: announcements) or ClpAnyUser
+        (a help mailbox, where a poster who is not a member sees only the threads they take part in). An archived list
+        (archivedDate) is read-only: no posts, no new members. Lists of other types are not limited by membership here;
+        Marketing's authz decides who manages them. -->
+
+    <service verb="get" noun="ContactListAccess">
+        <description>
+            What a party (the current user's by default) may do with a contact list. For a mailbox: canSeeHeader (its
+            name and description: public, a help mailbox, a member or a pending request), canReadAll (every thread: a
+            member, or any user of a public mailbox that is not a help mailbox), canReadOwn (the threads the party takes
+            part in: canReadAll, or anyone on a help mailbox), canPost (by the posting policy, not when archived),
+            canModerate (an owner or moderator), canJoin. A list of another type can be seen and posted to (while not
+            archived) and has no member reading. contactList is null when the party may not see it. Another party's
+            access to a mailbox is told only to a user who may see the mailbox's header; otherwise it is as for a party
+            outside a private mailbox.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyId"><description>Defaults to the current user's party</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="contactList" type="Map"/>
+            <parameter name="exists" type="Boolean"/>
+            <parameter name="isMailbox" type="Boolean"/>
+            <parameter name="isPublic" type="Boolean"/>
+            <parameter name="isArchived" type="Boolean"/>
+            <parameter name="postingEnumId"><description>ClpMembers when the list has none</description></parameter>
+            <parameter name="isMember" type="Boolean"/>
+            <parameter name="membershipStatusId"><description>The party's current row's status: CLPT_ACCEPTED, CLPT_PENDING, CLPT_REJECTED</description></parameter>
+            <parameter name="memberRoleTypeId"/>
+            <parameter name="memberFromDate" type="Timestamp"/>
+            <parameter name="deliveryEnumId"><description>A member's delivery: the row's, else the list's default, else CldInbox</description></parameter>
+            <parameter name="isOwner" type="Boolean"/>
+            <parameter name="canModerate" type="Boolean"/>
+            <parameter name="canSeeHeader" type="Boolean"/>
+            <parameter name="canReadAll" type="Boolean"/>
+            <parameter name="canReadOwn" type="Boolean"/>
+            <parameter name="canPost" type="Boolean"/>
+            <parameter name="canJoin" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            const userPartyId = ec.user.userAccount?.partyId || null
+            if (!partyId) partyId = userPartyId
+            const nowMillis = toMillis(ec.user.nowTimestamp)
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', contactListId).one()
+            const evaluate = (pid) => {
+                const out = {exists: false, isMailbox: false, isPublic: false, isArchived: false, postingEnumId: null, isMember: false,
+                    membershipStatusId: null, memberRoleTypeId: null, memberFromDate: null, deliveryEnumId: null, isOwner: false,
+                    canModerate: false, canSeeHeader: false, canReadAll: false, canReadOwn: false, canPost: false, canJoin: false}
+                if (list == null) return out
+                out.exists = true
+                out.isMailbox = list.contactListTypeEnumId === 'MAILBOX'
+                out.isPublic = list.isPublic === 'Y'
+                out.postingEnumId = list.postingEnumId || 'ClpMembers'
+                out.isArchived = list.archivedDate != null && toMillis(list.archivedDate) <= nowMillis
+                // the party's current row: an accepted one first, then a pending request, then the latest
+                let row = null
+                if (pid) {
+                    const rows = Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', contactListId)
+                            .condition('partyId', pid).condition(cf.makeConditionDate('fromDate', 'thruDate', null)).orderBy('-fromDate').list())
+                    row = rows.find((candidate) => candidate.statusId === 'CLPT_ACCEPTED') ||
+                            rows.find((candidate) => candidate.statusId === 'CLPT_PENDING') || rows[0] || null
+                }
+                out.membershipStatusId = row?.statusId ?? null
+                out.isMember = out.membershipStatusId === 'CLPT_ACCEPTED'
+                out.memberFromDate = row?.fromDate ?? null
+                if (out.isMember) {
+                    out.memberRoleTypeId = row.roleTypeId || null
+                    out.deliveryEnumId = row.deliveryEnumId || list.defaultDeliveryEnumId || 'CldInbox'
+                }
+                out.isOwner = out.memberRoleTypeId === 'ListOwner'
+                out.canModerate = out.isOwner || out.memberRoleTypeId === 'ListModerator'
+                if (out.isMailbox) {
+                    out.canReadAll = out.isMember || (out.isPublic && out.postingEnumId !== 'ClpAnyUser')
+                    out.canReadOwn = out.canReadAll || (out.postingEnumId === 'ClpAnyUser' && !!pid)
+                    out.canSeeHeader = out.canReadOwn || out.isPublic || out.membershipStatusId === 'CLPT_PENDING'
+                    out.canPost = !out.isArchived && !!pid && (out.postingEnumId === 'ClpAnyUser' ||
+                            (out.postingEnumId === 'ClpModerators' ? out.canModerate : out.isMember))
+                } else {
+                    out.canSeeHeader = true
+                    out.canPost = !out.isArchived
+                }
+                out.canJoin = !out.isArchived && !!pid && out.canSeeHeader && !out.isMember && out.membershipStatusId !== 'CLPT_PENDING'
+                return out
+            }
+            let result = evaluate(partyId)
+            // another party's access is told only to a user who may see the mailbox
+            if (result.isMailbox && userPartyId && partyId !== userPartyId && !evaluate(userPartyId).canSeeHeader) result = evaluate(null)
+            exists = result.exists; isMailbox = result.isMailbox; isPublic = result.isPublic; isArchived = result.isArchived
+            postingEnumId = result.postingEnumId; isMember = result.isMember; membershipStatusId = result.membershipStatusId
+            memberRoleTypeId = result.memberRoleTypeId; memberFromDate = result.memberFromDate; deliveryEnumId = result.deliveryEnumId
+            isOwner = result.isOwner; canModerate = result.canModerate; canSeeHeader = result.canSeeHeader; canReadAll = result.canReadAll
+            canReadOwn = result.canReadOwn; canPost = result.canPost; canJoin = result.canJoin
+            contactList = canSeeHeader ? list.getMap() : null
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="UserMailboxAccess">
+        <description>
+            The mailboxes a party (the current user's by default) may read every thread of (a member, or a public mailbox
+            that is not a help mailbox), and the others, whose posts the party sees only when from, to or a recipient of
+            them. For limits such as the universal search's.
+        </description>
+        <in-parameters>
+            <parameter name="partyId"><description>Defaults to the current user's party</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="readableContactListIds" type="List"/>
+            <parameter name="hiddenContactListIds" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            if (!partyId) partyId = ec.user.userAccount?.partyId || null
+            readableContactListIds = []
+            hiddenContactListIds = []
+            const mailboxes = Array.from(ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListTypeEnumId', 'MAILBOX')
+                    .selectField('contactListId').selectField('isPublic').selectField('postingEnumId').list())
+            if (mailboxes.length === 0) return
+            const memberOf = new Set(partyId ? Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty')
+                    .condition('partyId', partyId).condition('statusId', 'CLPT_ACCEPTED')
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).selectField('contactListId').list())
+                    .map((row) => row.contactListId) : [])
+            for (const mailbox of mailboxes) {
+                const readable = memberOf.has(mailbox.contactListId) ||
+                        (mailbox.isPublic === 'Y' && (mailbox.postingEnumId || 'ClpMembers') !== 'ClpAnyUser')
+                if (readable) readableContactListIds.push(mailbox.contactListId)
+                else hiddenContactListIds.push(mailbox.contactListId)
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="create" noun="ContactList">
+        <description>
+            A contact list. The current user's party becomes its owner (a current CLPT_ACCEPTED row with role ListOwner),
+            and memberPartyIdList its first members. A mailbox (type MAILBOX) needs a user with a party, is private unless
+            isPublic=Y, and its posting policy defaults to ClpMembers and its default delivery to CldInbox.
+        </description>
+        <in-parameters>
+            <parameter name="contactListTypeEnumId"/>
+            <parameter name="contactListName" required="true"/>
+            <parameter name="description"/>
+            <parameter name="comments"/>
+            <parameter name="isPublic" default-value="N"/>
+            <parameter name="postingEnumId"/>
+            <parameter name="defaultDeliveryEnumId"/>
+            <parameter name="ownerPartyId"><description>The organization the list belongs to</description></parameter>
+            <parameter name="contactMechTypeEnumId"/>
+            <parameter name="marketingCampaignId"/>
+            <parameter name="memberPartyIdList" type="List"/>
+        </in-parameters>
+        <out-parameters><parameter name="contactListId"/></out-parameters>
+        <actions><script><![CDATA[
+            const creatorPartyId = ec.user.userAccount?.partyId || null
+            const isMailbox = contactListTypeEnumId === 'MAILBOX'
+            if (isMailbox && !creatorPartyId) { ec.message.addError('Creating a mailbox needs a user with a party'); return }
+            if (isMailbox) {
+                if (!postingEnumId) postingEnumId = 'ClpMembers'
+                if (!defaultDeliveryEnumId) defaultDeliveryEnumId = 'CldInbox'
+            }
+            const enumIn = (enumId, enumTypeId) => !enumId || ec.entity.find('moqui.basic.Enumeration').condition('enumId', enumId)
+                    .condition('enumTypeId', enumTypeId).useCache(true).one() != null
+            if (!enumIn(postingEnumId, 'ContactListPosting')) { ec.message.addError(`Unknown posting policy ${postingEnumId}`); return }
+            if (!enumIn(defaultDeliveryEnumId, 'ContactListDelivery')) { ec.message.addError(`Unknown delivery ${defaultDeliveryEnumId}`); return }
+            if (isPublic !== 'Y') isPublic = 'N'
+
+            contactListId = ec.service.sync().name('create#mantle.marketing.contact.ContactList').parameters({
+                contactListTypeEnumId: contactListTypeEnumId, contactListName: contactListName, description: description,
+                comments: comments, isPublic: isPublic, postingEnumId: postingEnumId, defaultDeliveryEnumId: defaultDeliveryEnumId,
+                ownerPartyId: ownerPartyId, contactMechTypeEnumId: contactMechTypeEnumId, marketingCampaignId: marketingCampaignId}).call()?.contactListId
+            if (ec.message.hasError()) return
+
+            const now = ec.user.nowTimestamp
+            const addRow = (partyId, roleTypeId) => ec.service.sync().name('create#mantle.marketing.contact.ContactListParty').parameters({
+                contactListId: contactListId, partyId: partyId, fromDate: now, statusId: 'CLPT_ACCEPTED', roleTypeId: roleTypeId}).call()
+            if (creatorPartyId) addRow(creatorPartyId, 'ListOwner')
+            const memberIds = memberPartyIdList == null ? [] : (typeof memberPartyIdList === 'string' ? memberPartyIdList.split(',') : Array.from(memberPartyIdList))
+            const added = new Set([creatorPartyId])
+            for (const memberId of memberIds.map((id) => String(id).trim()).filter((id) => id)) {
+                if (ec.message.hasError()) return
+                if (added.has(memberId)) continue
+                added.add(memberId)
+                addRow(memberId, null)
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="update" noun="ContactList">
+        <description>
+            Changes a contact list; a field left out (null) is not changed. archived=true archives it (read-only: no posts
+            or members), false restores it. A mailbox is changed only by its owners.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="contactListName"/>
+            <parameter name="description"/>
+            <parameter name="comments"/>
+            <parameter name="isPublic"/>
+            <parameter name="postingEnumId"/>
+            <parameter name="defaultDeliveryEnumId"/>
+            <parameter name="archived" type="Boolean"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const access = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                    .parameter('contactListId', contactListId).call()
+            if (!access.exists || !access.canSeeHeader) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            if (access.isMailbox && !access.isOwner) { ec.message.addError('Only an owner of the mailbox may change it'); return }
+            const enumIn = (enumId, enumTypeId) => !enumId || ec.entity.find('moqui.basic.Enumeration').condition('enumId', enumId)
+                    .condition('enumTypeId', enumTypeId).useCache(true).one() != null
+            if (!enumIn(postingEnumId, 'ContactListPosting')) { ec.message.addError(`Unknown posting policy ${postingEnumId}`); return }
+            if (!enumIn(defaultDeliveryEnumId, 'ContactListDelivery')) { ec.message.addError(`Unknown delivery ${defaultDeliveryEnumId}`); return }
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', contactListId).one()
+            const fields = {contactListName: contactListName, description: description, comments: comments,
+                isPublic: isPublic == null ? null : (isPublic === 'Y' ? 'Y' : 'N'), postingEnumId: postingEnumId,
+                defaultDeliveryEnumId: defaultDeliveryEnumId}
+            for (const [name, value] of Object.entries(fields)) if (value != null) list.set(name, value)
+            if (archived === true && list.archivedDate == null) list.set('archivedDate', ec.user.nowTimestamp)
+            if (archived === false) list.set('archivedDate', null)
+            list.update()
+        ]]></script></actions>
+    </service>
+
+    <service verb="find" noun="ContactLists">
+        <description>
+            The contact lists of a type (contactListTypeEnumId, such as MAILBOX) the current user may see, by name: for
+            mailboxes the public ones, the help mailboxes and the private ones the user is a member of or asked to join.
+            Each has the user's membership (isMember, membershipStatusId, memberRoleTypeId, deliveryEnumId), what the user
+            may do (canPost, canModerate, canJoin), memberCount, and for a mailbox the user may read lastPostDate and
+            unreadCount (the user's unread rows on its posts, not archived). memberOnly limits to the lists the user is
+            a member of or asked to join; archived lists are left out unless includeArchived.
+        </description>
+        <in-parameters>
+            <parameter name="contactListTypeEnumId"/>
+            <parameter name="memberOnly" type="Boolean" default="false"/>
+            <parameter name="searchText"><description>Part of the name or description</description></parameter>
+            <parameter name="includeArchived" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="contactListList" type="List"><parameter name="contactList" type="Map">
+                <parameter name="contactListId"/><parameter name="contactListTypeEnumId"/><parameter name="contactListName"/>
+                <parameter name="description"/><parameter name="isPublic"/><parameter name="postingEnumId"/>
+                <parameter name="defaultDeliveryEnumId"/><parameter name="archivedDate"/><parameter name="ownerPartyId"/>
+                <parameter name="isMember" type="Boolean"/><parameter name="membershipStatusId"/><parameter name="memberRoleTypeId"/>
+                <parameter name="deliveryEnumId"/><parameter name="canPost" type="Boolean"/><parameter name="canModerate" type="Boolean"/>
+                <parameter name="canJoin" type="Boolean"/><parameter name="canReadAll" type="Boolean"/>
+                <parameter name="memberCount" type="Integer"/><parameter name="unreadCount" type="Integer"/><parameter name="lastPostDate"/>
+            </parameter></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const now = ec.user.nowTimestamp
+            const partyId = ec.user.userAccount?.partyId || null
+            contactListList = []
+            let find = ec.entity.find('mantle.marketing.contact.ContactList').orderBy('contactListName')
+            if (contactListTypeEnumId) find = find.condition('contactListTypeEnumId', contactListTypeEnumId)
+            if (searchText) find = find.condition(cf.makeCondition([cf.makeCondition('contactListName', 'like', `%${searchText}%`, false, true),
+                    cf.makeCondition('description', 'like', `%${searchText}%`, false, true)], 'or'))
+            if (!includeArchived) find = find.condition(cf.makeCondition('archivedDate', 'greater', now, true))
+            const lists = Array.from(find.list())
+            if (lists.length === 0) return
+            const listIds = lists.map((list) => list.contactListId)
+
+            const memberCounts = {}
+            for (const row of ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', 'in', listIds)
+                    .condition('statusId', 'CLPT_ACCEPTED').condition(cf.makeConditionDate('fromDate', 'thruDate', null))
+                    .selectField('contactListId').selectField('partyId').distinct(true).list())
+                memberCounts[row.contactListId] = (memberCounts[row.contactListId] || 0) + 1
+
+            const entries = []
+            for (const list of lists) {
+                const access = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                        .parameter('contactListId', list.contactListId).call()
+                if (!access.canSeeHeader) continue
+                if (memberOnly && !access.isMember && access.membershipStatusId !== 'CLPT_PENDING') continue
+                entries.push({contactListId: list.contactListId, contactListTypeEnumId: list.contactListTypeEnumId ?? null,
+                    contactListName: list.contactListName ?? null, description: list.description ?? null, isPublic: list.isPublic ?? null,
+                    postingEnumId: access.postingEnumId, defaultDeliveryEnumId: list.defaultDeliveryEnumId ?? null,
+                    archivedDate: list.archivedDate ?? null, ownerPartyId: list.ownerPartyId ?? null, isMember: access.isMember,
+                    membershipStatusId: access.membershipStatusId ?? null, memberRoleTypeId: access.memberRoleTypeId ?? null,
+                    deliveryEnumId: access.deliveryEnumId ?? null, canPost: access.canPost, canModerate: access.canModerate,
+                    canJoin: access.canJoin, canReadAll: access.canReadAll, memberCount: memberCounts[list.contactListId] || 0,
+                    unreadCount: 0, lastPostDate: null, isMailbox: access.isMailbox})
+            }
+
+            // a mailbox's unread count and last post, for the mailboxes the user reads
+            const readIds = entries.filter((entry) => entry.isMailbox && entry.canReadAll).map((entry) => entry.contactListId)
+            if (readIds.length && partyId) {
+                const unread = {}
+                for (const row of ec.entity.find('mantle.party.communication.CommunicationEventPartyAndEvent').condition('partyId', partyId)
+                        .condition('contactListId', 'in', readIds).condition('roleTypeId', 'in', ['MessageTo', 'MessageCc', 'MessageMailbox'])
+                        .condition('readDate', null).condition('archivedDate', null).condition(cf.makeCondition('statusId', 'not-equals', 'CeCancelled', true))
+                        .selectField('contactListId').selectField('communicationEventId').distinct(true).list())
+                    unread[row.contactListId] = (unread[row.contactListId] || 0) + 1
+                for (const entry of entries) {
+                    if (!readIds.includes(entry.contactListId)) continue
+                    entry.unreadCount = unread[entry.contactListId] || 0
+                    const last = ec.entity.find('mantle.party.communication.CommunicationEvent').condition('contactListId', entry.contactListId)
+                            .condition(cf.makeCondition('statusId', 'not-equals', 'CeCancelled', true)).selectField('entryDate')
+                            .orderBy('-entryDate').limit(1).list()
+                    entry.lastPostDate = last.length ? last[0].entryDate : null
+                }
+            }
+            for (const entry of entries) delete entry.isMailbox
+            contactListList = entries
+        ]]></script></actions>
+    </service>
+
+    <service verb="find" noun="ContactListParties">
+        <description>
+            The members of a contact list (current CLPT_ACCEPTED rows) with their name, role, delivery (deliveryEnumId as
+            set, effectiveDeliveryEnumId with the list's default) and since when, owners first. pendingList has the join
+            requests (CLPT_PENDING), for the mailbox's owners and moderators. A mailbox's members are seen by those who may
+            read it, and a public one's by any user.
+        </description>
+        <in-parameters><parameter name="contactListId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="memberList" type="List"><parameter name="member" type="Map">
+                <parameter name="partyId"/><parameter name="name"/><parameter name="roleTypeId"/><parameter name="deliveryEnumId"/>
+                <parameter name="effectiveDeliveryEnumId"/><parameter name="statusId"/><parameter name="fromDate"/>
+            </parameter></parameter>
+            <parameter name="pendingList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            memberList = []
+            pendingList = []
+            const access = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                    .parameter('contactListId', contactListId).call()
+            if (!access.exists || !access.canSeeHeader) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            if (access.isMailbox && !access.canReadAll && !access.isPublic) {
+                ec.message.addError('Only the members of this mailbox may see its members'); return }
+            const list = access.contactList
+            const rows = Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', contactListId)
+                    .condition('statusId', 'in', ['CLPT_ACCEPTED', 'CLPT_PENDING'])
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).orderBy('fromDate').list())
+            const partyIds = Array.from(new Set(rows.map((row) => row.partyId)))
+            const names = {}
+            if (partyIds.length) for (const party of ec.entity.find('mantle.party.PartyDetail').condition('partyId', 'in', partyIds)
+                    .disableAuthz().list())
+                names[party.partyId] = party.organizationName || [party.firstName, party.lastName].filter((part) => part).join(' ') || party.partyId
+            const roleOrder = {ListOwner: 0, ListModerator: 1}
+            const seen = new Set()
+            for (const row of rows) {
+                const entry = {partyId: row.partyId, name: names[row.partyId] || row.partyId, roleTypeId: row.roleTypeId ?? null,
+                    deliveryEnumId: row.deliveryEnumId ?? null, effectiveDeliveryEnumId: row.deliveryEnumId || list.defaultDeliveryEnumId || 'CldInbox',
+                    statusId: row.statusId, fromDate: row.fromDate}
+                if (row.statusId === 'CLPT_ACCEPTED') {
+                    if (seen.has(row.partyId)) continue
+                    seen.add(row.partyId)
+                    memberList.push(entry)
+                } else if (access.canModerate) pendingList.push(entry)
+            }
+            pendingList = pendingList.filter((entry) => !seen.has(entry.partyId))
+            memberList.sort((a, b) => (roleOrder[a.roleTypeId] ?? 2) - (roleOrder[b.roleTypeId] ?? 2))
+        ]]></script></actions>
+    </service>
+
+    <service verb="join" noun="ContactList">
+        <description>
+            The current user joins a contact list: a member (CLPT_ACCEPTED) of a public list, a join request (CLPT_PENDING)
+            for a private one, which an owner or moderator accepts with add#ContactListParty or declines with
+            decline#ContactListParty. A private mailbox is not shown to those outside it, so a request goes by its id (a
+            link or an invitation); the requester then sees its header. A member or a pending request stays as it is; a
+            declined request may be asked again.
+        </description>
+        <in-parameters><parameter name="contactListId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="statusId"/>
+            <parameter name="fromDate" type="Timestamp"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            // the party's current row: an accepted one first, then a pending request, then the latest
+            const currentRow = (id) => {
+                const rows = Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', contactListId)
+                        .condition('partyId', id).condition(ec.entity.conditionFactory.makeConditionDate('fromDate', 'thruDate', null))
+                        .orderBy('-fromDate').list())
+                return rows.find((row) => row.statusId === 'CLPT_ACCEPTED') || rows.find((row) => row.statusId === 'CLPT_PENDING') || rows[0] || null
+            }
+            const partyId = ec.user.userAccount?.partyId || null
+            if (!partyId) { ec.message.addError('Joining a list needs a user with a party'); return }
+            const access = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                    .parameter('contactListId', contactListId).call()
+            // a private mailbox's header is hidden from those outside it, and a request by its id is still taken
+            if (!access.exists || (!access.canSeeHeader && !access.isMailbox)) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            if (access.isMember || access.membershipStatusId === 'CLPT_PENDING') {
+                statusId = access.membershipStatusId; fromDate = access.memberFromDate; return }
+            if (access.isArchived) { ec.message.addError(`${access.contactList?.contactListName || contactListId} is archived`); return }
+            statusId = access.isPublic ? 'CLPT_ACCEPTED' : 'CLPT_PENDING'
+            const row = currentRow(partyId)
+            if (row != null) {
+                // a current declined (or other) row: asked again
+                row.set('statusId', statusId)
+                row.update()
+                fromDate = row.fromDate
+                return
+            }
+            fromDate = ec.user.nowTimestamp
+            ec.service.sync().name('create#mantle.marketing.contact.ContactListParty').parameters({contactListId: contactListId,
+                partyId: partyId, fromDate: fromDate, statusId: statusId}).call()
+        ]]></script></actions>
+    </service>
+    <service verb="leave" noun="ContactList">
+        <description>
+            The current user leaves a contact list, or withdraws a join request: thruDate on the current rows. The last
+            owner of a mailbox cannot leave while it has other members.
+        </description>
+        <in-parameters><parameter name="contactListId" required="true"/></in-parameters>
+        <out-parameters><parameter name="left" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            left = false
+            const partyId = ec.user.userAccount?.partyId || null
+            if (!partyId) { ec.message.addError('Leaving a list needs a user with a party'); return }
+            ec.service.sync().name('mantle.marketing.ContactListServices.end#ContactListParty')
+                    .parameters({contactListId: contactListId, partyId: partyId}).call()
+            if (ec.message.hasError()) return
+            left = true
+        ]]></script></actions>
+    </service>
+    <service verb="end" noun="ContactListParty">
+        <description>Sets thruDate on a party's current rows of a list (internal: leave#ContactList and remove#ContactListParty
+            check who may). The last owner of a mailbox is not removed while the mailbox has other members.</description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="endedCount" type="Integer"/></out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            endedCount = 0
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', contactListId).one()
+            if (list == null) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            const current = Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', contactListId)
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list())
+            const mine = current.filter((row) => row.partyId === partyId)
+            if (mine.length === 0) { ec.message.addError(`Party ${partyId} is not in ${list.contactListName || contactListId}`); return }
+            if (list.contactListTypeEnumId === 'MAILBOX' && mine.some((row) => row.statusId === 'CLPT_ACCEPTED' && row.roleTypeId === 'ListOwner')) {
+                const accepted = current.filter((row) => row.statusId === 'CLPT_ACCEPTED')
+                const otherOwners = accepted.filter((row) => row.roleTypeId === 'ListOwner' && row.partyId !== partyId)
+                const otherMembers = accepted.filter((row) => row.partyId !== partyId)
+                if (otherOwners.length === 0 && otherMembers.length > 0) {
+                    ec.message.addError('The last owner of a mailbox cannot leave it while it has other members; make another member an owner first')
+                    return
+                }
+            }
+            for (const row of mine) {
+                row.set('thruDate', ec.user.nowTimestamp)
+                row.update()
+                endedCount++
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="add" noun="ContactListParty">
+        <description>
+            An owner or moderator of a mailbox adds a member (CLPT_ACCEPTED) or accepts a pending or declined request;
+            for a member already in the list, the role and delivery given are set. Only an owner gives or changes a role
+            (ListOwner, ListModerator; empty is a member). Lists of other types are not checked here.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyId" required="true"/>
+            <parameter name="roleTypeId"><description>ListOwner, ListModerator, or empty for a member</description></parameter>
+            <parameter name="deliveryEnumId"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="statusId"/>
+            <parameter name="fromDate" type="Timestamp"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            // the party's current row: an accepted one first, then a pending request, then the latest
+            const currentRow = (id) => {
+                const rows = Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', contactListId)
+                        .condition('partyId', id).condition(ec.entity.conditionFactory.makeConditionDate('fromDate', 'thruDate', null))
+                        .orderBy('-fromDate').list())
+                return rows.find((row) => row.statusId === 'CLPT_ACCEPTED') || rows.find((row) => row.statusId === 'CLPT_PENDING') || rows[0] || null
+            }
+            const access = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                    .parameter('contactListId', contactListId).call()
+            if (!access.exists || !access.canSeeHeader) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            const listName = access.contactList?.contactListName || contactListId
+            if (access.isMailbox && !access.canModerate) { ec.message.addError(`Only an owner or moderator of ${listName} may add members`); return }
+            if (access.isArchived) { ec.message.addError(`${listName} is archived`); return }
+            if (roleTypeId && !['ListOwner', 'ListModerator'].includes(roleTypeId)) {
+                ec.message.addError(`A list member's role is ListOwner, ListModerator or empty, not ${roleTypeId}`); return }
+            if (roleTypeId && access.isMailbox && !access.isOwner) { ec.message.addError(`Only an owner of ${listName} may give a role`); return }
+            if (deliveryEnumId && ec.entity.find('moqui.basic.Enumeration').condition('enumId', deliveryEnumId)
+                    .condition('enumTypeId', 'ContactListDelivery').useCache(true).one() == null) {
+                ec.message.addError(`Unknown delivery ${deliveryEnumId}`); return }
+            if (ec.entity.find('mantle.party.Party').condition('partyId', partyId).disableAuthz().one() == null) {
+                ec.message.addError(`Party ${partyId} not found`); return }
+
+            statusId = 'CLPT_ACCEPTED'
+            const row = currentRow(partyId)
+            if (row != null) {
+                const wasMember = row.statusId === 'CLPT_ACCEPTED'
+                if (wasMember && row.roleTypeId && row.roleTypeId !== roleTypeId && access.isMailbox && !access.isOwner) {
+                    ec.message.addError(`Only an owner of ${listName} may change a role`); return }
+                row.set('statusId', 'CLPT_ACCEPTED')
+                if (!wasMember || access.isOwner || !access.isMailbox) row.set('roleTypeId', roleTypeId || null)
+                if (deliveryEnumId) row.set('deliveryEnumId', deliveryEnumId)
+                row.update()
+                fromDate = row.fromDate
+                return
+            }
+            fromDate = ec.user.nowTimestamp
+            ec.service.sync().name('create#mantle.marketing.contact.ContactListParty').parameters({contactListId: contactListId,
+                partyId: partyId, fromDate: fromDate, statusId: statusId, roleTypeId: roleTypeId || null, deliveryEnumId: deliveryEnumId || null}).call()
+        ]]></script></actions>
+    </service>
+    <service verb="remove" noun="ContactListParty">
+        <description>
+            An owner or moderator of a mailbox removes a member or withdraws an invitation (thruDate); a moderator does
+            not remove an owner. The last owner is not removed while the mailbox has other members.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyId" required="true"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const access = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                    .parameter('contactListId', contactListId).call()
+            if (!access.exists || !access.canSeeHeader) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            const listName = access.contactList?.contactListName || contactListId
+            if (access.isMailbox) {
+                if (!access.canModerate) { ec.message.addError(`Only an owner or moderator of ${listName} may remove members`); return }
+                const target = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                        .parameters({contactListId: contactListId, partyId: partyId}).call()
+                if (target.isOwner && !access.isOwner) { ec.message.addError(`Only an owner of ${listName} may remove an owner`); return }
+            }
+            ec.service.sync().name('mantle.marketing.ContactListServices.end#ContactListParty')
+                    .parameters({contactListId: contactListId, partyId: partyId}).call()
+        ]]></script></actions>
+    </service>
+    <service verb="decline" noun="ContactListParty">
+        <description>An owner or moderator of a mailbox declines a party's pending join request (CLPT_REJECTED).</description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="partyId" required="true"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            // the party's current row: an accepted one first, then a pending request, then the latest
+            const currentRow = (id) => {
+                const rows = Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', contactListId)
+                        .condition('partyId', id).condition(ec.entity.conditionFactory.makeConditionDate('fromDate', 'thruDate', null))
+                        .orderBy('-fromDate').list())
+                return rows.find((row) => row.statusId === 'CLPT_ACCEPTED') || rows.find((row) => row.statusId === 'CLPT_PENDING') || rows[0] || null
+            }
+            const access = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                    .parameter('contactListId', contactListId).call()
+            if (!access.exists || !access.canSeeHeader) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            const listName = access.contactList?.contactListName || contactListId
+            if (access.isMailbox && !access.canModerate) { ec.message.addError(`Only an owner or moderator of ${listName} may decline a request`); return }
+            const row = currentRow(partyId)
+            if (row == null || row.statusId !== 'CLPT_PENDING') { ec.message.addError(`Party ${partyId} has no pending request for ${listName}`); return }
+            row.set('statusId', 'CLPT_REJECTED')
+            row.update()
+        ]]></script></actions>
+    </service>
+    <service verb="set" noun="ContactListPartyDelivery">
+        <description>
+            A member's delivery of a mailbox's posts: CldInbox (in the Inbox and its count) or CldMailboxOnly (only under
+            the mailbox); empty goes back to the list's default. The current user sets their own; an owner or moderator
+            may set another member's.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="deliveryEnumId"/>
+            <parameter name="partyId"><description>Defaults to the current user's party</description></parameter>
+        </in-parameters>
+        <out-parameters><parameter name="effectiveDeliveryEnumId"/></out-parameters>
+        <actions><script><![CDATA[
+            // the party's current row: an accepted one first, then a pending request, then the latest
+            const currentRow = (id) => {
+                const rows = Array.from(ec.entity.find('mantle.marketing.contact.ContactListParty').condition('contactListId', contactListId)
+                        .condition('partyId', id).condition(ec.entity.conditionFactory.makeConditionDate('fromDate', 'thruDate', null))
+                        .orderBy('-fromDate').list())
+                return rows.find((row) => row.statusId === 'CLPT_ACCEPTED') || rows.find((row) => row.statusId === 'CLPT_PENDING') || rows[0] || null
+            }
+            const userPartyId = ec.user.userAccount?.partyId || null
+            if (!partyId) partyId = userPartyId
+            if (!partyId) { ec.message.addError('Setting a delivery needs a user with a party'); return }
+            if (deliveryEnumId && ec.entity.find('moqui.basic.Enumeration').condition('enumId', deliveryEnumId)
+                    .condition('enumTypeId', 'ContactListDelivery').useCache(true).one() == null) {
+                ec.message.addError(`Unknown delivery ${deliveryEnumId}`); return }
+            const access = ec.service.sync().name('mantle.marketing.ContactListServices.get#ContactListAccess')
+                    .parameter('contactListId', contactListId).call()
+            if (!access.exists || !access.canSeeHeader) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            if (partyId !== userPartyId && access.isMailbox && !access.canModerate) {
+                ec.message.addError('Only an owner or moderator may set another member\'s delivery'); return }
+            const row = currentRow(partyId)
+            if (row == null || row.statusId !== 'CLPT_ACCEPTED') {
+                ec.message.addError(`Party ${partyId} is not a member of ${access.contactList?.contactListName || contactListId}`); return }
+            row.set('deliveryEnumId', deliveryEnumId || null)
+            row.update()
+            effectiveDeliveryEnumId = deliveryEnumId || access.contactList.defaultDeliveryEnumId || 'CldInbox'
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Marketing sends ========== -->
+
+    <service verb="send" noun="ContactListEmail" transaction="ignore" allow-remote="false">
+        <description>
+            Sends an email to each subscribed member of a contact list (a list of email that is not a mailbox and not
+            archived): the members with a current CLPT_ACCEPTED or CLPT_IN_USE row (only those of partyIdList when given),
+            each once, at the row's preferredContactMechId when it is one of the party's current email addresses, else the
+            party's primary email. Consent gates it: a member is skipped (skippedList, with the reason) when the address
+            does not allow solicitation (allowSolicitation N), its marketing email consent or the party's is withdrawn, it
+            has no email address, the address was already sent to, or the party is disabled or merged.
+
+            The message is the template's (emailTemplateId, else the list's current CONT_EMAIL_TEMPLATE ContactListEmail):
+            its server, from and subject, with body and bodyText when given (else the template's body screen). One
+            CommunicationEvent (type Email, the list's contactListId, from the list's owner) stands for the send. For each
+            member, in a transaction of its own (send#ContactListPartyEmail): an unsubscribe token
+            (mantle.party.ConsentServices.create#UnsubscribeToken, under baseUrl, else https://webHostName of the
+            template, else the web request's root; with unsubscribeMailto the mailto too; validDays), the email with the
+            List-Unsubscribe and List-Unsubscribe-Post headers (RFC 2369, RFC 8058; given to send#EmailTemplate as
+            extraHeaders) and the bodyParameters plus unsubscribeUrl, partyId, contactListId, contactListName,
+            organizationName and communicationEventId, a ContactListCommStatus row with the Message-ID, and the Message-ID
+            on the token. ${unsubscribeUrl} and the other bodyParameters are expanded in a given body; a body without the
+            link gets a short footer with it. A member whose send fails is logged and listed in failedPartyIdList, and the
+            others are still sent.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="emailTemplateId"/>
+            <parameter name="body" allow-html="any"/>
+            <parameter name="bodyText" allow-html="any"/>
+            <parameter name="subject"><description>The communication event's subject; the template's subject is the email's</description></parameter>
+            <parameter name="bodyParameters" type="Map"/>
+            <parameter name="partyIdList" type="List"><parameter name="partyId"/></parameter>
+            <parameter name="baseUrl"><description>The site's https root for the unsubscribe links</description></parameter>
+            <parameter name="unsubscribeMailto"/>
+            <parameter name="validDays" type="Integer"><description>How long the unsubscribe links work; empty is no end</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="communicationEventId"/>
+            <parameter name="sentCount" type="Integer"/>
+            <parameter name="recipientList" type="List"><parameter name="recipient" type="Map">
+                <parameter name="partyId"/><parameter name="contactMechId"/><parameter name="emailAddress"/><parameter name="emailMessageId"/>
+                <parameter name="messageId"/><parameter name="unsubscribeUrl"/><parameter name="listUnsubscribeHeaders" type="Map"/></parameter></parameter>
+            <parameter name="skippedList" type="List"><parameter name="skipped" type="Map">
+                <parameter name="partyId"/><parameter name="contactMechId"/><parameter name="reason"/></parameter></parameter>
+            <parameter name="failedPartyIdList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const cf = ec.entity.conditionFactory
+            const CLP = 'mantle.marketing.contact.ContactListParty'
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const number = Number(value)
+                return Number.isNaN(number) ? new Date(String(value)).getTime() : number
+            }
+            const idOrder = (a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)
+            const newestFirst = (a, b) => ((toMillis(b.consentDate) ?? 0) - (toMillis(a.consentDate) ?? 0)) ||
+                    idOrder(String(b.partyConsentId), String(a.partyConsentId))
+            communicationEventId = null; sentCount = 0; recipientList = []; skippedList = []; failedPartyIdList = []
+            const nowMillis = toMillis(ec.user.nowTimestamp)
+            const currentDate = cf.makeConditionDate('fromDate', 'thruDate', null)
+
+            const list = ec.entity.find('mantle.marketing.contact.ContactList').condition('contactListId', contactListId).one()
+            if (list == null) { ec.message.addError(`Contact list ${contactListId} not found`); return }
+            const listName = list.contactListName || contactListId
+            if (list.contactListTypeEnumId === 'MAILBOX') { ec.message.addError(`${listName} is a mailbox: post to it instead`); return }
+            if (list.archivedDate != null && toMillis(list.archivedDate) <= nowMillis) { ec.message.addError(`${listName} is archived`); return }
+            if (list.contactMechTypeEnumId && list.contactMechTypeEnumId !== 'CmtEmailAddress') { ec.message.addError(`${listName} is not a list of email addresses`); return }
+            if (!emailTemplateId) emailTemplateId = Array.from(ec.entity.find('mantle.marketing.contact.ContactListEmail').condition('contactListId', contactListId)
+                    .condition('emailTypeEnumId', 'CONT_EMAIL_TEMPLATE').condition(currentDate).orderBy('-fromDate').list()).map((row) => row.emailTemplateId).find((id) => id) || null
+            if (!emailTemplateId) { ec.message.addError(`${listName} has no email template: give emailTemplateId or add its Outgoing Email`); return }
+            const template = ec.entity.find('moqui.basic.email.EmailTemplate').condition('emailTemplateId', emailTemplateId).one()
+            if (template == null) { ec.message.addError(`Email template ${emailTemplateId} not found`); return }
+            // the site address: baseUrl, the template's web host name, its email server's web base URL, the conf webapp's
+            // URL; never the host of a request, and never localhost, which a whole list would get as a dead link
+            let root = String(baseUrl || '').trim()
+            if (!root && template.webHostName) root = `https://${template.webHostName}`
+            if (!root && template.emailServerId) root = String(ec.entity.find('moqui.basic.email.EmailServer')
+                    .condition('emailServerId', template.emailServerId).useCache(true).one()?.webBaseUrl || '').trim()
+            if (!root) { try { root = ec.web ? String(ec.web.getWebappRootUrl(true, null) || '') : '' } catch (err) { root = '' } }
+            if (/^https?:\/\/(localhost|127\.0\.0\.1)([:\/]|$)/i.test(root)) root = ''
+            if (!root) { ec.message.addError('The unsubscribe links need the site address: give baseUrl, the template\'s web host name or its email server\'s web base URL'); return }
+            let organizationName = null
+            if (list.ownerPartyId) {
+                const owner = ec.entity.find('mantle.party.PartyDetail').condition('partyId', list.ownerPartyId).one()
+                organizationName = owner == null ? null : (owner.organizationName || ec.resource.expand('PartyFullNameTemplate', '', owner).trim() || null)
+            }
+
+            // the subscribed members, each party once
+            const only = partyIdList ? new Set(Array.from(partyIdList).map((id) => String(id))) : null
+            const memberRows = Array.from(ec.entity.find(CLP).condition('contactListId', contactListId).condition(currentDate)
+                    .condition('statusId', 'in', ['CLPT_ACCEPTED', 'CLPT_IN_USE']).orderBy('-fromDate').list())
+                    .filter((row) => only == null || only.has(row.partyId))
+            // each party's latest row, the members in the order they joined (then by id), so an address two share goes to the first
+            const byParty = new Map()
+            for (const row of memberRows) if (!byParty.has(row.partyId)) byParty.set(row.partyId, row)
+            const joined = (row) => toMillis(row.fromDate) ?? 0
+            const members = Array.from(byParty.entries()).sort(([a, left], [b, right]) => (joined(left) - joined(right)) || idOrder(String(a), String(b)))
+            const skip = (partyId, contactMechId, reason) => skippedList.push({partyId: partyId, contactMechId: contactMechId || null, reason: reason})
+            const recipients = []
+            const addresses = new Set()
+            for (const [partyId, row] of members) {
+                const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+                if (party == null || party.disabled === 'Y' || party.mergedToPartyId) { skip(partyId, null, 'disabled or merged'); continue }
+                const infos = Array.from(ec.entity.find('mantle.party.contact.PartyContactMechInfo').condition('partyId', partyId)
+                        .condition('contactMechTypeEnumId', 'CmtEmailAddress').condition(currentDate).orderBy('fromDate').list()).filter((info) => info.infoString)
+                const preferred = row.preferredContactMechId ? infos.find((info) => info.contactMechId === row.preferredContactMechId) : null
+                const address = preferred || infos.find((info) => info.contactMechPurposeId === 'EmailPrimary') || infos[0] || null
+                if (address == null) { skip(partyId, null, 'no email address'); continue }
+                const flags = infos.filter((info) => info.contactMechId === address.contactMechId).map((info) => info.allowSolicitation)
+                if (flags.includes('N') && !flags.includes('Y')) { skip(partyId, address.contactMechId, 'does not allow solicitation'); continue }
+                const consents = Array.from(ec.entity.find('mantle.party.PartyConsent').condition('partyId', partyId)
+                        .condition('purposeEnumId', 'PcpMarketingEmail').condition('contactListId', null).list())
+                consents.sort(newestFirst)
+                const forAddress = consents.find((consent) => consent.contactMechId === address.contactMechId)
+                const forParty = consents.find((consent) => !consent.contactMechId)
+                if (forAddress?.statusId === 'PconWithdrawn' || (!forAddress && forParty?.statusId === 'PconWithdrawn')) {
+                    skip(partyId, address.contactMechId, 'marketing email withdrawn'); continue }
+                const key = String(address.infoString).trim().toLowerCase()
+                if (addresses.has(key)) { skip(partyId, address.contactMechId, 'address already sent to'); continue }
+                addresses.add(key)
+                recipients.push({partyId: partyId, contactMechId: address.contactMechId, emailAddress: address.infoString})
+            }
+
+            // the send's communication event, committed (in a transaction of its own, when the caller has one) before the
+            // members' rows refer to it from theirs
+            communicationEventId = ec.service.sync().name('create#mantle.party.communication.CommunicationEvent').requireNewTransaction(true).parameters({
+                communicationEventTypeId: 'Email', contactMechTypeEnumId: 'CmtEmailAddress', statusId: 'CeSent', fromPartyId: list.ownerPartyId || null,
+                contactListId: contactListId, subject: subject || template.subject || listName, contentType: body ? 'text/html' : (bodyText ? 'text/plain' : null),
+                body: body || bodyText || null, entryDate: ec.user.nowTimestamp, datetimeStarted: ec.user.nowTimestamp}).call()?.communicationEventId ?? null
+            if (ec.message.hasError() || !communicationEventId) return
+
+            for (const recipient of recipients) {
+                try {
+                    const out = ec.service.sync().name('mantle.marketing.ContactListServices.send#ContactListPartyEmail').parameters({
+                        contactListId: contactListId, communicationEventId: communicationEventId, partyId: recipient.partyId,
+                        contactMechId: recipient.contactMechId, emailAddress: recipient.emailAddress, emailTemplateId: emailTemplateId,
+                        body: body || null, bodyText: bodyText || null, bodyParameters: bodyParameters || null, baseUrl: root,
+                        unsubscribeMailto: unsubscribeMailto || null, validDays: validDays || null, contactListName: listName,
+                        organizationName: organizationName}).requireNewTransaction(true).call()
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                    recipientList.push(Object.assign({}, recipient, {emailMessageId: out.emailMessageId ?? null, messageId: out.messageId ?? null,
+                        unsubscribeUrl: out.unsubscribeUrl ?? null, listUnsubscribeHeaders: out.listUnsubscribeHeaders ?? null}))
+                    sentCount++
+                } catch (err) {
+                    ec.message.clearErrors()
+                    ec.logger.error(`List email ${communicationEventId} of list ${contactListId} to party ${recipient.partyId} failed: ${String(err && err.message ? err.message : err).trim()}`)
+                    failedPartyIdList.push(recipient.partyId)
+                }
+            }
+            ec.service.sync().name('update#mantle.party.communication.CommunicationEvent').parameters({communicationEventId: communicationEventId,
+                datetimeEnded: ec.user.nowTimestamp}).call()
+        ]]></script></actions>
+    </service>
+    <service verb="send" noun="ContactListPartyEmail" allow-remote="false">
+        <description>
+            Internal, for send#ContactListEmail: one member's email of a list send, in its own transaction: the unsubscribe
+            token, the email (send#EmailTemplate with the List-Unsubscribe headers as extraHeaders), its ContactListCommStatus
+            (CeSent with the Message-ID, CeReady when the server sent nothing) and the Message-ID on the token.
+        </description>
+        <in-parameters>
+            <parameter name="contactListId" required="true"/>
+            <parameter name="communicationEventId" required="true"/>
+            <parameter name="partyId" required="true"/>
+            <parameter name="contactMechId" required="true"/>
+            <parameter name="emailAddress" required="true"/>
+            <parameter name="emailTemplateId" required="true"/>
+            <parameter name="body" allow-html="any"/>
+            <parameter name="bodyText" allow-html="any"/>
+            <parameter name="bodyParameters" type="Map"/>
+            <parameter name="baseUrl"/>
+            <parameter name="unsubscribeMailto"/>
+            <parameter name="validDays" type="Integer"/>
+            <parameter name="contactListName"/>
+            <parameter name="organizationName"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="emailMessageId"/>
+            <parameter name="messageId"/>
+            <parameter name="unsubscribeUrl"/>
+            <parameter name="listUnsubscribeHeaders" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const link = ec.service.sync().name('mantle.party.ConsentServices.create#UnsubscribeToken').parameters({contactListId: contactListId,
+                partyId: partyId, contactMechId: contactMechId, communicationEventId: communicationEventId, baseUrl: baseUrl || null,
+                mailtoAddress: unsubscribeMailto || null, validDays: validDays || null}).call()
+            if (ec.message.hasError()) return
+            unsubscribeUrl = link.unsubscribeUrl
+            listUnsubscribeHeaders = link.listUnsubscribeHeaders
+            const party = ec.entity.find('mantle.party.PartyDetail').condition('partyId', partyId).one()
+            const params = Object.assign({}, bodyParameters || {}, {partyId: partyId, firstName: party?.firstName ?? null, lastName: party?.lastName ?? null,
+                partyName: party == null ? null : (ec.resource.expand('PartyFullNameTemplate', '', party).trim() || null), contactListId: contactListId,
+                contactListName: contactListName || contactListId, organizationName: organizationName || null, communicationEventId: communicationEventId,
+                unsubscribeUrl: unsubscribeUrl, listUnsubscribeHeaders: listUnsubscribeHeaders})
+            const encode = (text) => String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+            // ${name} of the parameters in a given body (HTML-encoded there), and the unsubscribe footer when the body has no link
+            const expand = (text, html) => String(text).replace(/\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/g, (whole, name) =>
+                    Object.prototype.hasOwnProperty.call(params, name) ? (html ? encode(params[name]) : String(params[name] ?? '')) : whole)
+            const footerName = encode(params.contactListName)
+            let html = body ? expand(body, true) : null
+            if (html && !html.includes(unsubscribeUrl)) html += `<p style="font-size:12px;color:#666666">You receive this email because you subscribed to ${footerName}.`
+                    + ` <a href="${encode(unsubscribeUrl)}">Unsubscribe</a></p>`
+            let text = bodyText ? expand(bodyText, false) : null
+            if (text && !text.includes(unsubscribeUrl)) text += `\n\n--\nYou receive this email because you subscribed to ${params.contactListName}. Unsubscribe: ${unsubscribeUrl}\n`
+            const out = ec.service.sync().name('org.moqui.impl.EmailServices.send#EmailTemplate').parameters({emailTemplateId: emailTemplateId,
+                toAddresses: emailAddress, body: html, bodyText: text, bodyParameters: params, extraHeaders: listUnsubscribeHeaders,
+                createEmailMessage: true}).call()
+            if (ec.message.hasError()) return
+            emailMessageId = out?.emailMessageId || null
+            messageId = out?.messageId || null
+            ec.service.sync().name('store#mantle.marketing.contact.ContactListCommStatus').parameters({contactListId: contactListId,
+                communicationEventId: communicationEventId, contactMechId: contactMechId, partyId: partyId, messageId: messageId,
+                statusId: messageId ? 'CeSent' : 'CeReady'}).call()
+            if (ec.message.hasError()) return
+            if (messageId) {
+                const tokenRow = ec.entity.find('mantle.marketing.contact.ContactListToken').condition('contactListTokenId', link.contactListTokenId).one()
+                if (tokenRow != null) { tokenRow.set('messageId', messageId); tokenRow.update() }
+            }
+        ]]></script></actions>
+    </service>
+</services>

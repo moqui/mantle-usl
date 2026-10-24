@@ -1,0 +1,938 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+This software is in the public domain under CC0 1.0 Universal plus a
+Grant of Patent License.
+
+To the extent possible under law, the author(s) have dedicated all
+copyright and related and neighboring rights to this software to the
+public domain worldwide. This software is distributed without any
+warranty.
+
+You should have received a copy of the CC0 Public Domain Dedication
+along with this software (see the LICENSE.md file). If not, see
+<http://creativecommons.org/publicdomain/zero/1.0/>.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <!-- Calendars (mantle.work.calendar.Calendar): a user's personal calendars, shared calendars, resource calendars and
+        subscriptions to external feeds, the events in them (CalendarWorkEffort), their shares and publish links. These
+        services enforce access, as entity filters do not apply to calendars: the owner's person manages a calendar, and a
+        current CalendarShare for the user, one of the user's groups, the user's party or an organization the user belongs
+        to gives free/busy (CalpFreeBusy), view (CalpView), edit (CalpEdit) or manage (CalpManage). A subscription calendar's
+        events come only from its feed.
+
+        The iCalendar files themselves (parse and write, RRULE expansion with time zones, iMIP) are the framework's
+        ICalendar tool, ec.factory.getTool('ICalendar'). Until it exists the services that need it do nothing (the fetch
+        job) or say it is not available (export and import). The tool methods these services call:
+        - parse(icsText): {events: [event]} for the VEVENTs of a calendar file (an override instance has recurrenceId)
+        - write({method, calendarName, timeZone, events: [event]}): the ICS text; method PUBLISH for an export, REQUEST,
+          REPLY or CANCEL for iMIP mail
+        - expand(rrule, dtstart, timeZone, exdates, rdates, rangeStart, rangeEnd): see mantle.work.EventServices.get#EventInstances
+        An event map: {uid, sequence, summary, description, location, url, status (CONFIRMED, TENTATIVE or CANCELLED),
+        start and end (epoch millis; end may be null), allDay, startDate and endDate (yyyy-MM-dd, endDate the day after the
+        last day, for an all-day event), timeZone (IANA), rrule (the RRULE value), exdates and rdates (lists of RFC 5545
+        DATE-TIME or DATE value text), recurrenceId (epoch millis: the start of the instance an override replaces),
+        organizer {name, email}, attendees [{name, email, partstat (NEEDS-ACTION, ACCEPTED, TENTATIVE, DECLINED), role
+        (REQ-PARTICIPANT, OPT-PARTICIPANT), rsvp}], alarms [{offsetMinutes, action (DISPLAY or EMAIL)}], lastModified}. -->
+
+    <service verb="check" noun="CalendarAccess">
+        <description>
+            The current user's permission on calendars: CalpManage for a calendar whose owner is the user's party, else the
+            highest current CalendarShare for the user, one of the user's groups, the user's party or an organization the
+            user's party belongs to (a PrtAgent, PrtEmployee or PrtMember relationship); a publish link does not count. With
+            calendarId and permissionEnumId, an error when the user has less; a calendar the user has no permission on is
+            "not found". permissionMap has the permission (or null) of each calendar of calendarIdList and calendarId.
+        </description>
+        <in-parameters>
+            <parameter name="calendarId"/>
+            <parameter name="calendarIdList" type="List"><parameter name="calendarId"/></parameter>
+            <parameter name="permissionEnumId"><description>The permission needed on calendarId: CalpFreeBusy, CalpView,
+                CalpEdit or CalpManage. Empty only reports.</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="calendar" type="Map"><description>calendarId's, null when the user has no permission</description></parameter>
+            <parameter name="userPermissionEnumId"/>
+            <parameter name="isOwner" type="Boolean"/>
+            <parameter name="permissionMap" type="Map"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const levels = {CalpFreeBusy: 1, CalpView: 2, CalpEdit: 3, CalpManage: 4}
+            const names = [null, 'CalpFreeBusy', 'CalpView', 'CalpEdit', 'CalpManage']
+            const verbs = {CalpFreeBusy: 'see the free/busy times of', CalpView: 'view', CalpEdit: 'edit', CalpManage: 'manage'}
+            permissionMap = {}
+            isOwner = false
+            calendar = null
+            userPermissionEnumId = null
+            if (permissionEnumId && !levels[permissionEnumId]) { ec.message.addError(`Unknown calendar permission ${permissionEnumId}`); return }
+            const ids = []
+            if (calendarId) ids.push(calendarId)
+            if (calendarIdList) for (const id of Array.from(calendarIdList)) if (id && !ids.includes(id)) ids.push(id)
+            if (!ids.length) return
+            const cf = ec.entity.conditionFactory
+            const userId = ec.user.userId
+            const partyId = ec.user.userAccount?.partyId || null
+            const calendars = new Map()
+            for (const row of ec.entity.find('mantle.work.calendar.Calendar').condition(cf.makeCondition('calendarId', 'in', ids)).list())
+                calendars.set(row.calendarId, row)
+            const level = new Map()
+            const owned = new Set()
+            if (userId) {
+                for (const [id, row] of calendars) if (partyId && row.ownerPartyId === partyId) { level.set(id, 4); owned.add(id) }
+                const shareIds = ids.filter((id) => calendars.has(id) && !owned.has(id))
+                if (shareIds.length) {
+                    const groups = Array.from(ec.user.getUserGroupIdSet() || [])
+                    const orgIds = partyId ? Array.from(ec.entity.find('mantle.party.PartyRelationship').condition('fromPartyId', partyId)
+                            .condition(cf.makeCondition('relationshipTypeEnumId', 'in', ['PrtAgent', 'PrtEmployee', 'PrtMember']))
+                            .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).selectField('toPartyId').list())
+                            .map((row) => row.toPartyId) : []
+                    for (const share of ec.entity.find('mantle.work.calendar.CalendarShare').condition(cf.makeCondition('calendarId', 'in', shareIds))
+                            .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list()) {
+                        const applies = share.userId ? share.userId === userId
+                                : share.userGroupId ? groups.includes(share.userGroupId)
+                                : share.partyId ? (share.partyId === partyId || orgIds.includes(share.partyId)) : false
+                        if (applies) level.set(share.calendarId, Math.max(level.get(share.calendarId) || 0, levels[share.permissionEnumId] || 0))
+                    }
+                }
+            }
+            for (const id of ids) permissionMap[id] = names[level.get(id) || 0]
+            if (!calendarId) return
+            const own = level.get(calendarId) || 0
+            const row = calendars.get(calendarId)
+            isOwner = owned.has(calendarId)
+            userPermissionEnumId = names[own]
+            calendar = own ? row.getMap() : null
+            if (!permissionEnumId) return
+            if (own === 0) { ec.message.addError(`Calendar ${calendarId} not found`); return }
+            if (own < levels[permissionEnumId])
+                ec.message.addError(`You need permission to ${verbs[permissionEnumId]} the calendar ${row.calendarName || calendarId}`)
+        ]]></script></actions>
+    </service>
+
+    <service verb="ensure" noun="UserDefaultCalendar">
+        <description>The current user's default personal calendar, created on first use (named for the user, kind
+            CalkPersonal, owned by the user's party); when the user has personal calendars but none is the default, the
+            oldest becomes it.</description>
+        <in-parameters>
+            <parameter name="calendarName"><description>For a new calendar; default the user's name</description></parameter>
+            <parameter name="color"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="calendarId"/>
+            <parameter name="created" type="Boolean"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            created = false
+            const partyId = ec.user.userAccount?.partyId
+            if (!ec.user.userId || !partyId) { ec.message.addError('A default calendar needs a user with a party'); return }
+            const personal = Array.from(ec.entity.find('mantle.work.calendar.Calendar').condition('ownerPartyId', partyId)
+                    .condition('calendarKindEnumId', 'CalkPersonal').orderBy('createdDate,calendarId').list())
+            const found = personal.find((row) => row.isDefault === 'Y') || personal[0]
+            if (found != null) {
+                if (found.isDefault !== 'Y') { found.set('isDefault', 'Y'); found.update() }
+                calendarId = found.calendarId
+                return
+            }
+            let name = calendarName ? String(calendarName).trim() : ''
+            if (!name) {
+                const person = ec.entity.find('mantle.party.Person').condition('partyId', partyId).one()
+                name = person ? [person.firstName, person.lastName].filter((part) => part).join(' ') : ''
+                if (!name) name = 'My Calendar'
+            }
+            calendarId = ec.service.sync().name('create#mantle.work.calendar.Calendar').parameters({calendarName: name,
+                ownerPartyId: partyId, calendarKindEnumId: 'CalkPersonal', color: color || '#1e88e5', isDefault: 'Y',
+                createdDate: ec.user.nowTimestamp}).call()?.calendarId
+            created = !ec.message.hasError()
+        ]]></script></actions>
+    </service>
+
+    <service verb="create" noun="Calendar">
+        <description>
+            A personal calendar (the default kind) belongs to the current user's party; the user's first personal calendar
+            is the default one, and isDefault=Y makes this one the default. A shared or resource calendar may belong to an
+            organization (ownerPartyId), and then its creator gets a manage share. A subscription calendar is made by
+            subscribe#Calendar. Without a color the next one of a palette is used.
+        </description>
+        <in-parameters>
+            <parameter name="calendarName" required="true"/>
+            <parameter name="description"/>
+            <parameter name="color"/>
+            <parameter name="calendarKindEnumId" default-value="CalkPersonal"/>
+            <parameter name="ownerPartyId"><description>For a shared or resource calendar, the organization (or person) it
+                belongs to; default the user's party</description></parameter>
+            <parameter name="timeZone"/>
+            <parameter name="isDefault"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="calendarId"/>
+            <parameter name="calendarShareId"><description>The creator's manage share of a calendar another party owns</description></parameter>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const userId = ec.user.userId
+            const partyId = ec.user.userAccount?.partyId
+            if (!userId || !partyId) { ec.message.addError('Creating a calendar needs a user with a party'); return }
+            if (calendarKindEnumId === 'CalkSubscription') { ec.message.addError('A subscription calendar is made by subscribing to its feed'); return }
+            if (!['CalkPersonal', 'CalkShared', 'CalkResource'].includes(calendarKindEnumId)) {
+                ec.message.addError(`Unknown calendar kind ${calendarKindEnumId}`); return }
+            if (!String(calendarName).trim()) { ec.message.addError('A calendar needs a name'); return }
+            const owner = ownerPartyId || partyId
+            if (calendarKindEnumId === 'CalkPersonal' && owner !== partyId) {
+                ec.message.addError('A personal calendar belongs to its user; ownerPartyId is for a shared calendar'); return }
+            if (owner !== partyId) {
+                // the owner as the user may see it
+                const ownerParty = ec.entity.find('mantle.party.Party').condition('partyId', owner).one()
+                if (ownerParty == null || ownerParty.privateOwnerUserId) { ec.message.addError(`Party ${owner} not found`); return }
+            }
+            const palette = ['#1e88e5', '#43a047', '#e53935', '#fb8c00', '#8e24aa', '#00897b', '#6d4c41', '#3949ab']
+            const fields = {calendarName: String(calendarName).trim(), description: description, calendarKindEnumId: calendarKindEnumId,
+                timeZone: timeZone, ownerPartyId: owner, createdDate: ec.user.nowTimestamp, isDefault: 'N',
+                color: color || palette[ec.entity.find('mantle.work.calendar.Calendar').condition('ownerPartyId', owner).count() % palette.length]}
+            if (calendarKindEnumId === 'CalkPersonal') {
+                const personal = Array.from(ec.entity.find('mantle.work.calendar.Calendar').condition('ownerPartyId', owner)
+                        .condition('calendarKindEnumId', 'CalkPersonal').list())
+                const makeDefault = isDefault === 'Y' || !personal.some((row) => row.isDefault === 'Y')
+                if (makeDefault) for (const other of personal) if (other.isDefault === 'Y') { other.set('isDefault', 'N'); other.update() }
+                fields.isDefault = makeDefault ? 'Y' : 'N'
+            }
+            calendarId = ec.service.sync().name('create#mantle.work.calendar.Calendar').parameters(fields).call()?.calendarId
+            if (ec.message.hasError()) return
+            if (owner !== partyId) {
+                calendarShareId = ec.service.sync().name('create#mantle.work.calendar.CalendarShare').parameters({calendarId: calendarId,
+                    userId: userId, permissionEnumId: 'CalpManage', fromDate: ec.user.nowTimestamp}).call()?.calendarShareId
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="update" noun="Calendar">
+        <description>Needs manage permission. A field left out (null) is not changed. isDefault=Y makes an owned personal
+            calendar the default; the default stays until another calendar is made the default.</description>
+        <in-parameters>
+            <parameter name="calendarId" required="true"/>
+            <parameter name="calendarName"/>
+            <parameter name="description"/>
+            <parameter name="color"/>
+            <parameter name="timeZone"/>
+            <parameter name="isDefault"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: calendarId, permissionEnumId: 'CalpManage'}).call()
+            if (ec.message.hasError()) return
+            const row = ec.entity.find('mantle.work.calendar.Calendar').condition('calendarId', calendarId).one()
+            if (calendarName != null) {
+                if (!String(calendarName).trim()) { ec.message.addError('A calendar needs a name'); return }
+                row.set('calendarName', String(calendarName).trim())
+            }
+            if (description != null) row.set('description', description || null)
+            if (color != null) row.set('color', color || null)
+            if (timeZone != null) row.set('timeZone', timeZone || null)
+            if (isDefault != null && isDefault !== row.isDefault) {
+                if (row.calendarKindEnumId !== 'CalkPersonal' || !access.isOwner) { ec.message.addError('Only your own personal calendar can be your default'); return }
+                if (isDefault !== 'Y') { ec.message.addError('Make another calendar the default instead'); return }
+                for (const other of ec.entity.find('mantle.work.calendar.Calendar').condition('ownerPartyId', row.ownerPartyId)
+                        .condition('calendarKindEnumId', 'CalkPersonal').condition('isDefault', 'Y').list()) {
+                    other.set('isDefault', 'N'); other.update()
+                }
+                row.set('isDefault', 'Y')
+            }
+            row.update()
+        ]]></script></actions>
+    </service>
+    <service verb="delete" noun="Calendar">
+        <description>
+            Needs manage permission. Removes the calendar with its event rows (the events stay, in their other calendars and
+            for their parties), shares and subscription; the default personal calendar is not deleted (make another the
+            default first). The events of a subscription calendar came from its feed, so those in no other calendar are
+            cancelled with it.
+        </description>
+        <in-parameters><parameter name="calendarId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="removedEventCount" type="Integer"/>
+            <parameter name="cancelledEventCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            removedEventCount = 0
+            cancelledEventCount = 0
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: calendarId, permissionEnumId: 'CalpManage'}).call()
+            if (ec.message.hasError()) return
+            const calendar = access.calendar
+            if (calendar.calendarKindEnumId === 'CalkPersonal' && calendar.isDefault === 'Y') {
+                ec.message.addError('The default calendar cannot be deleted; make another calendar the default first'); return }
+            const cf = ec.entity.conditionFactory
+            const isFeed = calendar.calendarKindEnumId === 'CalkSubscription'
+            for (const row of ec.entity.find('mantle.work.calendar.CalendarWorkEffort').condition('calendarId', calendarId).list()) {
+                if (isFeed && ec.entity.find('mantle.work.calendar.CalendarWorkEffort').condition('workEffortId', row.workEffortId)
+                        .condition(cf.makeCondition('calendarId', 'not-equals', calendarId)).count() === 0) {
+                    const event = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', row.workEffortId).one()
+                    if (event != null && event.statusId !== 'WeCancelled') { event.set('statusId', 'WeCancelled'); event.update(); cancelledEventCount++ }
+                }
+                row.delete()
+                removedEventCount++
+            }
+            for (const share of ec.entity.find('mantle.work.calendar.CalendarShare').condition('calendarId', calendarId).list()) share.delete()
+            const subscription = ec.entity.find('mantle.work.calendar.CalendarSubscription').condition('calendarId', calendarId).one()
+            if (subscription != null) subscription.delete()
+            ec.entity.find('mantle.work.calendar.Calendar').condition('calendarId', calendarId).one().delete()
+        ]]></script></actions>
+    </service>
+
+    <service verb="share" noun="Calendar">
+        <description>
+            Needs manage permission. Opens the calendar to a user, a user group or a party (a person, or an organization
+            for the users who belong to it) with a permission; when that user, group or party already has a current share,
+            its permission (and thruDate) change instead. With publish=true it makes (or changes) the calendar's publish
+            link instead: anyone with its publishToken may read the calendar, view or free/busy only, with the password
+            when one is set (an empty password removes it; newToken=true makes a new token, so the old link stops working).
+            A calendar an organization owns keeps at least one manage share.
+        </description>
+        <in-parameters>
+            <parameter name="calendarId" required="true"/>
+            <parameter name="userId"/>
+            <parameter name="userGroupId"/>
+            <parameter name="partyId"/>
+            <parameter name="permissionEnumId" default-value="CalpView"/>
+            <parameter name="thruDate" type="Timestamp"/>
+            <parameter name="publish" type="Boolean" default="false"/>
+            <parameter name="password"><description>A publish link's password; null leaves it as it is</description></parameter>
+            <parameter name="newToken" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="calendarShareId"/>
+            <parameter name="publishToken"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: calendarId, permissionEnumId: 'CalpManage'}).call()
+            if (ec.message.hasError()) return
+            const calendar = access.calendar
+            if (!['CalpFreeBusy', 'CalpView', 'CalpEdit', 'CalpManage'].includes(permissionEnumId)) {
+                ec.message.addError(`Unknown calendar permission ${permissionEnumId}`); return }
+            const cf = ec.entity.conditionFactory
+            const now = ec.user.nowTimestamp
+            const current = Array.from(ec.entity.find('mantle.work.calendar.CalendarShare').condition('calendarId', calendarId)
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list())
+            if (publish) {
+                if (userId || userGroupId || partyId) {
+                    ec.message.addError('A publish link is for anyone with the link; share with a user, group or party apart from it'); return }
+                if (!['CalpFreeBusy', 'CalpView'].includes(permissionEnumId)) { ec.message.addError('A publish link gives view or free/busy only'); return }
+                const existing = current.find((share) => share.publishToken && !share.userId && !share.userGroupId && !share.partyId)
+                const hash = password == null ? undefined : (String(password) ? ec.user.hashPassword(String(password)) : null)
+                if (existing != null) {
+                    existing.set('permissionEnumId', permissionEnumId)
+                    existing.set('thruDate', thruDate)
+                    if (hash !== undefined) existing.set('passwordHash', hash)
+                    if (newToken) existing.set('publishToken', ec.user.randomString(40))
+                    existing.update()
+                    calendarShareId = existing.calendarShareId
+                    publishToken = existing.publishToken
+                    return
+                }
+                publishToken = ec.user.randomString(40)
+                calendarShareId = ec.service.sync().name('create#mantle.work.calendar.CalendarShare').parameters({calendarId: calendarId,
+                    permissionEnumId: permissionEnumId, publishToken: publishToken, passwordHash: hash ?? null, fromDate: now,
+                    thruDate: thruDate}).call()?.calendarShareId
+                return
+            }
+            if ([userId, userGroupId, partyId].filter((value) => value).length !== 1) {
+                ec.message.addError('Share a calendar with one user, user group or party'); return }
+            if (userId) {
+                const account = ec.entity.find('moqui.security.UserAccount').condition('userId', userId).disableAuthz().one()
+                if (account == null) { ec.message.addError(`User ${userId} not found`); return }
+                if (account.partyId && account.partyId === calendar.ownerPartyId) { ec.message.addError('That user owns the calendar'); return }
+            }
+            if (userGroupId && ec.entity.find('moqui.security.UserGroup').condition('userGroupId', userGroupId).one() == null) {
+                ec.message.addError(`User group ${userGroupId} not found`); return }
+            if (partyId) {
+                const party = ec.entity.find('mantle.party.Party').condition('partyId', partyId).one()
+                if (party == null || party.privateOwnerUserId) { ec.message.addError(`Party ${partyId} not found`); return }
+                // the owner's person manages already; an organization that owns a calendar may still open it to its people
+                if (partyId === calendar.ownerPartyId && ec.entity.find('moqui.security.UserAccount').condition('partyId', partyId)
+                        .disableAuthz().count() > 0) { ec.message.addError('That party owns the calendar'); return }
+            }
+            const existing = current.find((share) => userId ? share.userId === userId : userGroupId ? share.userGroupId === userGroupId
+                    : share.partyId === partyId)
+            if (existing != null) {
+                const ownerHasUser = calendar.ownerPartyId && ec.entity.find('moqui.security.UserAccount')
+                        .condition('partyId', calendar.ownerPartyId).disableAuthz().count() > 0
+                if (!ownerHasUser && existing.permissionEnumId === 'CalpManage' && permissionEnumId !== 'CalpManage'
+                        && !current.some((share) => share !== existing && share.permissionEnumId === 'CalpManage' && !share.publishToken)) {
+                    ec.message.addError('A calendar an organization owns keeps at least one manage share'); return }
+                existing.set('permissionEnumId', permissionEnumId)
+                existing.set('thruDate', thruDate)
+                existing.update()
+                calendarShareId = existing.calendarShareId
+                return
+            }
+            calendarShareId = ec.service.sync().name('create#mantle.work.calendar.CalendarShare').parameters({calendarId: calendarId,
+                userId: userId, userGroupId: userGroupId, partyId: partyId, permissionEnumId: permissionEnumId, fromDate: now,
+                thruDate: thruDate}).call()?.calendarShareId
+        ]]></script></actions>
+    </service>
+    <service verb="unshare" noun="Calendar">
+        <description>Needs manage permission. Ends (thruDate now) the current shares named by calendarShareId, userId,
+            userGroupId or partyId, or with publish=true the publish link; the last manage share of a calendar an
+            organization owns is not ended.</description>
+        <in-parameters>
+            <parameter name="calendarId" required="true"/>
+            <parameter name="calendarShareId"/>
+            <parameter name="userId"/>
+            <parameter name="userGroupId"/>
+            <parameter name="partyId"/>
+            <parameter name="publish" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters><parameter name="unsharedCount" type="Integer"/></out-parameters>
+        <actions><script><![CDATA[
+            unsharedCount = 0
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: calendarId, permissionEnumId: 'CalpManage'}).call()
+            if (ec.message.hasError()) return
+            if (!calendarShareId && !userId && !userGroupId && !partyId && !publish) {
+                ec.message.addError('Name the share, user, user group or party to unshare'); return }
+            const cf = ec.entity.conditionFactory
+            const current = Array.from(ec.entity.find('mantle.work.calendar.CalendarShare').condition('calendarId', calendarId)
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list())
+            const ending = current.filter((share) => (calendarShareId && share.calendarShareId === calendarShareId)
+                    || (userId && share.userId === userId) || (userGroupId && share.userGroupId === userGroupId)
+                    || (partyId && share.partyId === partyId) || (publish && share.publishToken && !share.userId && !share.userGroupId && !share.partyId))
+            const owner = access.calendar.ownerPartyId
+            const ownerHasUser = owner && ec.entity.find('moqui.security.UserAccount').condition('partyId', owner).disableAuthz().count() > 0
+            const managersLeft = current.filter((share) => !ending.includes(share) && share.permissionEnumId === 'CalpManage' && !share.publishToken).length
+            if (!ownerHasUser && managersLeft === 0 && ending.some((share) => share.permissionEnumId === 'CalpManage' && !share.publishToken)) {
+                ec.message.addError('A calendar an organization owns keeps at least one manage share'); return }
+            for (const share of ending) { share.set('thruDate', ec.user.nowTimestamp); share.update(); unsharedCount++ }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="UserCalendars">
+        <description>
+            The current user's calendars for the calendar rail: group mine (owned by the user's party; the default first),
+            subscription (the user's subscriptions, with the feed's last fetch and status) and shared (shared with the user,
+            the user's groups, party or organizations), each with its color, kind, the user's permission and, for a calendar
+            the user manages, its share count and whether it has a publish link. The default calendar is made first when the
+            user has none (ensureDefault).
+        </description>
+        <in-parameters><parameter name="ensureDefault" type="Boolean" default="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="calendarList" type="List"><parameter name="calendar" type="Map"/></parameter>
+            <parameter name="defaultCalendarId"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            calendarList = []
+            defaultCalendarId = null
+            const userId = ec.user.userId
+            const partyId = ec.user.userAccount?.partyId
+            if (!userId || !partyId) return
+            if (ensureDefault) {
+                defaultCalendarId = ec.service.sync().name('mantle.work.CalendarServices.ensure#UserDefaultCalendar').call()?.calendarId || null
+                if (ec.message.hasError()) return
+            }
+            const cf = ec.entity.conditionFactory
+            const owned = Array.from(ec.entity.find('mantle.work.calendar.Calendar').condition('ownerPartyId', partyId).list())
+            const groups = Array.from(ec.user.getUserGroupIdSet() || [])
+            const orgIds = Array.from(ec.entity.find('mantle.party.PartyRelationship').condition('fromPartyId', partyId)
+                    .condition(cf.makeCondition('relationshipTypeEnumId', 'in', ['PrtAgent', 'PrtEmployee', 'PrtMember']))
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).selectField('toPartyId').list()).map((row) => row.toPartyId)
+            const shareTargets = [cf.makeCondition('userId', 'equals', userId), cf.makeCondition('partyId', 'in', [partyId].concat(orgIds))]
+            if (groups.length) shareTargets.push(cf.makeCondition('userGroupId', 'in', groups))
+            const ownedIds = new Set(owned.map((row) => row.calendarId))
+            const sharedIds = Array.from(new Set(Array.from(ec.entity.find('mantle.work.calendar.CalendarShare').condition(cf.makeCondition(shareTargets, 'or'))
+                    .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).selectField('calendarId').list())
+                    .map((row) => row.calendarId).filter((id) => !ownedIds.has(id))))
+            const shared = sharedIds.length ? Array.from(ec.entity.find('mantle.work.calendar.Calendar')
+                    .condition(cf.makeCondition('calendarId', 'in', sharedIds)).list()) : []
+            const access = shared.length ? ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarIdList: sharedIds}).call() : {permissionMap: {}}
+            if (ec.message.hasError()) return
+            const ownerNames = new Map()
+            const ownerName = (id) => {
+                if (!id) return null
+                if (!ownerNames.has(id)) {
+                    const detail = ec.entity.find('mantle.party.PartyDetail').condition('partyId', id).one()
+                    ownerNames.set(id, detail ? (detail.organizationName || [detail.firstName, detail.lastName].filter((part) => part).join(' ') || id) : id)
+                }
+                return ownerNames.get(id)
+            }
+            const entryOf = (row, permission, isOwner, group) => {
+                const entry = {calendarId: row.calendarId, calendarName: row.calendarName, description: row.description ?? null,
+                    color: row.color ?? null, calendarKindEnumId: row.calendarKindEnumId, timeZone: row.timeZone ?? null,
+                    isDefault: row.isDefault === 'Y', ownerPartyId: row.ownerPartyId ?? null, ownerName: ownerName(row.ownerPartyId),
+                    permissionEnumId: permission, isOwner: isOwner, group: group, shareCount: 0, hasPublishLink: false, subscription: null}
+                if (permission === 'CalpManage') {
+                    const shares = Array.from(ec.entity.find('mantle.work.calendar.CalendarShare').condition('calendarId', row.calendarId)
+                            .condition(cf.makeConditionDate('fromDate', 'thruDate', null)).list())
+                    entry.shareCount = shares.filter((share) => share.userId || share.userGroupId || share.partyId).length
+                    entry.hasPublishLink = shares.some((share) => share.publishToken && !share.userId && !share.userGroupId && !share.partyId)
+                }
+                if (row.calendarKindEnumId === 'CalkSubscription') {
+                    const subscription = ec.entity.find('mantle.work.calendar.CalendarSubscription').condition('calendarId', row.calendarId).one()
+                    if (subscription != null) entry.subscription = {url: subscription.url ?? null, providerEnumId: subscription.providerEnumId ?? null,
+                        refreshMinutes: subscription.refreshMinutes ?? null, lastFetchDate: subscription.lastFetchDate ?? null,
+                        lastFetchStatus: subscription.lastFetchStatus ?? null, lastFetchError: subscription.lastFetchError ?? null}
+                }
+                return entry
+            }
+            const byName = (a, b) => String(a.calendarName || '').localeCompare(String(b.calendarName || ''))
+            const mine = owned.filter((row) => row.calendarKindEnumId !== 'CalkSubscription').map((row) => entryOf(row, 'CalpManage', true, 'mine'))
+                    .sort((a, b) => (a.isDefault ? 0 : 1) - (b.isDefault ? 0 : 1) || byName(a, b))
+            const subscriptions = owned.filter((row) => row.calendarKindEnumId === 'CalkSubscription')
+                    .map((row) => entryOf(row, 'CalpManage', true, 'subscription')).sort(byName)
+            const others = shared.filter((row) => access.permissionMap[row.calendarId])
+                    .map((row) => entryOf(row, access.permissionMap[row.calendarId], false, 'shared')).sort(byName)
+            calendarList = mine.concat(subscriptions, others)
+            if (!defaultCalendarId) defaultCalendarId = mine.find((entry) => entry.isDefault)?.calendarId || null
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="PublishedCalendarEvents" authenticate="anonymous-view">
+        <description>The events of a published calendar for anyone with its link (the public route): the publish token
+            (and its password, when it has one) is checked before anything is read, then get#FullCalendarData gives the
+            events of that calendar only, as Busy for a free/busy link.</description>
+        <in-parameters>
+            <parameter name="publishToken" required="true"/>
+            <parameter name="password"/>
+            <parameter name="start" required="true"/>
+            <parameter name="end" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="calendarName"/>
+            <parameter name="color"/>
+            <parameter name="eventList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            eventList = []
+            const share = ec.entity.find('mantle.work.calendar.CalendarShare').condition('publishToken', String(publishToken))
+                    .condition(ec.entity.conditionFactory.makeConditionDate('fromDate', 'thruDate', null)).disableAuthz().one()
+            const valid = share != null && !share.userId && !share.userGroupId && !share.partyId
+                    && (!share.passwordHash || (password && ec.user.passwordsMatch(String(password), share.passwordHash)))
+            if (!valid) { ec.message.addError('This calendar link is not valid'); return }
+            const calendar = ec.entity.find('mantle.work.calendar.Calendar').condition('calendarId', share.calendarId).disableAuthz().one()
+            calendarName = calendar?.calendarName ?? null
+            color = calendar?.color ?? null
+            eventList = ec.service.sync().name('mantle.work.EventServices.get#FullCalendarData').parameters({publishToken: publishToken,
+                publishPassword: password, start: start, end: end, titleGString: '${workEffort.workEffortName || "Event"}'})
+                    .disableAuthz().call()?.eventList || []
+        ]]></script></actions>
+    </service>
+
+    <service verb="add" noun="CalendarEvent">
+        <description>Puts an event in a calendar: needs edit permission on the calendar (not a subscription calendar, whose
+            events come from its feed) and that the user may see the event (mantle.work.EventServices.check#EventAccess).</description>
+        <in-parameters>
+            <parameter name="calendarId" required="true"/>
+            <parameter name="workEffortId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="added" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            added = false
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: calendarId, permissionEnumId: 'CalpEdit'}).call()
+            if (ec.message.hasError()) return
+            if (access.calendar.calendarKindEnumId === 'CalkSubscription') {
+                ec.message.addError('The events of a subscription calendar come from its feed'); return }
+            ec.service.sync().name('mantle.work.EventServices.check#EventAccess').parameters({workEffortId: workEffortId}).call()
+            if (ec.message.hasError()) return
+            if (ec.entity.find('mantle.work.calendar.CalendarWorkEffort').condition('calendarId', calendarId)
+                    .condition('workEffortId', workEffortId).one() != null) return
+            ec.service.sync().name('create#mantle.work.calendar.CalendarWorkEffort').parameters({calendarId: calendarId,
+                workEffortId: workEffortId, addedDate: ec.user.nowTimestamp}).call()
+            added = !ec.message.hasError()
+        ]]></script></actions>
+    </service>
+    <service verb="remove" noun="CalendarEvent">
+        <description>Takes an event out of a calendar (the event stays): needs edit permission on the calendar, not a
+            subscription calendar.</description>
+        <in-parameters>
+            <parameter name="calendarId" required="true"/>
+            <parameter name="workEffortId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="removed" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            removed = false
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: calendarId, permissionEnumId: 'CalpEdit'}).call()
+            if (ec.message.hasError()) return
+            if (access.calendar.calendarKindEnumId === 'CalkSubscription') {
+                ec.message.addError('The events of a subscription calendar come from its feed'); return }
+            const row = ec.entity.find('mantle.work.calendar.CalendarWorkEffort').condition('calendarId', calendarId)
+                    .condition('workEffortId', workEffortId).one()
+            if (row == null) return
+            row.delete()
+            removed = true
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Subscriptions, export and import (the framework's ICalendar tool) ========== -->
+
+    <service verb="subscribe" noun="Calendar">
+        <description>
+            Subscribes the current user to an external calendar: a subscription calendar (kind CalkSubscription, owned by
+            the user's party) with its CalendarSubscription. An iCalendar URL (CspIcsUrl, the default) may be http, https or
+            webcal; Google and Microsoft 365 accounts (CspGoogle, CspMicrosoft) need the OAuth client (later). fetchNow
+            fetches it at once, in the background.
+        </description>
+        <in-parameters>
+            <parameter name="url"/>
+            <parameter name="providerEnumId" default-value="CspIcsUrl"/>
+            <parameter name="calendarName"><description>Default the URL's host</description></parameter>
+            <parameter name="color"/>
+            <parameter name="refreshMinutes" type="Integer" default="60"/>
+            <parameter name="fetchNow" type="Boolean" default="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="calendarId"/></out-parameters>
+        <actions><script><![CDATA[
+            const partyId = ec.user.userAccount?.partyId
+            if (!ec.user.userId || !partyId) { ec.message.addError('A calendar subscription needs a user with a party'); return }
+            if (providerEnumId === 'CspGoogle' || providerEnumId === 'CspMicrosoft') {
+                ec.message.addError('Subscribing to a Google or Microsoft 365 account is not available yet'); return }
+            if (providerEnumId !== 'CspIcsUrl') { ec.message.addError(`Unknown calendar provider ${providerEnumId}`); return }
+            const text = url ? String(url).trim() : ''
+            const match = /^(https?|webcal):\/\/([^\/?#:]+)/i.exec(text)
+            if (!match) { ec.message.addError('A calendar subscription needs an http, https or webcal URL'); return }
+            const minutes = Math.max(5, Number(refreshMinutes) || 60)
+            calendarId = ec.service.sync().name('create#mantle.work.calendar.Calendar').parameters({
+                calendarName: calendarName ? String(calendarName).trim() : match[2], ownerPartyId: partyId,
+                calendarKindEnumId: 'CalkSubscription', color: color || '#757575', isDefault: 'N',
+                createdDate: ec.user.nowTimestamp}).call()?.calendarId
+            if (ec.message.hasError()) return
+            ec.service.sync().name('create#mantle.work.calendar.CalendarSubscription').parameters({calendarId: calendarId,
+                url: text, providerEnumId: providerEnumId, refreshMinutes: minutes}).call()
+            if (ec.message.hasError()) return
+            if (fetchNow) ec.service.async().name('mantle.work.CalendarServices.fetch#CalendarSubscriptions')
+                    .parameters({calendarId: calendarId, force: true}).call()
+        ]]></script></actions>
+    </service>
+
+    <service verb="fetch" noun="CalendarSubscriptions" authenticate="anonymous-all">
+        <description>
+            The fetch job: each subscription due (never fetched, or fetched refreshMinutes ago; all with force) is read
+            from its URL and parsed by the framework's ICalendar tool (parse), and its events written into its calendar
+            (store#CalendarFeedEvents), each subscription in a transaction of its own. A subscription that fails gets
+            lastFetchStatus error and the reason in lastFetchError, and the rest go on. Without the tool nothing is
+            fetched (logged once). The job runs with authorization disabled and fetches every subscription due; a user
+            fetches only a subscription of a calendar they own or manage (calendarId, check#CalendarAccess CalpManage).
+        </description>
+        <in-parameters>
+            <parameter name="calendarId"><description>Only this subscription</description></parameter>
+            <parameter name="force" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="toolAvailable" type="Boolean"/>
+            <parameter name="fetchedCount" type="Integer"/>
+            <parameter name="failedCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            fetchedCount = 0
+            failedCount = 0
+            // the job (authorization disabled) fetches them all; a user only a calendar they manage
+            if (!ec.artifactExecution.authzDisabled()) {
+                if (!calendarId) { ec.message.addError('Name the subscription calendar to fetch (calendarId)'); return }
+                ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess').parameters({calendarId: calendarId,
+                    permissionEnumId: 'CalpManage'}).call()
+                if (ec.message.hasError()) return
+            }
+            toolAvailable = ec.factory.getToolFactory('ICalendar') != null
+            if (!toolAvailable) {
+                let logged = false
+                try {
+                    const notices = ec.cache.getCache('mantle.work.calendar.notices')
+                    logged = !!notices.get('fetchNoTool')
+                    if (!logged) notices.put('fetchNoTool', true)
+                } catch (err) { logged = false }
+                if (!logged) ec.logger.info('Calendar subscriptions are not fetched: the framework ICalendar tool is not available')
+                return
+            }
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                const text = String(value)
+                return /^-?\d+$/.test(text) ? Number(text) : Date.parse(text)
+            }
+            const nowMillis = toMillis(ec.user.nowTimestamp)
+            let find = ec.entity.find('mantle.work.calendar.CalendarSubscription').condition('providerEnumId', 'CspIcsUrl')
+            if (calendarId) find = find.condition('calendarId', calendarId)
+            for (const subscription of Array.from(find.list())) {
+                const last = toMillis(subscription.lastFetchDate)
+                if (!force && last != null && last + (Number(String(subscription.refreshMinutes ?? 60)) || 60) * 60000 > nowMillis) continue
+                let error = null
+                try {
+                    ec.service.sync().name('mantle.work.CalendarServices.fetch#CalendarSubscription')
+                            .parameters({calendarId: subscription.calendarId}).requireNewTransaction(true).call()
+                    if (ec.message.hasError()) error = ec.message.getErrorsString()
+                } catch (err) {
+                    error = String(err && err.message ? err.message : err)
+                }
+                if (error) {
+                    ec.message.clearErrors()
+                    failedCount++
+                    ec.logger.error(`Calendar subscription ${subscription.calendarId} (${subscription.url}) not fetched: ${error}`)
+                    try {
+                        ec.service.sync().name('update#mantle.work.calendar.CalendarSubscription').parameters({calendarId: subscription.calendarId,
+                            lastFetchDate: ec.user.nowTimestamp, lastFetchStatus: 'error', lastFetchError: error.substring(0, 4000)})
+                                .requireNewTransaction(true).call()
+                    } catch (err) { ec.logger.error(`Calendar subscription ${subscription.calendarId} status not saved: ${err}`) }
+                    ec.message.clearErrors()
+                } else {
+                    fetchedCount++
+                }
+            }
+        ]]></script></actions>
+    </service>
+    <service verb="fetch" noun="CalendarSubscription" authenticate="anonymous-all">
+        <description>One subscription of the fetch job: GET its URL (webcal as https) and read what it answered with
+            store#CalendarFeedText. Errors are the caller's to record. With authorization on, only for a calendar the user
+            owns or manages (check#CalendarAccess CalpManage).</description>
+        <in-parameters><parameter name="calendarId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="createdCount" type="Integer"/>
+            <parameter name="updatedCount" type="Integer"/>
+            <parameter name="removedCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            if (!ec.artifactExecution.authzDisabled()) {
+                ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess').parameters({calendarId: calendarId,
+                    permissionEnumId: 'CalpManage'}).call()
+                if (ec.message.hasError()) return
+            }
+            const subscription = ec.entity.find('mantle.work.calendar.CalendarSubscription').condition('calendarId', calendarId).one()
+            if (subscription == null || !subscription.url) { ec.message.addError(`Calendar subscription ${calendarId} not found`); return }
+            if (ec.factory.getToolFactory('ICalendar') == null) { ec.message.addError('The ICalendar tool is not available'); return }
+            const uri = String(subscription.url).replace(/^webcal:/i, 'https:')
+            const response = ec.service.rest().method('GET').uri(uri).contentType('text/calendar').timeout(60).call()
+            const status = response.getStatusCode()
+            if (status < 200 || status >= 300) { ec.message.addError(`The feed answered ${status} ${response.getReasonPhrase() || ''}`.trim()); return }
+            const feedText = response.text()
+            if (!feedText || !String(feedText).trim()) { ec.message.addError('The feed answered with no calendar'); return }
+            const stored = ec.service.sync().name('mantle.work.CalendarServices.store#CalendarFeedText')
+                    .parameters({calendarId: calendarId, feedText: feedText}).call()
+            if (ec.message.hasError()) return
+            createdCount = stored.createdCount; updatedCount = stored.updatedCount; removedCount = stored.removedCount
+        ]]></script></actions>
+    </service>
+    <service verb="store" noun="CalendarFeedText">
+        <description>A subscription's feed as its URL answered it: parsed by the ICalendar tool (parse), its events written
+            into the subscription's calendar (store#CalendarFeedEvents with replaceAll), and lastFetchDate and
+            lastFetchStatus set (error, with lastFetchError, when some events were not read). fetch#CalendarSubscription
+            calls it with the body of its GET.</description>
+        <in-parameters>
+            <parameter name="calendarId" required="true"/>
+            <parameter name="feedText" required="true" allow-html="any"><description>The iCalendar text of the feed</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="createdCount" type="Integer"/>
+            <parameter name="updatedCount" type="Integer"/>
+            <parameter name="removedCount" type="Integer"/>
+            <parameter name="failedCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const subscription = ec.entity.find('mantle.work.calendar.CalendarSubscription').condition('calendarId', calendarId).one()
+            if (subscription == null) { ec.message.addError(`Calendar subscription ${calendarId} not found`); return }
+            if (ec.factory.getToolFactory('ICalendar') == null) { ec.message.addError('The ICalendar tool is not available'); return }
+            const parsed = ec.factory.getTool('ICalendar').parse(String(feedText))
+            const events = Array.from(parsed?.events || [])
+            const stored = ec.service.sync().name('mantle.work.CalendarServices.store#CalendarFeedEvents')
+                    .parameters({calendarId: calendarId, eventList: events, replaceAll: true}).call()
+            if (ec.message.hasError()) return
+            createdCount = stored.createdCount; updatedCount = stored.updatedCount; removedCount = stored.removedCount
+            failedCount = stored.failedCount
+            subscription.set('lastFetchDate', ec.user.nowTimestamp)
+            subscription.set('lastFetchStatus', stored.failedCount ? 'error' : 'ok')
+            subscription.set('lastFetchError', stored.failedCount ? `${stored.failedCount} of ${events.length} events not read` : null)
+            subscription.update()
+        ]]></script></actions>
+    </service>
+    <service verb="store" noun="CalendarFeedEvents">
+        <description>
+            Writes parsed iCalendar events (the event maps of the ICalendar tool's parse, see the file comment) into a
+            calendar: a WorkEffort (WetEvent) per UID (universalId) with its WorkEffortRecurrence, and an override instance
+            (one with recurrenceId) as its own WorkEffort linked from its series by WorkEffortAssoc WeatRecurrenceInstance
+            (fromDate the recurrenceId). With replaceAll the calendar's events whose UID is not in the list are cancelled and
+            taken out of it. Each event stands alone: one that fails is logged, counted and left out.
+        </description>
+        <in-parameters>
+            <parameter name="calendarId" required="true"/>
+            <parameter name="eventList" type="List" required="true"><parameter name="event" type="Map"/></parameter>
+            <parameter name="replaceAll" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="createdCount" type="Integer"/>
+            <parameter name="updatedCount" type="Integer"/>
+            <parameter name="removedCount" type="Integer"/>
+            <parameter name="failedCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            createdCount = 0; updatedCount = 0; removedCount = 0; failedCount = 0
+            const cf = ec.entity.conditionFactory
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                if (value instanceof Date) return value.getTime()
+                const text = String(value)
+                return /^-?\d+$/.test(text) ? Number(text) : Date.parse(text)
+            }
+            const dayBefore = (text) => {
+                const [y, m, d] = String(text).substring(0, 10).split('-').map(Number)
+                return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().substring(0, 10)
+            }
+            const statusOf = {CONFIRMED: 'WeApproved', TENTATIVE: 'WeInPlanning', CANCELLED: 'WeCancelled'}
+            const listText = (list) => list == null ? null : (Array.isArray(list) || typeof list === 'object' ? Array.from(list).join(',') : String(list)) || null
+            // the calendar's current events by UID: the series (no instance link) and the overrides by series and recurrence
+            const existing = Array.from(ec.entity.find('mantle.work.calendar.CalendarWorkEffortDetail').condition('calendarId', calendarId).list())
+            const existingIds = existing.map((row) => row.workEffortId)
+            const instanceLinks = existingIds.length ? Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc')
+                    .condition('workEffortAssocTypeEnumId', 'WeatRecurrenceInstance').condition(cf.makeCondition('toWorkEffortId', 'in', existingIds)).list()) : []
+            const linkOf = new Map(instanceLinks.map((link) => [link.toWorkEffortId, link]))
+            const seriesByUid = new Map()
+            const overrideByKey = new Map()
+            for (const row of existing) {
+                if (!row.universalId) continue
+                const link = linkOf.get(row.workEffortId)
+                if (link) overrideByKey.set(`${row.universalId}|${toMillis(link.fromDate)}`, row.workEffortId)
+                else seriesByUid.set(row.universalId, row.workEffortId)
+            }
+            const seenIds = new Set()
+            const fieldsOf = (event) => {
+                const fields = {workEffortName: event.summary || '(no title)', description: event.description ?? null,
+                    location: event.location ?? null, infoUrl: event.url ?? null, statusId: statusOf[String(event.status || 'CONFIRMED').toUpperCase()] || 'WeApproved',
+                    workEffortTypeEnumId: 'WetEvent', timeUomId: 'TF_hr', revisionNumber: event.sequence ?? null,
+                    estimatedStartDate: null, estimatedCompletionDate: null, allDayStart: null, allDayEnd: null}
+                if (event.allDay) {
+                    const startDay = String(event.startDate || '').substring(0, 10)
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDay)) throw new Error('an all-day event without its start date')
+                    fields.allDayStart = startDay
+                    const endDay = event.endDate ? dayBefore(event.endDate) : null
+                    fields.allDayEnd = endDay && endDay > startDay ? endDay : null
+                } else {
+                    const start = toMillis(event.start)
+                    if (start == null || Number.isNaN(start)) throw new Error('an event without its start')
+                    fields.estimatedStartDate = new Date(start)
+                    const end = toMillis(event.end)
+                    fields.estimatedCompletionDate = end == null || Number.isNaN(end) ? null : new Date(end)
+                }
+                return fields
+            }
+            const storeRecurrence = (workEffortId, event) => {
+                const row = ec.entity.find('mantle.work.effort.WorkEffortRecurrence').condition('workEffortId', workEffortId).one()
+                if (!event.rrule && !event.rdates?.length) { if (row != null) row.delete(); return }
+                const fields = {rrule: event.rrule ?? null, exdates: listText(event.exdates), rdates: listText(event.rdates), timeZone: event.timeZone ?? null}
+                if (row == null) ec.service.sync().name('create#mantle.work.effort.WorkEffortRecurrence').parameters(Object.assign({workEffortId: workEffortId}, fields)).call()
+                else { for (const [field, value] of Object.entries(fields)) row.set(field, value); row.update() }
+            }
+            const upsert = (workEffortId, fields) => {
+                if (workEffortId) {
+                    const row = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+                    for (const [field, value] of Object.entries(fields)) row.set(field, value)
+                    row.update()
+                    updatedCount++
+                    return workEffortId
+                }
+                const id = ec.service.sync().name('create#mantle.work.effort.WorkEffort').parameters(fields).call()?.workEffortId
+                if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                ec.service.sync().name('create#mantle.work.calendar.CalendarWorkEffort').parameters({calendarId: calendarId,
+                    workEffortId: id, addedDate: ec.user.nowTimestamp}).call()
+                createdCount++
+                return id
+            }
+            // the series first, then the overrides, which need their series
+            const events = Array.from(eventList || [])
+            const ordered = events.filter((event) => event && event.recurrenceId == null).concat(events.filter((event) => event && event.recurrenceId != null))
+            for (const event of ordered) {
+                ec.message.pushErrors()
+                try {
+                    if (!event.uid) throw new Error('an event without a UID')
+                    const uid = String(event.uid)
+                    const fields = Object.assign(fieldsOf(event), {universalId: uid})
+                    if (event.recurrenceId == null) {
+                        const id = upsert(seriesByUid.get(uid), fields)
+                        seriesByUid.set(uid, id)
+                        storeRecurrence(id, event)
+                        seenIds.add(id)
+                    } else {
+                        const seriesId = seriesByUid.get(uid)
+                        if (!seriesId) throw new Error(`an instance of ${uid} without its series`)
+                        const recurrenceMillis = toMillis(event.recurrenceId)
+                        const key = `${uid}|${recurrenceMillis}`
+                        const known = overrideByKey.get(key)
+                        const id = upsert(known, fields)
+                        if (!known) ec.service.sync().name('create#mantle.work.effort.WorkEffortAssoc').parameters({workEffortId: seriesId,
+                            toWorkEffortId: id, workEffortAssocTypeEnumId: 'WeatRecurrenceInstance', fromDate: new Date(recurrenceMillis)}).call()
+                        overrideByKey.set(key, id)
+                        seenIds.add(id)
+                    }
+                    if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                } catch (err) {
+                    failedCount++
+                    ec.logger.warn(`Calendar ${calendarId} feed event ${event?.uid || '(no UID)'} not stored: ${err && err.message ? err.message : err}`)
+                } finally {
+                    ec.message.clearErrors()
+                    ec.message.popErrors()
+                }
+            }
+            if (!replaceAll) return
+            for (const row of existing) {
+                if (seenIds.has(row.workEffortId)) continue
+                const link = ec.entity.find('mantle.work.calendar.CalendarWorkEffort').condition('calendarId', calendarId)
+                        .condition('workEffortId', row.workEffortId).one()
+                if (link != null) link.delete()
+                const event = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', row.workEffortId).one()
+                if (event != null && event.statusId !== 'WeCancelled') { event.set('statusId', 'WeCancelled'); event.update() }
+                removedCount++
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="export" noun="Calendar">
+        <description>The events of a calendar (view permission; not the cancelled ones) as an iCalendar file, written by the
+            framework's ICalendar tool (write, method PUBLISH) from the event maps of
+            mantle.work.EventServices.get#EventIcsMaps; an error when the tool is turned off.</description>
+        <in-parameters><parameter name="calendarId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="fileText" allow-html="any"><description>The file's text, parsed by the framework tool, never shown as HTML; real vCard and ICS files hold &lt; (Apple labels, HTML descriptions)</description></parameter>
+            <parameter name="fileName"/>
+            <parameter name="contentType"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: calendarId, permissionEnumId: 'CalpView'}).call()
+            if (ec.message.hasError()) return
+            if (access.userPermissionEnumId === 'CalpFreeBusy') { ec.message.addError('You need permission to view the calendar to export it'); return }
+            if (ec.factory.getToolFactory('ICalendar') == null) { ec.message.addError('Calendar export is not available yet'); return }
+            const ids = Array.from(ec.entity.find('mantle.work.calendar.CalendarWorkEffortDetail').condition('calendarId', calendarId)
+                    .condition(ec.entity.conditionFactory.makeCondition('statusId', 'not-equals', 'WeCancelled', true))
+                    .selectField('workEffortId').list()).map((row) => row.workEffortId)
+            const events = ids.length ? (ec.service.sync().name('mantle.work.EventServices.get#EventIcsMaps')
+                    .parameters({workEffortIdList: ids}).call()?.eventMapList || []) : []
+            if (ec.message.hasError()) return
+            fileText = ec.factory.getTool('ICalendar').write({method: 'PUBLISH', calendarName: access.calendar.calendarName,
+                timeZone: access.calendar.timeZone || ec.user.timeZone, events: events})
+            fileName = `${String(access.calendar.calendarName || calendarId).replace(/[^A-Za-z0-9 _.-]/g, '_')}.ics`
+            contentType = 'text/calendar'
+        ]]></script></actions>
+    </service>
+    <service verb="import" noun="Calendar">
+        <description>Reads an iCalendar file into a calendar (edit permission; not a subscription calendar) through the
+            framework's ICalendar tool (parse): new UIDs become events, known ones are updated; an error when the tool is
+            turned off.</description>
+        <in-parameters>
+            <parameter name="calendarId" required="true"/>
+            <parameter name="calendarFile" type="org.apache.commons.fileupload2.core.FileItem"/>
+            <parameter name="fileText" allow-html="any"><description>The file's text, parsed by the framework tool, never shown as HTML; real vCard and ICS files hold &lt; (Apple labels, HTML descriptions)</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="createdCount" type="Integer"/>
+            <parameter name="updatedCount" type="Integer"/>
+            <parameter name="failedCount" type="Integer"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            const access = ec.service.sync().name('mantle.work.CalendarServices.check#CalendarAccess')
+                    .parameters({calendarId: calendarId, permissionEnumId: 'CalpEdit'}).call()
+            if (ec.message.hasError()) return
+            if (access.calendar.calendarKindEnumId === 'CalkSubscription') { ec.message.addError('The events of a subscription calendar come from its feed'); return }
+            if (ec.factory.getToolFactory('ICalendar') == null) { ec.message.addError('Calendar import is not available yet'); return }
+            const text = fileText || (calendarFile ? calendarFile.getString('UTF-8') : null)
+            if (!text) { ec.message.addError('No calendar file to import'); return }
+            const parsed = ec.factory.getTool('ICalendar').parse(text)
+            const stored = ec.service.sync().name('mantle.work.CalendarServices.store#CalendarFeedEvents')
+                    .parameters({calendarId: calendarId, eventList: Array.from(parsed?.events || []), replaceAll: false}).call()
+            if (ec.message.hasError()) return
+            createdCount = stored.createdCount; updatedCount = stored.updatedCount; failedCount = stored.failedCount
+        ]]></script></actions>
+    </service>
+</services>

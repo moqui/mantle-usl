@@ -25,7 +25,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="timePeriod" type="Map"/>
             <parameter name="subTimePeriodList" type="List"><parameter name="subTimePeriod" type="Map"/></parameter>
             <parameter name="subTimePeriodSize" type="Integer"/>
-            <parameter name="glAccountCodeMask"/><parameter name="accountCodeFormatter" type="javax.swing.text.MaskFormatter"/>
+            <parameter name="glAccountCodeMask"/>
             <parameter name="glAccountInfoList" type="List"><parameter name="glAccountInfo" type="Map">
                 <parameter name="glAccountId"/><parameter name="accountCode"/><parameter name="accountName"/>
                 <parameter name="actualMain" type="BigDecimal"/><parameter name="amountMain" type="BigDecimal"/>
@@ -52,13 +52,9 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="timePeriod?.partyId">
                 <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
-                              in-map="[organizationPartyId:timePeriod.partyId]"/>
+                              in-map="{organizationPartyId:timePeriod.partyId}"/>
                 <!-- <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId"/> -->
                 <set field="glAccountCodeMask" from="partyAcctgPreference?.glAccountCodeMask"/>
-                <if condition="glAccountCodeMask">
-                    <set field="accountCodeFormatter" from="new javax.swing.text.MaskFormatter(glAccountCodeMask)"/>
-                    <script>accountCodeFormatter.setValueContainsLiteralCharacters(false)</script>
-                </if>
             </if>
 
             <entity-find entity-name="mantle.other.budget.BudgetItem" list="budgetItemList">
@@ -66,19 +62,17 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="budget.timePeriodId &amp;&amp; budget.subTimePeriodTypeId">
                 <service-call name="mantle.party.TimeServices.get#DescendantPeriods" out-map="subPeriodOut"
-                              in-map="[parentPeriodId:budget.timePeriodId, timePeriodTypeId:budget.subTimePeriodTypeId, createMissing:true]"/>
+                              in-map="{parentPeriodId:budget.timePeriodId, timePeriodTypeId:budget.subTimePeriodTypeId, createMissing:true}"/>
                 <set field="subTimePeriodList" from="subPeriodOut.timePeriodList"/>
-                <set field="subTimePeriodIds" from="new ArrayList(subTimePeriodList*.timePeriodId)"/>
-                <set field="allTimePeriodIds" from="new ArrayList()"/>
-                <script>allTimePeriodIds.add(budget.timePeriodId)</script>
-                <script>allTimePeriodIds.addAll(subTimePeriodIds)</script>
+                <set field="subTimePeriodIds" from="Array.from(subTimePeriodList, (stp) =&gt; stp.timePeriodId)"/>
+                <set field="allTimePeriodIds" from="[budget.timePeriodId].concat(subTimePeriodIds)"/>
             </if>
-            <set field="subTimePeriodSize" from="subTimePeriodList?.size() ?: 0"/>
+            <set field="subTimePeriodSize" from="subTimePeriodList?.length ?? 0"/>
 
             <service-call name="org.moqui.impl.BasicServices.find#EnumerationByParent" out-map="expenseClassOut"
-                          in-map="[parentEnumId:'EXPENSE', includeNested:true]"/>
+                          in-map="{parentEnumId:'EXPENSE', includeNested:true}"/>
             <set field="expenseClassEnumIds" from="expenseClassOut.enumIdSet"/>
-            <set field="pageSize" from="pageSize ?: '30'"/>
+            <set field="pageSize" from="pageSize || '30'"/>
             <entity-find entity-name="mantle.ledger.account.GlAccountAndOrganization" list="glAccountInfoList">
                 <search-form-inputs default-order-by="accountCode"/>
                 <econdition field-name="organizationPartyId" from="timePeriod?.partyId" ignore-if-empty="true"/>
@@ -89,7 +83,7 @@ along with this software (see the LICENSE.md file). If not, see
                 so use glAccountList for direct entity values (glAccountInfoList gets set to empty list later) -->
             <set field="glAccountList" from="glAccountInfoList"/>
 
-            <set field="glAccountIds" from="glAccountList*.glAccountId"/>
+            <set field="glAccountIds" from="Array.from(glAccountList, (gla) =&gt; gla.glAccountId)"/>
             <entity-find entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" list="glaotpList">
                 <econdition field-name="organizationPartyId" from="timePeriod?.partyId" ignore-if-empty="true"/>
                 <econdition field-name="glAccountId" operator="in" from="glAccountIds"/>
@@ -98,62 +92,65 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
 
             <script><![CDATA[
-                budgetItemsByGlId = new HashMap<String, ArrayList>()
-                for (Map curBi in budgetItemList) {
-                    String glAccountId = curBi.glAccountId
-                    ArrayList curBiList = budgetItemsByGlId.get(glAccountId)
+                // slot 0 is the main amount, then one slot per sub period
+                const newSlots = () => new Array(13).fill(null)
+
+                budgetItemsByGlId = {}
+                for (const curBi of budgetItemList) {
+                    const glAccountId = curBi.glAccountId
+                    let curBiList = budgetItemsByGlId[glAccountId]
                     if (curBiList == null) {
-                        curBiList = new ArrayList([null, null, null, null, null, null, null, null, null, null, null, null, null]) // 13 null entries
-                        budgetItemsByGlId.put(glAccountId, curBiList)
+                        curBiList = newSlots()
+                        budgetItemsByGlId[glAccountId] = curBiList
                     }
 
-                    String subTimePeriodId = (String) curBi.subTimePeriodId
+                    const subTimePeriodId = curBi.subTimePeriodId
                     if (subTimePeriodId == null) {
-                        curBiList.set(0, curBi)
+                        curBiList[0] = curBi
                     } else {
-                        int subPeriodIndex = subTimePeriodIds.indexOf(subTimePeriodId)
-                        if (subPeriodIndex >= 0) curBiList.set(subPeriodIndex + 1, curBi)
+                        const subPeriodIndex = (subTimePeriodIds ?? []).indexOf(subTimePeriodId)
+                        if (subPeriodIndex >= 0) curBiList[subPeriodIndex + 1] = curBi
                     }
                 }
 
-                glaotpByGlId = new HashMap<String, ArrayList>()
-                for (Map curGlaotp in glaotpList) {
-                    String glAccountId = curGlaotp.glAccountId
-                    ArrayList curGltpList = glaotpByGlId.get(glAccountId)
+                glaotpByGlId = {}
+                for (const curGlaotp of glaotpList) {
+                    const glAccountId = curGlaotp.glAccountId
+                    let curGltpList = glaotpByGlId[glAccountId]
                     if (curGltpList == null) {
-                        curGltpList = new ArrayList([null, null, null, null, null, null, null, null, null, null, null, null, null]) // 13 null entries
-                        glaotpByGlId.put(glAccountId, curGltpList)
+                        curGltpList = newSlots()
+                        glaotpByGlId[glAccountId] = curGltpList
                     }
 
-                    int subPeriodIndex = allTimePeriodIds.indexOf(curGlaotp.timePeriodId)
-                    if (subPeriodIndex >= 0) curGltpList.set(subPeriodIndex, curGlaotp)
+                    const subPeriodIndex = (allTimePeriodIds ?? []).indexOf(curGlaotp.timePeriodId)
+                    if (subPeriodIndex >= 0) curGltpList[subPeriodIndex] = curGlaotp
                 }
 
-                glAccountInfoList = new ArrayList<Map>(glAccountList.size())
-                for (Map glAccount in glAccountList) {
-                    String glAccountId = glAccount.glAccountId
+                glAccountInfoList = []
+                for (const glAccount of glAccountList) {
+                    const glAccountId = glAccount.glAccountId
 
-                    List curBiList = budgetItemsByGlId.get(glAccountId)
-                    List curGltpList = glaotpByGlId.get(glAccountId)
+                    const curBiList = budgetItemsByGlId[glAccountId]
+                    const curGltpList = glaotpByGlId[glAccountId]
 
-                    BigDecimal actualMain = curGltpList?.get(0)?.postedDebits
-                    BigDecimal amountMain = curBiList?.get(0)?.amount
-                    if (amountMain == null && actualMain != null) amountMain = BigDecimal.ZERO
-                    Map infoMap = [glAccountId:glAccountId, accountCode:glAccount.accountCode, accountName:glAccount.accountName,
-                                   actualMain:actualMain, amountMain:amountMain]
-                    BigDecimal subPerActualTotal = BigDecimal.ZERO
-                    BigDecimal subPerTotal = BigDecimal.ZERO
-                    for (int i = 1; i <= subTimePeriodSize; i++) {
-                        BigDecimal curActual = curGltpList?.get(i)?.postedDebits
-                        BigDecimal curAmount = curBiList?.get(i)?.amount
-                        if (curAmount == null && curActual != null) curAmount = BigDecimal.ZERO
-                        if (curActual != null) { infoMap.put('actualPer' + i, curActual); subPerActualTotal += curActual }
-                        if (curAmount != null) { infoMap.put('amountPer' + i, curAmount); subPerTotal += curAmount }
+                    const actualMain = curGltpList?.[0]?.postedDebits ?? null
+                    let amountMain = curBiList?.[0]?.amount ?? null
+                    if (amountMain == null && actualMain != null) amountMain = toDecimal(0)
+                    const infoMap = {glAccountId: glAccountId, accountCode: glAccount.accountCode, accountName: glAccount.accountName,
+                                     actualMain: actualMain, amountMain: amountMain}
+                    let subPerActualTotal = toDecimal(0)
+                    let subPerTotal = toDecimal(0)
+                    for (let i = 1; i <= subTimePeriodSize; i++) {
+                        const curActual = curGltpList?.[i]?.postedDebits ?? null
+                        let curAmount = curBiList?.[i]?.amount ?? null
+                        if (curAmount == null && curActual != null) curAmount = toDecimal(0)
+                        if (curActual != null) { infoMap['actualPer' + i] = curActual; subPerActualTotal = subPerActualTotal.add(curActual) }
+                        if (curAmount != null) { infoMap['amountPer' + i] = curAmount; subPerTotal = subPerTotal.add(curAmount) }
                     }
-                    infoMap.put('subPerActualTotal', subPerActualTotal)
-                    infoMap.put('subPerTotal', subPerTotal)
+                    infoMap.subPerActualTotal = subPerActualTotal
+                    infoMap.subPerTotal = subPerTotal
 
-                    glAccountInfoList.add(infoMap)
+                    glAccountInfoList.push(infoMap)
                 }
             ]]></script>
         </actions>
@@ -165,7 +162,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="timePeriod" type="Map"/>
             <parameter name="subTimePeriodList" type="List"><parameter name="subTimePeriod" type="Map"/></parameter>
             <parameter name="subTimePeriodSize" type="Integer"/>
-            <parameter name="glAccountCodeMask"/><parameter name="accountCodeFormatter" type="javax.swing.text.MaskFormatter"/>
+            <parameter name="glAccountCodeMask"/>
             <parameter name="detailInfoList" type="List"><parameter name="detailInfo" type="Map">
                 <parameter name="glAccountId"/><parameter name="accountCode"/><parameter name="accountName"/>
                 <parameter name="assetId"/><parameter name="facilityId"/>
@@ -191,13 +188,9 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="timePeriod.partyId">
                 <service-call name="mantle.ledger.LedgerServices.find#PartyAcctgPreference" out-map="context"
-                              in-map="[organizationPartyId:timePeriod.partyId]"/>
+                              in-map="{organizationPartyId:timePeriod.partyId}"/>
                 <!-- <set field="currencyUomId" from="partyAcctgPreference?.baseCurrencyUomId"/> -->
                 <set field="glAccountCodeMask" from="partyAcctgPreference?.glAccountCodeMask"/>
-                <if condition="glAccountCodeMask">
-                    <set field="accountCodeFormatter" from="new javax.swing.text.MaskFormatter(glAccountCodeMask)"/>
-                    <script>accountCodeFormatter.setValueContainsLiteralCharacters(false)</script>
-                </if>
             </if>
 
             <entity-find entity-name="mantle.other.budget.BudgetItem" list="budgetItemList">
@@ -214,26 +207,24 @@ along with this software (see the LICENSE.md file). If not, see
 
             <if condition="budget.timePeriodId &amp;&amp; budget.subTimePeriodTypeId">
                 <service-call name="mantle.party.TimeServices.get#DescendantPeriods" out-map="subPeriodOut"
-                              in-map="[parentPeriodId:budget.timePeriodId, timePeriodTypeId:budget.subTimePeriodTypeId, createMissing:true]"/>
+                              in-map="{parentPeriodId:budget.timePeriodId, timePeriodTypeId:budget.subTimePeriodTypeId, createMissing:true}"/>
                 <set field="subTimePeriodList" from="subPeriodOut.timePeriodList"/>
-                <set field="subTimePeriodIds" from="new ArrayList(subTimePeriodList*.timePeriodId)"/>
-                <set field="allTimePeriodIds" from="new ArrayList()"/>
-                <script>allTimePeriodIds.add(budget.timePeriodId)</script>
-                <script>allTimePeriodIds.addAll(subTimePeriodIds)</script>
+                <set field="subTimePeriodIds" from="Array.from(subTimePeriodList, (stp) =&gt; stp.timePeriodId)"/>
+                <set field="allTimePeriodIds" from="[budget.timePeriodId].concat(subTimePeriodIds)"/>
             </if>
-            <set field="subTimePeriodSize" from="subTimePeriodList?.size() ?: 0"/>
+            <set field="subTimePeriodSize" from="subTimePeriodList?.length ?? 0"/>
 
             <service-call name="org.moqui.impl.BasicServices.find#EnumerationByParent" out-map="expenseClassOut"
-                          in-map="[parentEnumId:'EXPENSE', includeNested:true]"/>
+                          in-map="{parentEnumId:'EXPENSE', includeNested:true}"/>
             <set field="expenseClassEnumIds" from="expenseClassOut.enumIdSet"/>
-            <set field="pageSize" from="pageSize ?: '30'"/>
+            <set field="pageSize" from="pageSize || '30'"/>
             <entity-find entity-name="mantle.ledger.account.GlAccountAndOrganization" list="glAccountList">
                 <econdition field-name="organizationPartyId" from="timePeriod.partyId"/>
                 <econdition field-name="glAccountClassEnumId" operator="in" from="expenseClassEnumIds"/>
                 <select-field field-name="glAccountId,accountCode,accountName"/>
                 <order-by field-name="accountCode"/>
             </entity-find>
-            <set field="glAccountIds" from="glAccountList*.glAccountId"/>
+            <set field="glAccountIds" from="Array.from(glAccountList, (gla) =&gt; gla.glAccountId)"/>
 
             <!-- get GlAccount level actuals from GlAccountOrgTimePeriod -->
             <entity-find entity-name="mantle.ledger.account.GlAccountOrgTimePeriod" list="glaotpList">
@@ -244,8 +235,8 @@ along with this software (see the LICENSE.md file). If not, see
             </entity-find>
 
             <!-- get detail level actuals from InvoiceItemDetail, etc through InvoiceItemDetailTotal -->
-            <set field="iidtListByPeriod" from="new ArrayList(subTimePeriodSize + 1)"/>
-            <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="[timePeriod:timePeriod]" out-map="periodInfo"/>
+            <set field="iidtListByPeriod" from="[]"/>
+            <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="{timePeriod:timePeriod}" out-map="periodInfo"/>
             <set field="fromTimestamp" from="periodInfo.fromTimestamp"/>
             <set field="thruTimestamp" from="periodInfo.thruTimestamp"/>
 
@@ -257,9 +248,9 @@ along with this software (see the LICENSE.md file). If not, see
                 <!-- do we want this? if expense allocated maybe better to always include: <econdition field-name="isPosted" value="Y"/> -->
                 <select-field field-name="glAccountId,assetId,facilityId,totalAmount"/>
             </entity-find>
-            <script>iidtListByPeriod.add(mainIidtList)</script>
+            <script>iidtListByPeriod.push(mainIidtList)</script>
             <iterate list="subTimePeriodList" entry="subTimePeriod">
-                <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="[subTimePeriod:subTimePeriod]" out-map="subPeriodInfo"/>
+                <service-call name="mantle.party.TimeServices.get#TimePeriodInfo" in-map="{timePeriod:subTimePeriod}" out-map="subPeriodInfo"/>
                 <entity-find entity-name="mantle.account.invoice.InvoiceItemDetailTotal" list="subIidtList">
                     <econdition field-name="organizationPartyId" from="timePeriod.partyId"/>
                     <econdition field-name="glAccountId" operator="in" from="glAccountIds"/>
@@ -268,197 +259,160 @@ along with this software (see the LICENSE.md file). If not, see
                     <!-- do we want this? if expense allocated maybe better to always include: <econdition field-name="isPosted" value="Y"/> -->
                     <select-field field-name="glAccountId,assetId,facilityId,totalAmount"/>
                 </entity-find>
-                <script>iidtListByPeriod.add(subIidtList)</script>
+                <script>iidtListByPeriod.push(subIidtList)</script>
             </iterate>
             <!-- <log level="warn" message="iidtListByPeriod: ${iidtListByPeriod}"/> -->
 
             <script><![CDATA[
+                // slot 0 is the main amount, then one slot per sub period
+                const newSlots = () => new Array(13).fill(null)
+                const addSorted = (map, key, value) => {
+                    const values = (map[key] ??= [])
+                    if (!values.includes(value)) values.push(value)
+                }
+
                 // structure BudgetItem records
-                budgetItemsByGlId = new HashMap<String, ArrayList>()
-                for (Map curBi in budgetItemList) {
-                    String glAccountId = curBi.glAccountId
-                    ArrayList curBiList = budgetItemsByGlId.get(glAccountId)
+                budgetItemsByGlId = {}
+                for (const curBi of budgetItemList) {
+                    const glAccountId = curBi.glAccountId
+                    let curBiList = budgetItemsByGlId[glAccountId]
                     if (curBiList == null) {
-                        curBiList = new ArrayList([null, null, null, null, null, null, null, null, null, null, null, null, null]) // 13 null entries
-                        budgetItemsByGlId.put(glAccountId, curBiList)
+                        curBiList = newSlots()
+                        budgetItemsByGlId[glAccountId] = curBiList
                     }
 
-                    String subTimePeriodId = (String) curBi.subTimePeriodId
+                    const subTimePeriodId = curBi.subTimePeriodId
                     if (subTimePeriodId == null) {
-                        curBiList.set(0, curBi)
+                        curBiList[0] = curBi
                     } else {
-                        int subPeriodIndex = subTimePeriodIds.indexOf(subTimePeriodId)
-                        if (subPeriodIndex >= 0) curBiList.set(subPeriodIndex + 1, curBi)
+                        const subPeriodIndex = (subTimePeriodIds ?? []).indexOf(subTimePeriodId)
+                        if (subPeriodIndex >= 0) curBiList[subPeriodIndex + 1] = curBi
                     }
                 }
 
                 // structure GlAccountOrgTimePeriod records
-                glaotpByGlId = new HashMap<String, ArrayList>()
-                for (Map curGlaotp in glaotpList) {
-                    String glAccountId = curGlaotp.glAccountId
-                    ArrayList curGltpList = glaotpByGlId.get(glAccountId)
+                glaotpByGlId = {}
+                for (const curGlaotp of glaotpList) {
+                    const glAccountId = curGlaotp.glAccountId
+                    let curGltpList = glaotpByGlId[glAccountId]
                     if (curGltpList == null) {
-                        curGltpList = new ArrayList([null, null, null, null, null, null, null, null, null, null, null, null, null]) // 13 null entries
-                        glaotpByGlId.put(glAccountId, curGltpList)
+                        curGltpList = newSlots()
+                        glaotpByGlId[glAccountId] = curGltpList
                     }
 
-                    int subPeriodIndex = allTimePeriodIds.indexOf(curGlaotp.timePeriodId)
-                    if (subPeriodIndex >= 0) curGltpList.set(subPeriodIndex, curGlaotp)
+                    const subPeriodIndex = (allTimePeriodIds ?? []).indexOf(curGlaotp.timePeriodId)
+                    if (subPeriodIndex >= 0) curGltpList[subPeriodIndex] = curGlaotp
                 }
 
                 // structure BudgetItemDetail records
-                detailsByGlAssetOrFacility = new HashMap<String, ArrayList>()
-                assetIdsByGl = new HashMap<String, Set>()
-                facilityIdsByGl = new HashMap<String, Set>()
-                for (Map curBid in budgetItemDetailList) {
-                    String glAccountId = curBid.glAccountId
-                    String assetId = curBid.assetId
-                    String facilityId = curBid.facilityId
+                detailsByGlAssetOrFacility = {}
+                assetIdsByGl = {}
+                facilityIdsByGl = {}
+                for (const curBid of budgetItemDetailList) {
+                    const glAccountId = curBid.glAccountId
+                    const assetId = curBid.assetId
+                    const facilityId = curBid.facilityId
 
-                    String bidMapKey
+                    let bidMapKey
                     if (assetId) {
                         bidMapKey = glAccountId + ':A:' + assetId
-                        Set assetIdSet = assetIdsByGl.get(glAccountId)
-                        if (assetIdSet == null) { assetIdSet = new TreeSet(); assetIdsByGl.put(glAccountId, assetIdSet) }
-                        assetIdSet.add(assetId)
+                        addSorted(assetIdsByGl, glAccountId, assetId)
                     } else if (facilityId) {
                         bidMapKey = glAccountId + ':F:' + facilityId
-                        Set facilityIdSet = facilityIdsByGl.get(glAccountId)
-                        if (facilityIdSet == null) { facilityIdSet = new TreeSet(); facilityIdsByGl.put(glAccountId, facilityIdSet) }
-                        facilityIdSet.add(facilityId)
+                        addSorted(facilityIdsByGl, glAccountId, facilityId)
                     } else {
                         continue
                     }
 
-                    ArrayList curBidList = detailsByGlAssetOrFacility.get(bidMapKey)
+                    let curBidList = detailsByGlAssetOrFacility[bidMapKey]
                     if (curBidList == null) {
-                        curBidList = new ArrayList([null, null, null, null, null, null, null, null, null, null, null, null, null]) // 13 null entries
-                        detailsByGlAssetOrFacility.put(bidMapKey, curBidList)
+                        curBidList = newSlots()
+                        detailsByGlAssetOrFacility[bidMapKey] = curBidList
                     }
 
-                    String subTimePeriodId = (String) curBid.subTimePeriodId
+                    const subTimePeriodId = curBid.subTimePeriodId
                     if (subTimePeriodId == null) {
-                        curBidList.set(0, curBid)
+                        curBidList[0] = curBid
                     } else {
-                        int subPeriodIndex = subTimePeriodIds.indexOf(subTimePeriodId)
-                        if (subPeriodIndex >= 0) curBidList.set(subPeriodIndex + 1, curBid)
+                        const subPeriodIndex = (subTimePeriodIds ?? []).indexOf(subTimePeriodId)
+                        if (subPeriodIndex >= 0) curBidList[subPeriodIndex + 1] = curBid
                     }
                 }
 
                 // structure InvoiceItemDetail records
-                iiDetailsByGlAssetOrFacility = new HashMap<String, ArrayList>()
-                for (int subPeriodIdx = 0; subPeriodIdx <= subTimePeriodSize; subPeriodIdx++) {
-                    List curIidtList = iidtListByPeriod.get(subPeriodIdx)
-                    for (Map curIidt in curIidtList) {
-                        String glAccountId = curIidt.glAccountId
-                        String assetId = curIidt.assetId
-                        String facilityId = curIidt.facilityId
+                iiDetailsByGlAssetOrFacility = {}
+                for (let subPeriodIdx = 0; subPeriodIdx <= subTimePeriodSize; subPeriodIdx++) {
+                    const curIidtList = iidtListByPeriod[subPeriodIdx]
+                    for (const curIidt of curIidtList) {
+                        const glAccountId = curIidt.glAccountId
+                        const assetId = curIidt.assetId
+                        const facilityId = curIidt.facilityId
 
-                        String iidMapKey
+                        let iidMapKey
                         if (assetId) {
                             iidMapKey = glAccountId + ':A:' + assetId
-                            Set assetIdSet = assetIdsByGl.get(glAccountId)
-                            if (assetIdSet == null) { assetIdSet = new TreeSet(); assetIdsByGl.put(glAccountId, assetIdSet) }
-                            assetIdSet.add(assetId)
+                            addSorted(assetIdsByGl, glAccountId, assetId)
                         } else if (facilityId) {
                             iidMapKey = glAccountId + ':F:' + facilityId
-                            Set facilityIdSet = facilityIdsByGl.get(glAccountId)
-                            if (facilityIdSet == null) { facilityIdSet = new TreeSet(); facilityIdsByGl.put(glAccountId, facilityIdSet) }
-                            facilityIdSet.add(facilityId)
+                            addSorted(facilityIdsByGl, glAccountId, facilityId)
                         } else {
                             continue
                         }
 
-                        ArrayList curBidList = iiDetailsByGlAssetOrFacility.get(iidMapKey)
+                        let curBidList = iiDetailsByGlAssetOrFacility[iidMapKey]
                         if (curBidList == null) {
-                            curBidList = new ArrayList([null, null, null, null, null, null, null, null, null, null, null, null, null]) // 13 null entries
-                            iiDetailsByGlAssetOrFacility.put(iidMapKey, curBidList)
+                            curBidList = newSlots()
+                            iiDetailsByGlAssetOrFacility[iidMapKey] = curBidList
                         }
-                        curBidList.set(subPeriodIdx, curIidt)
+                        curBidList[subPeriodIdx] = curIidt
                     }
                 }
 
-                // create detailInfoList based on glAccountList plus assets and facilities for each
-                detailInfoList = new ArrayList<Map>()
-                for (Map glAccount in glAccountList) {
-                    String glAccountId = glAccount.glAccountId
+                // one row from the actuals and budget amounts, each a 13 slot list (main, then the sub periods)
+                const makeInfo = (baseInfo, actualList, amountList, actualField) => {
+                    const actualMain = actualList?.[0]?.[actualField] ?? null
+                    let amountMain = amountList?.[0]?.amount ?? null
+                    if (amountMain == null && actualMain != null) amountMain = toDecimal(0)
+                    const infoMap = Object.assign({}, baseInfo, {actualMain: actualMain, amountMain: amountMain})
+                    let subPerActualTotal = toDecimal(0)
+                    let subPerTotal = toDecimal(0)
+                    for (let i = 1; i <= subTimePeriodSize; i++) {
+                        const curActual = actualList?.[i]?.[actualField] ?? null
+                        let curAmount = amountList?.[i]?.amount ?? null
+                        if (curAmount == null && curActual != null) curAmount = toDecimal(0)
+                        if (curActual != null) { infoMap['actualPer' + i] = curActual; subPerActualTotal = subPerActualTotal.add(curActual) }
+                        if (curAmount != null) { infoMap['amountPer' + i] = curAmount; subPerTotal = subPerTotal.add(curAmount) }
+                    }
+                    infoMap.subPerActualTotal = subPerActualTotal
+                    infoMap.subPerTotal = subPerTotal
+                    return infoMap
+                }
 
-                    List curBiList = budgetItemsByGlId.get(glAccountId)
-                    List curGltpList = glaotpByGlId.get(glAccountId)
+                // create detailInfoList based on glAccountList plus assets and facilities for each
+                detailInfoList = []
+                for (const glAccount of glAccountList) {
+                    const glAccountId = glAccount.glAccountId
+
+                    const curBiList = budgetItemsByGlId[glAccountId]
+                    const curGltpList = glaotpByGlId[glAccountId]
+                    const baseInfo = {glAccountId: glAccountId, accountCode: glAccount.accountCode, accountName: glAccount.accountName}
 
                     if (curBiList || curGltpList) {
-                        BigDecimal actualMain = curGltpList?.get(0)?.postedDebits
-                        BigDecimal amountMain = curBiList?.get(0)?.amount
-                        if (amountMain == null && actualMain != null) amountMain = BigDecimal.ZERO
-                        Map infoMap = [glAccountId:glAccountId, accountCode:glAccount.accountCode, accountName:glAccount.accountName,
-                                       actualMain:actualMain, amountMain:amountMain]
-                        BigDecimal subPerActualTotal = BigDecimal.ZERO
-                        BigDecimal subPerTotal = BigDecimal.ZERO
-                        for (int i = 1; i <= subTimePeriodSize; i++) {
-                            BigDecimal curActual = curGltpList?.get(i)?.postedDebits
-                            BigDecimal curAmount = curBiList?.get(i)?.amount
-                            if (curAmount == null && curActual != null) curAmount = BigDecimal.ZERO
-                            if (curActual != null) { infoMap.put('actualPer' + i, curActual); subPerActualTotal += curActual }
-                            if (curAmount != null) { infoMap.put('amountPer' + i, curAmount); subPerTotal += curAmount }
-                        }
-                        infoMap.put('subPerActualTotal', subPerActualTotal)
-                        infoMap.put('subPerTotal', subPerTotal)
-
-                        detailInfoList.add(infoMap)
+                        detailInfoList.push(makeInfo(baseInfo, curGltpList, curBiList, 'postedDebits'))
                     }
 
                     // add asset entries to list
-                    Set assetIds = assetIdsByGl.get(glAccountId)
-                    for (String assetId in assetIds) {
-                        String curDetailKey = glAccountId + ':A:' + assetId
-                        ArrayList curBidList = detailsByGlAssetOrFacility.get(curDetailKey)
-                        ArrayList curIidList = iiDetailsByGlAssetOrFacility.get(curDetailKey)
-
-                        BigDecimal actualMain = curIidList?.get(0)?.totalAmount
-                        BigDecimal amountMain = curBidList?.get(0)?.amount
-                        if (amountMain == null && actualMain != null) amountMain = BigDecimal.ZERO
-                        Map infoMap = [glAccountId:glAccountId, accountCode:glAccount.accountCode, accountName:glAccount.accountName,
-                                       assetId:assetId, actualMain:actualMain, amountMain:amountMain]
-                        BigDecimal subPerActualTotal = BigDecimal.ZERO
-                        BigDecimal subPerTotal = BigDecimal.ZERO
-                        for (int i = 1; i <= subTimePeriodSize; i++) {
-                            BigDecimal curActual = curIidList?.get(i)?.totalAmount
-                            BigDecimal curAmount = curBidList?.get(i)?.amount
-                            if (curAmount == null && curActual != null) curAmount = BigDecimal.ZERO
-                            if (curActual != null) { infoMap.put('actualPer' + i, curActual); subPerActualTotal += curActual }
-                            if (curAmount != null) { infoMap.put('amountPer' + i, curAmount); subPerTotal += curAmount }
-                        }
-                        infoMap.put('subPerActualTotal', subPerActualTotal)
-                        infoMap.put('subPerTotal', subPerTotal)
-
-                        detailInfoList.add(infoMap)
+                    for (const assetId of (assetIdsByGl[glAccountId] ?? []).sort()) {
+                        const curDetailKey = glAccountId + ':A:' + assetId
+                        detailInfoList.push(makeInfo(Object.assign({}, baseInfo, {assetId: assetId}),
+                                iiDetailsByGlAssetOrFacility[curDetailKey], detailsByGlAssetOrFacility[curDetailKey], 'totalAmount'))
                     }
 
                     // add facility details entries to list
-                    Set facilityIds = facilityIdsByGl.get(glAccountId)
-                    for (String facilityId in facilityIds) {
-                        String curDetailKey = glAccountId + ':F:' + facilityId
-                        ArrayList curBidList = detailsByGlAssetOrFacility.get(curDetailKey)
-                        ArrayList curIidList = iiDetailsByGlAssetOrFacility.get(curDetailKey)
-
-                        BigDecimal actualMain = curIidList?.get(0)?.totalAmount
-                        BigDecimal amountMain = curBidList?.get(0)?.amount
-                        if (amountMain == null && actualMain != null) amountMain = BigDecimal.ZERO
-                        Map infoMap = [glAccountId:glAccountId, accountCode:glAccount.accountCode, accountName:glAccount.accountName,
-                                       facilityId:facilityId, actualMain:actualMain, amountMain:amountMain]
-                        BigDecimal subPerActualTotal = BigDecimal.ZERO
-                        BigDecimal subPerTotal = BigDecimal.ZERO
-                        for (int i = 1; i <= subTimePeriodSize; i++) {
-                            BigDecimal curActual = curIidList?.get(i)?.totalAmount
-                            BigDecimal curAmount = curBidList?.get(i)?.amount
-                            if (curAmount == null && curActual != null) curAmount = BigDecimal.ZERO
-                            if (curActual != null) { infoMap.put('actualPer' + i, curActual); subPerActualTotal += curActual }
-                            if (curAmount != null) { infoMap.put('amountPer' + i, curAmount); subPerTotal += curAmount }
-                        }
-                        infoMap.put('subPerActualTotal', subPerActualTotal)
-                        infoMap.put('subPerTotal', subPerTotal)
-
-                        detailInfoList.add(infoMap)
+                    for (const facilityId of (facilityIdsByGl[glAccountId] ?? []).sort()) {
+                        const curDetailKey = glAccountId + ':F:' + facilityId
+                        detailInfoList.push(makeInfo(Object.assign({}, baseInfo, {facilityId: facilityId}),
+                                iiDetailsByGlAssetOrFacility[curDetailKey], detailsByGlAssetOrFacility[curDetailKey], 'totalAmount'))
                     }
                 }
             ]]></script>

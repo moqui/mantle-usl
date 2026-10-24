@@ -21,7 +21,7 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="partyIdList" type="List"><parameter name="partyId"/></parameter>
             <parameter name="start" required="true"/>
             <parameter name="end" required="true"/>
-            <parameter name="titleGString" default-value="\${(workEffort.workEffortName ?: (workEffort.purposeEnumId ? workEffort.'WorkEffortPurpose#moqui.basic.Enumeration'.description : 'Event')) + ' [' + workEffort.workEffortId + ']'}"/>
+            <parameter name="titleGString" default-value="\${(workEffort.workEffortName || (workEffort.purposeEnumId ? workEffort['WorkEffortPurpose#moqui.basic.Enumeration'].description : 'Event')) + ' [' + workEffort.workEffortId + ']'}"/>
             <parameter name="urlGString"/>
         </in-parameters>
         <out-parameters>
@@ -43,12 +43,12 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="endTs" from="ec.l10n.parseTimestamp(end.toString() + ' 23:59:59.999', 'yyyy-MM-dd HH:mm:ss.SSS')"/>
             <!-- <log level="warn" message="=========== Task FullCalendarData start ${start} - ${startTs} end ${end} - ${endTs}"/> -->
 
-            <set field="partyIdSet" from="new HashSet()"/>
-            <if condition="partyId"><script>partyIdSet.add(partyId)</script></if>
-            <if condition="partyIdList"><script>partyIdSet.addAll(partyIdList)</script></if>
+            <set field="partyIdSet" from="[]"/>
+            <if condition="partyId"><script>partyIdSet.push(partyId)</script></if>
+            <if condition="partyIdList?.length"><script>for (const id of partyIdList) { if (!partyIdSet.includes(id)) partyIdSet.push(id) }</script></if>
 
             <set field="eventList" from="[]"/>
-            <if condition="!partyIdSet"><return/></if>
+            <if condition="!partyIdSet.length"><return/></if>
 
             <entity-find entity-name="mantle.work.effort.WorkEffortAndParty" list="workEffortList">
                 <econdition field-name="workEffortTypeEnumId" value="WetTask"/>
@@ -77,7 +77,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <set field="title" from="ec.resource.expand(titleGString, '')"/>
 
                 <service-call name="mantle.work.WorkEffortServices.get#WorkEffortStartEnd" out-map="startEndOut"
-                        in-map="[workEffortId:workEffort.workEffortId, workEffort:workEffort]"/>
+                        in-map="{workEffortId:workEffort.workEffortId, workEffort:workEffort}"/>
                 <set field="start" from="ec.l10n.format(startEndOut.startDate, 'yyyy-MM-dd\'T\'HH:mm:ss')"/>
                 <set field="end" from="ec.l10n.format(startEndOut.endDate, 'yyyy-MM-dd\'T\'HH:mm:ss')"/>
 
@@ -85,8 +85,8 @@ along with this software (see the LICENSE.md file). If not, see
                     <set field="url" from="ec.resource.expand(urlGString, '')"/>
                     <else><set field="url" value=""/></else>
                 </if>
-                <set field="eventMap" from="[id:workEffort.workEffortId, title:title, start:start, end:end, url:url, allDay:true]"/>
-                <script>eventList.add(eventMap)</script>
+                <set field="eventMap" from="{id:workEffort.workEffortId, title:title, start:start, end:end, url:url, allDay:true}"/>
+                <script>eventList.push(eventMap)</script>
             </iterate>
         </actions>
     </service>
@@ -120,19 +120,20 @@ along with this software (see the LICENSE.md file). If not, see
         </out-parameters>
         <actions>
             <if condition="!workEffortId &amp;&amp; rootWorkEffortId">
+                <!-- a bank of 1: the numbers have no gaps (create#Project starts them at 1) -->
                 <set field="seqName" value="Project_${rootWorkEffortId}"/>
-                <set field="workEffortId" value="${rootWorkEffortId}-${ec.entity.sequencedIdPrimary(seqName, null, 10)}"/>
+                <set field="workEffortId" value="${rootWorkEffortId}-${ec.entity.sequencedIdPrimary(seqName, null, 1)}"/>
             </if>
-            <service-call name="create#mantle.work.effort.WorkEffort" out-map="context" in-map="context + [workEffortTypeEnumId:'WetTask']"/>
+            <service-call name="create#mantle.work.effort.WorkEffort" out-map="context" in-map="Object.assign({}, context, {workEffortTypeEnumId:'WetTask'})"/>
             <if condition="assignToPartyId">
-                <service-call name="create#mantle.work.effort.WorkEffortParty" in-map="[workEffortId:workEffortId, partyId:assignToPartyId,
-                        roleTypeId:assignRoleTypeId, fromDate:ec.user.nowTimestamp, statusId:assignStatusId]"/>
+                <service-call name="create#mantle.work.effort.WorkEffortParty" in-map="{workEffortId:workEffortId, partyId:assignToPartyId,
+                        roleTypeId:assignRoleTypeId, fromDate:ec.user.nowTimestamp, statusId:assignStatusId}"/>
             </if>
             <if condition="milestoneWorkEffortId"><service-call name="mantle.work.TaskServices.set#TaskMilestone" in-map="context"/></if>
             <if condition="requestId"><service-call name="create#mantle.request.RequestWorkEffort"
-                    in-map="[workEffortId:workEffortId, requestId:requestId]"/></if>
+                    in-map="{workEffortId:workEffortId, requestId:requestId}"/></if>
             <if condition="assetId"><service-call name="create#mantle.work.effort.WorkEffortAssetAssign"
-                    in-map="[workEffortId:workEffortId, assetId:assetId, fromDate:ec.user.nowTimestamp, statusId:'WeaaAssigned']"/></if>
+                    in-map="{workEffortId:workEffortId, assetId:assetId, fromDate:ec.user.nowTimestamp, statusId:'WeaaAssigned'}"/></if>
         </actions>
     </service>
     <service verb="create" noun="SimpleTask">
@@ -156,15 +157,19 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <out-parameters><parameter name="workEffortId"/></out-parameters>
         <actions>
-            <service-call name="create#mantle.work.effort.WorkEffort" out-map="context" in-map="context + [workEffortTypeEnumId:'WetTask']"/>
+            <service-call name="create#mantle.work.effort.WorkEffort" out-map="context" in-map="Object.assign({}, context, {workEffortTypeEnumId:'WetTask'})"/>
             <if condition="assignToPartyId">
-                <service-call name="create#mantle.work.effort.WorkEffortParty" in-map="[workEffortId:workEffortId, partyId:assignToPartyId,
-                        roleTypeId:assignRoleTypeId, fromDate:ec.user.nowTimestamp, statusId:assignStatusId]"/>
+                <service-call name="create#mantle.work.effort.WorkEffortParty" in-map="{workEffortId:workEffortId, partyId:assignToPartyId,
+                        roleTypeId:assignRoleTypeId, fromDate:ec.user.nowTimestamp, statusId:assignStatusId}"/>
             </if>
-            <if condition="requestId"><service-call name="create#mantle.request.RequestWorkEffort" in-map="[workEffortId:workEffortId, requestId:requestId]"/></if>
+            <if condition="requestId"><service-call name="create#mantle.request.RequestWorkEffort" in-map="{workEffortId:workEffortId, requestId:requestId}"/></if>
         </actions>
     </service>
     <service verb="update" noun="Task">
+        <description>Updates a task. A new rootWorkEffortId moves it to that project with its sub-tasks (the whole subtree takes
+            the new project, design-projects.md §5 "The work item tree"): its parent stays only when it is in the new project
+            (else it becomes a top-level task there; a parentWorkEffortId given with it must be in the new project), and the
+            memberships of the subtree in the old project's milestones, releases, sprints and components end.</description>
         <in-parameters>
             <parameter name="workEffortId" required="true"/>
             <auto-parameters entity-name="mantle.work.effort.WorkEffort" include="nonpk"/>
@@ -174,11 +179,59 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="timeUomId" default-value="TF_hr"/>
         </in-parameters>
         <actions>
+            <set field="movedProject" from="false"/>
+            <if condition="rootWorkEffortId">
+                <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="before"/>
+                <if condition="before != null &amp;&amp; before.workEffortTypeEnumId == 'WetTask' &amp;&amp; before.rootWorkEffortId != rootWorkEffortId">
+                    <set field="movedProject" from="true"/>
+                    <set field="newParentId" from="parentWorkEffortId || before.parentWorkEffortId"/>
+                    <if condition="newParentId">
+                        <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="newParent">
+                            <field-map field-name="workEffortId" from="newParentId"/></entity-find-one>
+                        <if condition="parentWorkEffortId &amp;&amp; newParent?.rootWorkEffortId != rootWorkEffortId">
+                            <return error="true" message="Task ${parentWorkEffortId} is not in project ${rootWorkEffortId}, so ${workEffortId} cannot go under it"/></if>
+                    </if>
+                </if>
+            </if>
             <service-call name="update#mantle.work.effort.WorkEffort" out-map="context" in-map="context"/>
+            <if condition="movedProject">
+                <service-call name="mantle.work.TaskServices.move#TaskSubtreeProject" in-map="{workEffortId:workEffortId,
+                        rootWorkEffortId:rootWorkEffortId, clearParent:(before.parentWorkEffortId &amp;&amp; !parentWorkEffortId &amp;&amp;
+                        newParent?.rootWorkEffortId != rootWorkEffortId)}"/>
+            </if>
             <if condition="milestoneWorkEffortId">
                 <service-call name="mantle.work.TaskServices.set#TaskMilestone" in-map="context"/>
             </if>
         </actions>
+    </service>
+    <service verb="move" noun="TaskSubtreeProject" allow-remote="false">
+        <description>The rest of a task's move to another project (update#Task): the task's sub-tasks at every depth take the new
+            project, the task leaves a parent left in the old project (clearParent), and the memberships of the subtree in plan
+            items of another project end.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="rootWorkEffortId" required="true"/>
+            <parameter name="clearParent" type="Boolean" default="false"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            if (clearParent) ec.service.sync().name('update#mantle.work.effort.WorkEffort').parameters({workEffortId: workEffortId, parentWorkEffortId: null}).call()
+            const subtree = [workEffortId]
+            for (let i = 0; i < subtree.length && i < 100000; i++) {
+                for (const child of ec.entity.find('mantle.work.effort.WorkEffort').condition('parentWorkEffortId', subtree[i]).selectField('workEffortId').list()) {
+                    if (subtree.includes(child.workEffortId)) continue
+                    subtree.push(child.workEffortId)
+                    ec.service.sync().name('update#mantle.work.effort.WorkEffort').parameters({workEffortId: child.workEffortId, rootWorkEffortId: rootWorkEffortId}).call()
+                }
+            }
+            for (const assoc of ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('toWorkEffortId', 'in', subtree)
+                    .condition('workEffortAssocTypeEnumId', 'in', ['WeatMilestone', 'WeatRelease', 'WeatSprint', 'WeatComponent'])
+                    .conditionDate('fromDate', 'thruDate', null).list()) {
+                const plan = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', assoc.workEffortId).one()
+                if (plan?.rootWorkEffortId === rootWorkEffortId) continue
+                assoc.set('thruDate', ec.user.nowTimestamp)
+                assoc.update()
+            }
+        ]]></script></actions>
     </service>
     <service verb="set" noun="TaskMilestone">
         <in-parameters>
@@ -199,18 +252,894 @@ along with this software (see the LICENSE.md file). If not, see
             </if></iterate>
             <if condition="!foundMilestone">
                 <service-call name="create#mantle.work.effort.WorkEffortAssoc"
-                    in-map="[workEffortId:milestoneWorkEffortId, toWorkEffortId:workEffortId,
-                        workEffortAssocTypeEnumId:'WeatMilestone', fromDate:ec.user.nowTimestamp]"/>
+                    in-map="{workEffortId:milestoneWorkEffortId, toWorkEffortId:workEffortId,
+                        workEffortAssocTypeEnumId:'WeatMilestone', fromDate:ec.user.nowTimestamp}"/>
             </if>
         </actions>
     </service>
+    <!-- ========== Plan items, status, the tree, labels, recurrence (design-projects.md §15 Work model; impl-projects.md P2) ========== -->
+
+    <service verb="set" noun="TaskPlanItem">
+        <description>Puts a task in a plan item of its project (a milestone, release, sprint or component: WorkEffortAssoc of
+            assocTypeEnumId from the plan item to the task), ending its membership in any other of that kind, as
+            set#TaskMilestone does; an empty planWorkEffortId takes it out of the kind. A plan item of another project is
+            refused.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="assocTypeEnumId" required="true"/>
+            <parameter name="planWorkEffortId"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const kinds = {WeatMilestone: 'WetMilestone', WeatRelease: 'WetRelease', WeatSprint: 'WetSprint', WeatComponent: 'WetComponent'}
+            if (!kinds[assocTypeEnumId]) { ec.message.addError(ec.resource.expand('${assocTypeEnumId} is not a kind of plan item', '', {assocTypeEnumId})); return }
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null) { ec.message.addError(ec.resource.expand('Task ${workEffortId} not found', '', {workEffortId})); return }
+            if (planWorkEffortId) {
+                const plan = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', planWorkEffortId).one()
+                if (plan == null || plan.workEffortTypeEnumId !== kinds[assocTypeEnumId] || plan.rootWorkEffortId !== task.rootWorkEffortId) {
+                    ec.message.addError(ec.resource.expand('${planWorkEffortId} is not a plan item of the project of ${workEffortId}', '', {planWorkEffortId, workEffortId}))
+                    return
+                }
+            }
+            let found = false
+            for (const assoc of ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('toWorkEffortId', workEffortId)
+                    .condition('workEffortAssocTypeEnumId', assocTypeEnumId).conditionDate('fromDate', 'thruDate', null).list()) {
+                if (planWorkEffortId && assoc.workEffortId === planWorkEffortId) { found = true; continue }
+                assoc.set('thruDate', ec.user.nowTimestamp)
+                assoc.update()
+            }
+            if (!planWorkEffortId || found) return
+            // a membership ended in the same instant is taken up again rather than made twice
+            const same = ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', planWorkEffortId).condition('toWorkEffortId', workEffortId)
+                    .condition('workEffortAssocTypeEnumId', assocTypeEnumId).condition('fromDate', ec.user.nowTimestamp).one()
+            if (same != null) { same.set('thruDate', null); same.update(); return }
+            ec.service.sync().name('create#mantle.work.effort.WorkEffortAssoc').parameters({workEffortId: planWorkEffortId,
+                toWorkEffortId: workEffortId, workEffortAssocTypeEnumId: assocTypeEnumId, fromDate: ec.user.nowTimestamp}).call()
+        ]]></script></actions>
+    </service>
+    <service verb="set" noun="TaskRelease">
+        <description>The task's release (set#TaskPlanItem WeatRelease); empty takes it out of its release.</description>
+        <in-parameters><parameter name="workEffortId" required="true"/><parameter name="releaseWorkEffortId"/></in-parameters>
+        <actions><service-call name="mantle.work.TaskServices.set#TaskPlanItem" in-map="{workEffortId:workEffortId, assocTypeEnumId:'WeatRelease',
+                planWorkEffortId:releaseWorkEffortId}"/></actions>
+    </service>
+    <service verb="set" noun="TaskComponent">
+        <description>The task's component (set#TaskPlanItem WeatComponent); empty takes it out of its component.</description>
+        <in-parameters><parameter name="workEffortId" required="true"/><parameter name="componentWorkEffortId"/></in-parameters>
+        <actions><service-call name="mantle.work.TaskServices.set#TaskPlanItem" in-map="{workEffortId:workEffortId, assocTypeEnumId:'WeatComponent',
+                planWorkEffortId:componentWorkEffortId}"/></actions>
+    </service>
+    <service verb="set" noun="TaskSprint">
+        <description>The task's sprint (set#TaskPlanItem WeatSprint); empty takes it back to the backlog. A sprint that is
+            complete, closed or cancelled takes no items. A change in a sprint in progress is a scope change: the audit log
+            gets a row for the membership (EntityAuditLog of mantle.work.effort.WorkEffortAssoc, pkPrimaryValue the sprint,
+            pkSecondaryValue the task, changedFieldName fromDate when added and thruDate when taken out) with the user who
+            made it, which ProjectReportServices.get#SprintScopeChanges reads.</description>
+        <in-parameters><parameter name="workEffortId" required="true"/><parameter name="sprintWorkEffortId"/></in-parameters>
+        <out-parameters><parameter name="oldSprintWorkEffortId"/><parameter name="changed" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            changed = false
+            const find = (id) => id ? ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', id).one() : null
+            const sprint = find(sprintWorkEffortId)
+            if (sprintWorkEffortId) {
+                if (sprint == null || sprint.workEffortTypeEnumId !== 'WetSprint') { ec.message.addError(ec.resource.expand('Sprint ${sprintWorkEffortId} not found', '', {sprintWorkEffortId})); return }
+                if (['WeComplete', 'WeClosed', 'WeCancelled'].includes(sprint.statusId)) {
+                    ec.message.addError(ec.resource.expand('${name} is complete and takes no more items', '', {name: sprint.workEffortName || sprintWorkEffortId})); return
+                }
+            }
+            const current = Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('toWorkEffortId', workEffortId)
+                    .condition('workEffortAssocTypeEnumId', 'WeatSprint').conditionDate('fromDate', 'thruDate', null).list()).map((assoc) => assoc.workEffortId)
+            oldSprintWorkEffortId = current[0] || null
+            if ((sprintWorkEffortId || null) === oldSprintWorkEffortId && current.length <= 1) return
+            ec.service.sync().name('mantle.work.TaskServices.set#TaskPlanItem').parameters({workEffortId: workEffortId, assocTypeEnumId: 'WeatSprint',
+                planWorkEffortId: sprintWorkEffortId || null}).call()
+            if (ec.message.hasError()) return
+            changed = true
+            // the scope changes of the sprints in progress, with who made them
+            const audit = (sprintId, field) => ec.service.sync().name('create#moqui.entity.EntityAuditLog').parameters({changedEntityName: 'mantle.work.effort.WorkEffortAssoc',
+                changedFieldName: field, pkPrimaryValue: sprintId, pkSecondaryValue: workEffortId, pkRestCombinedValue: "workEffortAssocTypeEnumId:'WeatSprint'",
+                newValueText: String(ec.user.nowTimestamp), changedDate: ec.user.nowTimestamp, changedByUserId: ec.user.userId || null}).disableAuthz().call()
+            for (const oldId of current) if (oldId !== sprintWorkEffortId && find(oldId)?.statusId === 'WeInProgress') audit(oldId, 'thruDate')
+            if (sprint != null && sprint.statusId === 'WeInProgress' && !current.includes(sprintWorkEffortId)) audit(sprintWorkEffortId, 'fromDate')
+        ]]></script></actions>
+    </service>
+    <service verb="set" noun="TaskBacklogRank">
+        <description>The rank (sequenceNum) of a task in its project's backlog and sprint lists, which show the project's tasks
+            at every depth in one order: right after previousWorkEffortId, else right before nextWorkEffortId, else first. The
+            ranks are one order over the whole project, so the tree's order of siblings (set#TaskRank) stays the same order:
+            the task takes the middle of the gap it goes into, and when that gap is closed, or a task of the project has no
+            rank yet, every task of the project is numbered again 1000, 2000, … in the order it had. The order is by rank, then
+            (no rank) by the number in the key.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="previousWorkEffortId"/>
+            <parameter name="nextWorkEffortId"/>
+        </in-parameters>
+        <out-parameters><parameter name="sequenceNum" type="Long"/><parameter name="renumbered" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            renumbered = false
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null || task.workEffortTypeEnumId !== 'WetTask' || !task.rootWorkEffortId) {
+                ec.message.addError(ec.resource.expand('Task ${workEffortId} not found', '', {workEffortId})); return
+            }
+            const rankOf = (row) => row.sequenceNum == null || row.sequenceNum === '' ? null : Number(String(row.sequenceNum))
+            const numberOf = (id) => { const match = /(\d+)$/.exec(String(id)); return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER }
+            const others = Array.from(ec.entity.find('mantle.work.effort.WorkEffort').condition('rootWorkEffortId', task.rootWorkEffortId)
+                    .condition('workEffortTypeEnumId', 'WetTask').condition('workEffortId', 'not-equals', workEffortId)
+                    .selectField('workEffortId').selectField('sequenceNum').list()).sort((left, right) => {
+                const l = rankOf(left), r = rankOf(right)
+                if (l != null && r != null && l !== r) return l - r
+                if (l != null && r == null) return -1
+                if (l == null && r != null) return 1
+                return numberOf(left.workEffortId) - numberOf(right.workEffortId) || String(left.workEffortId).localeCompare(String(right.workEffortId))
+            })
+            let index = 0
+            if (previousWorkEffortId) {
+                const at = others.findIndex((row) => row.workEffortId === previousWorkEffortId)
+                if (at < 0) { ec.message.addError(ec.resource.expand('${previousWorkEffortId} is not in the project of ${workEffortId}', '', {previousWorkEffortId, workEffortId})); return }
+                index = at + 1
+            } else if (nextWorkEffortId) {
+                const at = others.findIndex((row) => row.workEffortId === nextWorkEffortId)
+                if (at < 0) { ec.message.addError(ec.resource.expand('${nextWorkEffortId} is not in the project of ${workEffortId}', '', {nextWorkEffortId, workEffortId})); return }
+                index = at
+            }
+            const before = index > 0 ? rankOf(others[index - 1]) : 0
+            const after = index < others.length ? rankOf(others[index]) : null
+            const ranked = others.every((row) => rankOf(row) != null)
+            const set = (id, rank) => ec.service.sync().name('update#mantle.work.effort.WorkEffort').parameters({workEffortId: id, sequenceNum: rank}).call()
+            if (ranked && before != null && (after == null || after - before >= 2)) {
+                sequenceNum = after == null ? before + 1000 : Math.floor((before + after) / 2)
+                if (rankOf(task) !== sequenceNum) set(workEffortId, sequenceNum)
+                return
+            }
+            // the gap is closed, or ranks are missing: number the project's tasks again in their order, with the task in its place
+            renumbered = true
+            const ordered = others.slice(0, index).concat([task], others.slice(index))
+            ordered.forEach((row, i) => {
+                const rank = (i + 1) * 1000
+                if (row.workEffortId === workEffortId) sequenceNum = rank
+                if (rankOf(row) !== rank) set(row.workEffortId, rank)
+            })
+        ]]></script></actions>
+    </service>
+
+    <!-- ========== Dependencies and dates (design-projects.md §5 Timeline, §15 Dependency lag and Timeline data; impl-projects.md P4c) ========== -->
+
+    <service verb="add" noun="TaskDependency">
+        <description>workEffortId depends on (is blocked by) toWorkEffortId, finish to start, with lagDays working days between the
+            end of toWorkEffortId and the start of workEffortId (WorkEffortAssoc WeatDependsOn, whose direction is fixed this way).
+            Refused: an item depending on itself, on one of its ancestors or descendants (a parent's span holds its sub-items), a
+            dependency that closes a loop (toWorkEffortId already depends on workEffortId, at any remove), a negative lag, and a
+            work item or plan item not found. A dependency already there takes the new lag (created false).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="toWorkEffortId" required="true"/>
+            <parameter name="lagDays" type="BigDecimal"/>
+        </in-parameters>
+        <out-parameters><parameter name="created" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            created = false
+            const L = (text, values) => ec.resource.expand(ec.l10n.localize(text), '', values || {})
+            const one = (id) => ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', id).one()
+            const from = one(workEffortId)
+            const to = one(toWorkEffortId)
+            if (from == null || from.workEffortTypeEnumId !== 'WetTask') { ec.message.addError(L('Work item ${id} not found', {id: workEffortId})); return }
+            if (to == null || to.workEffortTypeEnumId !== 'WetTask') { ec.message.addError(L('Work item ${id} not found', {id: toWorkEffortId})); return }
+            if (workEffortId === toWorkEffortId) { ec.message.addError(L('A work item does not depend on itself')); return }
+            const lag = lagDays == null || lagDays === '' ? null : Number(String(lagDays))
+            if (lag != null && (!Number.isFinite(lag) || lag < 0)) { ec.message.addError(L('The lag is 0 or more working days')); return }
+            // an ancestor or a descendant: the parent's span already holds its sub-items
+            const ancestors = (row) => {
+                const out = []
+                let at = row
+                for (let guard = 0; at && at.parentWorkEffortId && guard < 500; guard++) { out.push(at.parentWorkEffortId); at = one(at.parentWorkEffortId) }
+                return out
+            }
+            if (ancestors(from).includes(toWorkEffortId) || ancestors(to).includes(workEffortId)) {
+                ec.message.addError(L('${from} and ${to} are in one branch of the tree: a parent spans its sub-items', {from: workEffortId, to: toWorkEffortId})); return
+            }
+            // a loop: toWorkEffortId depends on workEffortId already, through any chain
+            const dependsOn = (id) => Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', id)
+                    .condition('workEffortAssocTypeEnumId', 'WeatDependsOn').conditionDate('fromDate', 'thruDate', null).selectField('toWorkEffortId').list())
+                    .map((row) => row.toWorkEffortId)
+            const seen = new Set([toWorkEffortId])
+            const queue = [toWorkEffortId]
+            for (let i = 0; i < queue.length && i < 20000; i++) {
+                for (const next of dependsOn(queue[i])) {
+                    if (next === workEffortId) {
+                        ec.message.addError(L('${to} already waits for ${from}, so ${from} cannot wait for it', {from: workEffortId, to: toWorkEffortId})); return
+                    }
+                    if (!seen.has(next)) { seen.add(next); queue.push(next) }
+                }
+            }
+            const existing = Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', workEffortId)
+                    .condition('toWorkEffortId', toWorkEffortId).condition('workEffortAssocTypeEnumId', 'WeatDependsOn')
+                    .conditionDate('fromDate', 'thruDate', null).list())
+            if (existing.length) {
+                for (const row of existing) if ((row.lagDays == null ? null : Number(String(row.lagDays))) !== lag) { row.set('lagDays', lag); row.update() }
+                return
+            }
+            ec.service.sync().name('create#mantle.work.effort.WorkEffortAssoc').parameters({workEffortId: workEffortId, toWorkEffortId: toWorkEffortId,
+                workEffortAssocTypeEnumId: 'WeatDependsOn', fromDate: ec.user.nowTimestamp, lagDays: lag}).call()
+            if (!ec.message.hasError()) created = true
+        ]]></script></actions>
+    </service>
+    <service verb="remove" noun="TaskDependency">
+        <description>Ends the dependency of workEffortId on toWorkEffortId (thruDate now); removed false when there was none.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="toWorkEffortId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="removed" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            removed = false
+            for (const row of ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', workEffortId).condition('toWorkEffortId', toWorkEffortId)
+                    .condition('workEffortAssocTypeEnumId', 'WeatDependsOn').conditionDate('fromDate', 'thruDate', null).list()) {
+                row.set('thruDate', ec.user.nowTimestamp)
+                row.update()
+                removed = true
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="set" noun="TaskDates">
+        <description>
+            Moves or resizes a work item, or a milestone, release or sprint, on the timeline: its start (estimatedStartDate) and
+            due (estimatedCompletionDate) as days, yyyy-MM-dd in the user's time zone (a time of day the field had is kept; an
+            empty text clears the date, a parameter not given leaves it). Refused when it would be due before it starts.
+            - shiftDays (a bar dragged along): its own dates move by that many days (startDay and dueDay not given), so an item
+              with only a due date, or a parent with none of its own, moves too.
+            - moveSubtree (a parent's summary bar dragged): its sub-items at every depth move by the same number of days.
+            - autoSchedule: the work items that depend on it (WeatDependsOn, at any remove) and would start before the next
+              business day after their predecessor's due day plus the lag move forward to it, keeping their length in business
+              days; business days as mantle.work.EventServices.get#FutureBusinessDay counts them (Saturday and Sunday, and the
+              holidays of the project's organization, ownerPartyId, skipped). An item is only moved later, never earlier, and
+              an item done (Complete, Closed, Cancelled) is not moved. Each dependent is moved on its own: one that fails is
+              logged and named in failedList, the rest go on.
+            movedList: every item whose dates changed, {workEffortId, startDay, dueDay}.
+        </description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="startDay"/>
+            <parameter name="dueDay"/>
+            <parameter name="shiftDays" type="Integer"/>
+            <parameter name="moveSubtree" type="Boolean" default="false"/>
+            <parameter name="autoSchedule" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="movedList" type="List"/>
+            <parameter name="failedList" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            movedList = []
+            failedList = []
+            const L = (text, values) => ec.resource.expand(ec.l10n.localize(text), '', values || {})
+            const one = (id) => ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', id).one()
+            const item = one(workEffortId)
+            if (item == null || !['WetTask', 'WetMilestone', 'WetRelease', 'WetSprint'].includes(item.workEffortTypeEnumId)) {
+                ec.message.addError(L('Work item ${id} not found', {id: workEffortId})); return
+            }
+            const isDay = (text) => /^\d{4}-\d{2}-\d{2}$/.test(String(text))
+            if (startDay != null && startDay !== '' && !isDay(startDay)) { ec.message.addError(L('The start is a day, yyyy-MM-dd')); return }
+            if (dueDay != null && dueDay !== '' && !isDay(dueDay)) { ec.message.addError(L('The due date is a day, yyyy-MM-dd')); return }
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                if (typeof value === 'number') return value
+                const text = String(value)
+                if (/^-?\d+$/.test(text)) return Number(text)
+                const parsed = Date.parse(text)
+                return Number.isNaN(parsed) ? null : parsed
+            }
+            const dayOf = (value) => toMillis(value) == null ? null : ec.l10n.format(String(toMillis(value)), 'yyyy-MM-dd')
+            const timeOf = (value) => toMillis(value) == null ? '00:00:00.000' : ec.l10n.format(String(toMillis(value)), 'HH:mm:ss.SSS')
+            const stamp = (day, old) => day ? ec.l10n.parseTimestamp(day + ' ' + timeOf(old), 'yyyy-MM-dd HH:mm:ss.SSS') : null
+            const addDays = (text, days) => { const d = new Date(text + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().substring(0, 10) }
+            const daysBetween = (from, to) => Math.round((Date.parse(to + 'T12:00:00Z') - Date.parse(from + 'T12:00:00Z')) / 86400000)
+            const write = (row, start, due) => {
+                const fields = {workEffortId: row.workEffortId}
+                const oldStart = dayOf(row.estimatedStartDate)
+                const oldDue = dayOf(row.estimatedCompletionDate)
+                if (start !== undefined && start !== oldStart) fields.estimatedStartDate = stamp(start, row.estimatedStartDate)
+                if (due !== undefined && due !== oldDue) fields.estimatedCompletionDate = stamp(due, row.estimatedCompletionDate)
+                if (Object.keys(fields).length === 1) return false
+                ec.service.sync().name('update#mantle.work.effort.WorkEffort').parameters(fields).call()
+                if (ec.message.hasError()) return false
+                movedList.push({workEffortId: row.workEffortId, startDay: start !== undefined ? start : oldStart, dueDay: due !== undefined ? due : oldDue})
+                return true
+            }
+
+            const oldStart = dayOf(item.estimatedStartDate)
+            const oldDue = dayOf(item.estimatedCompletionDate)
+            const shiftBy = shiftDays == null || shiftDays === '' ? null : Math.round(Number(String(shiftDays)))
+            if (shiftBy != null && Number.isFinite(shiftBy)) {
+                startDay = oldStart ? addDays(oldStart, shiftBy) : null
+                dueDay = oldDue ? addDays(oldDue, shiftBy) : null
+            }
+            const newStart = startDay == null ? oldStart : (startDay === '' ? null : String(startDay))
+            const newDue = dueDay == null ? oldDue : (dueDay === '' ? null : String(dueDay))
+            if (newStart && newDue && newDue < newStart) { ec.message.addError(L('${id} is due on or after the day it starts', {id: workEffortId})); return }
+            write(item, startDay == null ? undefined : newStart, dueDay == null ? undefined : newDue)
+            if (ec.message.hasError()) return
+
+            // a summary bar moved: its sub-items by the same days
+            const shift = shiftBy != null && Number.isFinite(shiftBy) ? shiftBy
+                : (oldStart && newStart ? daysBetween(oldStart, newStart) : (oldDue && newDue ? daysBetween(oldDue, newDue) : 0))
+            if (moveSubtree && shift && item.workEffortTypeEnumId === 'WetTask') {
+                const queue = [workEffortId]
+                for (let i = 0; i < queue.length && i < 20000; i++) {
+                    for (const child of ec.entity.find('mantle.work.effort.WorkEffort').condition('parentWorkEffortId', queue[i]).orderBy('workEffortId').list()) {
+                        queue.push(child.workEffortId)
+                        const childStart = dayOf(child.estimatedStartDate)
+                        const childDue = dayOf(child.estimatedCompletionDate)
+                        if (!childStart && !childDue) continue
+                        write(child, childStart ? addDays(childStart, shift) : undefined, childDue ? addDays(childDue, shift) : undefined)
+                        if (ec.message.hasError()) return
+                    }
+                }
+            }
+            if (!autoSchedule || item.workEffortTypeEnumId !== 'WetTask') return
+
+            // the dependents, moved forward by business days
+            const project = item.rootWorkEffortId ? one(item.rootWorkEffortId) : null
+            const organizationPartyId = project?.ownerPartyId || null
+            const future = (day, days) => {
+                if (days <= 0) return day
+                const out = ec.service.sync().name('mantle.work.EventServices.get#FutureBusinessDay').parameters({startDate: day, businessDays: days,
+                    organizationPartyId: organizationPartyId}).call()
+                // a Date comes back as yyyy-MM-dd text or as epoch millis of its UTC midnight
+                const value = out?.futureDayDate
+                if (value == null) return addDays(day, days)
+                const text = String(value)
+                return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.substring(0, 10) : new Date(Number(text)).toISOString().substring(0, 10)
+            }
+            // the business days from one day to a later one (each step a next business day), at most 400
+            const businessLength = (from, to) => {
+                let count = 0
+                let at = from
+                while (at < to && count < 400) { at = future(at, 1); count++ }
+                return count
+            }
+            const dependentsOf = (id) => Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('toWorkEffortId', id)
+                    .condition('workEffortAssocTypeEnumId', 'WeatDependsOn').conditionDate('fromDate', 'thruDate', null).list())
+            const dueOf = new Map([[workEffortId, newDue || newStart]])
+            const queue = [workEffortId]
+            const visits = new Map()
+            for (let i = 0; i < queue.length && i < 5000; i++) {
+                const predecessorId = queue[i]
+                const predecessorDue = dueOf.get(predecessorId)
+                if (!predecessorDue) continue
+                for (const link of dependentsOf(predecessorId)) {
+                    const dependentId = link.workEffortId
+                    // a loop in old data is left after a few passes
+                    const count = (visits.get(dependentId) || 0) + 1
+                    visits.set(dependentId, count)
+                    if (count > 20) continue
+                    ec.message.pushErrors()
+                    try {
+                        const dependent = one(dependentId)
+                        if (dependent == null || ['WeComplete', 'WeClosed', 'WeCancelled'].includes(dependent.statusId)) continue
+                        const lag = link.lagDays == null ? 0 : Math.max(0, Math.ceil(Number(String(link.lagDays)) || 0))
+                        const earliest = future(predecessorDue, 1 + lag)
+                        const start = dayOf(dependent.estimatedStartDate)
+                        const due = dayOf(dependent.estimatedCompletionDate)
+                        if (!start && !due) continue
+                        if ((start || due) >= earliest) { dueOf.set(dependentId, due || start); continue }
+                        let nextStart, nextDue
+                        if (start && due) { nextStart = earliest; nextDue = future(earliest, businessLength(start, due)) }
+                        else if (start) nextStart = earliest
+                        else nextDue = earliest
+                        ec.service.sync().name('mantle.work.TaskServices.set#TaskDates').parameters({workEffortId: dependentId,
+                            startDay: nextStart, dueDay: nextDue}).call()
+                        if (ec.message.hasError()) throw new Error(ec.message.getErrorsString())
+                        movedList.push({workEffortId: dependentId, startDay: nextStart || null, dueDay: nextDue || null})
+                        dueOf.set(dependentId, nextDue || nextStart)
+                        queue.push(dependentId)
+                    } catch (err) {
+                        const error = String(err && err.message ? err.message : err)
+                        ec.logger.error(`Auto-schedule after ${workEffortId}: ${dependentId} not moved: ${error}`)
+                        failedList.push({workEffortId: dependentId, error: error})
+                    } finally {
+                        ec.message.clearErrors()
+                        ec.message.popErrors()
+                    }
+                }
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="get" noun="TaskStatusFlow">
+        <description>The status flow of a task: its own statusFlowId, else its project's (rootWorkEffortId), else Default
+            (impl-projects.md F11); the flow's transitions from the task's status (toStatusId and transitionName, by the
+            target's sequence) and the statuses of the flow in sequence order (flowStatusIds).</description>
+        <in-parameters><parameter name="workEffortId" required="true"/></in-parameters>
+        <out-parameters>
+            <parameter name="statusFlowId"/>
+            <parameter name="statusId"/>
+            <parameter name="transitionList" type="List"><parameter name="transition" type="Map">
+                <parameter name="toStatusId"/><parameter name="transitionName"/><parameter name="description"/></parameter></parameter>
+            <parameter name="flowStatusIds" type="List"/>
+        </out-parameters>
+        <actions><script><![CDATA[
+            transitionList = []
+            flowStatusIds = []
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null) { ec.message.addError(ec.resource.expand('Task ${workEffortId} not found', '', {workEffortId})); return }
+            statusId = task.statusId || null
+            statusFlowId = task.statusFlowId || null
+            if (!statusFlowId && task.rootWorkEffortId) statusFlowId = ec.entity.find('mantle.work.effort.WorkEffort')
+                    .condition('workEffortId', task.rootWorkEffortId).one()?.statusFlowId || null
+            statusFlowId = statusFlowId || 'Default'
+            const items = {}
+            const itemOf = (id) => items[id] || (items[id] = ec.entity.find('moqui.basic.StatusItem').condition('statusId', id).useCache(true).one())
+            const sequence = (id) => { const item = itemOf(id); return item?.sequenceNum != null ? Number(String(item.sequenceNum)) : 999 }
+            const all = Array.from(ec.entity.find('moqui.basic.StatusFlowTransition').condition('statusFlowId', statusFlowId).useCache(true).list())
+            // the Default flow holds the transitions of every status type: only the work effort statuses
+            const statuses = new Set()
+            for (const row of all) { statuses.add(row.statusId); statuses.add(row.toStatusId) }
+            flowStatusIds = Array.from(statuses).filter((id) => itemOf(id)?.statusTypeId === 'WorkEffort').sort((left, right) => sequence(left) - sequence(right))
+            transitionList = all.filter((row) => row.statusId === statusId).sort((left, right) => sequence(left.toStatusId) - sequence(right.toStatusId))
+                    .map((row) => ({toStatusId: row.toStatusId, transitionName: row.transitionName || null, description: itemOf(row.toStatusId)?.description || row.toStatusId}))
+        ]]></script></actions>
+    </service>
+    <service verb="set" noun="TaskStatus">
+        <description>A task's status along its status flow (get#TaskStatusFlow: its own, else its project's, else Default,
+            with WorkEffortDevelopment's In Review and In Testing): a move the flow has not is refused with the framework's
+            message. Complete takes the resolution given, else Completed, and the actual completion date; Cancelled the
+            resolution given, else Won't Complete; going back to an open status from Complete, Closed or Cancelled clears them.
+            The update#WorkEffort it makes runs the status rules (recurring tasks, the dates).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="statusId" required="true"/>
+            <parameter name="resolutionEnumId"/>
+        </in-parameters>
+        <out-parameters><parameter name="oldStatusId"/><parameter name="statusChanged" type="Boolean"/></out-parameters>
+        <actions>
+            <service-call name="mantle.work.TaskServices.get#TaskStatusFlow" in-map="{workEffortId:workEffortId}" out-map="flow"/>
+            <if condition="ec.message.hasError()"><return/></if>
+            <set field="oldStatusId" from="flow.statusId"/>
+            <set field="statusChanged" from="oldStatusId != statusId"/>
+            <if condition="!statusChanged">
+                <if condition="resolutionEnumId &amp;&amp; ['WeComplete', 'WeCancelled', 'WeClosed'].includes(statusId)">
+                    <service-call name="update#mantle.work.effort.WorkEffort" in-map="{workEffortId:workEffortId, resolutionEnumId:resolutionEnumId}"/></if>
+                <return/>
+            </if>
+            <if condition="!flow.transitionList.some((transition) => transition.toStatusId == statusId)">
+                <script><![CDATA[
+                    // the framework's message for a move its status flows have not (StatusFlowTransitionNotFoundTemplate)
+                    const nameOf = (id) => ec.entity.find('moqui.basic.StatusItem').condition('statusId', id).useCache(true).one()?.description || null
+                    const localized = ec.l10n.localize('StatusFlowTransitionNotFoundTemplate')
+                    const template = localized && localized !== 'StatusFlowTransitionNotFoundTemplate' ? localized
+                            : 'Status change not allowed from ${lookedUpStatusName || lookedUpStatusId} to ${parameterStatusName || parameterStatusId}'
+                    ec.message.addError(ec.resource.expand(template, '', {fullEntityName: 'Work Effort', lookedUpStatusId: oldStatusId,
+                        lookedUpStatusName: nameOf(oldStatusId), parameterStatusId: statusId, parameterStatusName: nameOf(statusId)}))
+                ]]></script>
+                <return/>
+            </if>
+            <script><![CDATA[
+                const fields = {workEffortId: workEffortId, statusId: statusId}
+                const done = ['WeComplete', 'WeClosed', 'WeCancelled']
+                if (statusId === 'WeComplete') Object.assign(fields, {resolutionEnumId: resolutionEnumId || 'WerCompleted', actualCompletionDate: ec.user.nowTimestamp})
+                else if (statusId === 'WeCancelled') fields.resolutionEnumId = resolutionEnumId || 'WerWontComplete'
+                else if (statusId === 'WeClosed') { if (resolutionEnumId) fields.resolutionEnumId = resolutionEnumId }
+                else if (done.includes(oldStatusId)) Object.assign(fields, {resolutionEnumId: 'WerUnresolved', actualCompletionDate: null})
+                ec.service.sync().name('mantle.work.TaskServices.update#Task').parameters(fields).call()
+            ]]></script>
+        </actions>
+    </service>
+
+    <service verb="move" noun="Task">
+        <description>Moves a task in its project's work item tree (the view-tree of WorkItems and WorkItemDetail's sub-items): under
+            parentWorkEffortId (empty for the top level) after previousSiblingId (empty for the first), the parameters the tree
+            posts. The parent must be a task of the same project and neither the task nor one of its descendants; the previous
+            sibling must be a child of the new parent. The rank among the new siblings comes from set#TaskRank; a change of
+            parent is in the audit log (WorkEffort.parentWorkEffortId).</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="parentWorkEffortId"/>
+            <parameter name="previousSiblingId"/>
+        </in-parameters>
+        <out-parameters><parameter name="oldParentWorkEffortId"/><parameter name="sequenceNum" type="Long"/></out-parameters>
+        <actions><script><![CDATA[
+            const find = (id) => id ? ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', id).one() : null
+            const task = find(workEffortId)
+            if (task == null || task.workEffortTypeEnumId !== 'WetTask') { ec.message.addError(ec.resource.expand('Task ${workEffortId} not found', '', {workEffortId})); return }
+            const parentId = parentWorkEffortId || null
+            if (parentId) {
+                const parent = find(parentId)
+                if (parent == null || parent.workEffortTypeEnumId !== 'WetTask') { ec.message.addError(ec.resource.expand('Task ${parentId} not found', '', {parentId})); return }
+                if (parent.rootWorkEffortId !== task.rootWorkEffortId) {
+                    ec.message.addError(ec.resource.expand('${parentId} is in another project, so ${workEffortId} cannot go under it', '', {parentId, workEffortId}))
+                    return
+                }
+                // the new parent may not be the task or one of its descendants: walk up from the parent
+                let at = parent
+                for (let guard = 0; at != null && guard < 10000; guard++) {
+                    if (at.workEffortId === workEffortId) {
+                        ec.message.addError(ec.resource.expand('${workEffortId} cannot go under itself or one of its sub-items', '', {workEffortId}))
+                        return
+                    }
+                    at = find(at.parentWorkEffortId)
+                }
+            }
+            if (previousSiblingId) {
+                const previous = find(previousSiblingId)
+                if (previous == null || previous.workEffortId === workEffortId || (previous.parentWorkEffortId || null) !== parentId
+                        || previous.rootWorkEffortId !== task.rootWorkEffortId) {
+                    ec.message.addError(ec.resource.expand('${previousSiblingId} is not under the same parent', '', {previousSiblingId}))
+                    return
+                }
+            }
+            oldParentWorkEffortId = task.parentWorkEffortId || null
+            if (oldParentWorkEffortId !== parentId) {
+                ec.service.sync().name('update#mantle.work.effort.WorkEffort').parameters({workEffortId: workEffortId, parentWorkEffortId: parentId}).call()
+                if (ec.message.hasError()) return
+                // the field's audit log (update) leaves out a first value: a move from the top level is logged here
+                if (!oldParentWorkEffortId) ec.service.sync().name('create#moqui.entity.EntityAuditLog').parameters({changedEntityName: 'mantle.work.effort.WorkEffort',
+                    changedFieldName: 'parentWorkEffortId', pkPrimaryValue: workEffortId, newValueText: parentId, changedDate: ec.user.nowTimestamp,
+                    changedByUserId: ec.user.userId || null}).disableAuthz().call()
+            }
+            sequenceNum = ec.service.sync().name('mantle.work.TaskServices.set#TaskRank').parameters({workEffortId: workEffortId,
+                previousSiblingId: previousSiblingId || null}).call()?.sequenceNum ?? null
+        ]]></script></actions>
+    </service>
+    <service verb="set" noun="TaskRank">
+        <description>The rank (sequenceNum) of a task among its siblings (the tasks of the same parent, or at the top level of
+            its project), right after previousSiblingId (empty for the first). Ranks are in gaps of 1000: the task takes the
+            middle of the gap it goes into, and when the gap is closed, or a sibling has no rank yet, the siblings are
+            numbered again 1000, 2000, … in their order. The order is by rank, then (no rank) by the number in the key.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="previousSiblingId"/>
+        </in-parameters>
+        <out-parameters><parameter name="sequenceNum" type="Long"/><parameter name="renumbered" type="Boolean"/></out-parameters>
+        <actions><script><![CDATA[
+            renumbered = false
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null) { ec.message.addError(ec.resource.expand('Task ${workEffortId} not found', '', {workEffortId})); return }
+            let find = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortTypeEnumId', 'WetTask')
+                    .condition('workEffortId', 'not-equals', workEffortId)
+            find = task.parentWorkEffortId ? find.condition('parentWorkEffortId', task.parentWorkEffortId)
+                    : find.condition('parentWorkEffortId', 'is-null', null).condition('rootWorkEffortId', task.rootWorkEffortId)
+            const rankOf = (row) => row.sequenceNum == null || row.sequenceNum === '' ? null : Number(String(row.sequenceNum))
+            const numberOf = (id) => { const match = /(\d+)$/.exec(String(id)); return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER }
+            const siblings = Array.from(find.selectField('workEffortId').selectField('sequenceNum').list()).sort((left, right) => {
+                const l = rankOf(left), r = rankOf(right)
+                if (l != null && r != null && l !== r) return l - r
+                if (l != null && r == null) return -1
+                if (l == null && r != null) return 1
+                return numberOf(left.workEffortId) - numberOf(right.workEffortId) || String(left.workEffortId).localeCompare(String(right.workEffortId))
+            })
+            let index = 0
+            if (previousSiblingId) {
+                const at = siblings.findIndex((row) => row.workEffortId === previousSiblingId)
+                if (at < 0) { ec.message.addError(ec.resource.expand('${previousSiblingId} is not a sibling of ${workEffortId}', '', {previousSiblingId, workEffortId})); return }
+                index = at + 1
+            }
+            const before = index > 0 ? rankOf(siblings[index - 1]) : 0
+            const after = index < siblings.length ? rankOf(siblings[index]) : null
+            const ranked = siblings.every((row) => rankOf(row) != null)
+            const set = (id, rank) => ec.service.sync().name('update#mantle.work.effort.WorkEffort').parameters({workEffortId: id, sequenceNum: rank}).call()
+            if (ranked && before != null && (after == null || after - before >= 2)) {
+                sequenceNum = after == null ? before + 1000 : Math.floor((before + after) / 2)
+                if (rankOf(task) !== sequenceNum) set(workEffortId, sequenceNum)
+                return
+            }
+            // the gap is closed, or ranks are missing: number the siblings again in their order, with the task in its place
+            renumbered = true
+            const ordered = siblings.slice(0, index).concat([task], siblings.slice(index))
+            ordered.forEach((row, i) => {
+                const rank = (i + 1) * 1000
+                if (row.workEffortId === workEffortId) sequenceNum = rank
+                if (rankOf(row) !== rank) set(row.workEffortId, rank)
+            })
+        ]]></script></actions>
+    </service>
+
+    <service verb="add" noun="TaskLabel">
+        <description>Applies a label (a WorkEffortCategory of type WcatLabel) to a task (WorkEffortCategoryAppl); a label it has
+            already is left as it is.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="workEffortCategoryId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffortCategory" value-field="label"/>
+            <if condition="label == null || label.categoryTypeEnumId != 'WcatLabel'">
+                <return error="true" message="${workEffortCategoryId} is not a label"/></if>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="task"/>
+            <if condition="task == null"><return error="true" message="Task ${workEffortId} not found"/></if>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffortCategoryAppl" value-field="appl"/>
+            <if condition="appl == null">
+                <service-call name="create#mantle.work.effort.WorkEffortCategoryAppl" in-map="{workEffortId:workEffortId, workEffortCategoryId:workEffortCategoryId}"/></if>
+        </actions>
+    </service>
+    <service verb="remove" noun="TaskLabel">
+        <description>Takes a label off a task.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="workEffortCategoryId" required="true"/>
+        </in-parameters>
+        <actions>
+            <entity-find-one entity-name="mantle.work.effort.WorkEffortCategoryAppl" value-field="appl"/>
+            <if condition="appl != null"><entity-delete value-field="appl"/></if>
+        </actions>
+    </service>
+
+    <!-- the labels themselves (design-projects.md §12 Labels): WorkEffortCategory rows of type WcatLabel, an organization's
+        (ownerPartyId), with a color name of the theme's set -->
+    <service verb="create" noun="Label">
+        <description>A work item label: a WorkEffortCategory of type WcatLabel with its name (description), its color name and
+            its organization (ownerPartyId); a name the organization's labels have already is refused.</description>
+        <in-parameters>
+            <parameter name="description" required="true"/>
+            <parameter name="colorName" default-value="grey"/>
+            <parameter name="ownerPartyId"/>
+        </in-parameters>
+        <out-parameters><parameter name="workEffortCategoryId"/></out-parameters>
+        <actions><script><![CDATA[
+            const colors = ['grey', 'blue', 'indigo', 'purple', 'pink', 'red', 'orange', 'amber', 'green', 'teal', 'cyan', 'brown']
+            const name = String(description).trim()
+            if (!name) { ec.message.addError(ec.l10n.localize('A label needs a name')); return }
+            if (!colors.includes(colorName)) { ec.message.addError(ec.resource.expand('${colorName} is not a label color', '', {colorName})); return }
+            const same = ec.entity.find('mantle.work.effort.WorkEffortCategory').condition('categoryTypeEnumId', 'WcatLabel')
+                    .condition(ownerPartyId ? ec.entity.conditionFactory.makeCondition('ownerPartyId', 'equals', ownerPartyId) : ec.entity.conditionFactory.makeCondition('ownerPartyId', 'is-null', null))
+                    .condition(ec.entity.conditionFactory.makeCondition('description', 'equals', name, false, true)).count()
+            if (same) { ec.message.addError(ec.resource.expand('There is a label ${name} already', '', {name})); return }
+            workEffortCategoryId = ec.service.sync().name('create#mantle.work.effort.WorkEffortCategory').parameters({categoryTypeEnumId: 'WcatLabel',
+                description: name, colorName: colorName, ownerPartyId: ownerPartyId || null}).call()?.workEffortCategoryId
+        ]]></script></actions>
+    </service>
+    <service verb="update" noun="Label">
+        <description>A label's name or color.</description>
+        <in-parameters>
+            <parameter name="workEffortCategoryId" required="true"/>
+            <parameter name="description"/>
+            <parameter name="colorName"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            const label = ec.entity.find('mantle.work.effort.WorkEffortCategory').condition('workEffortCategoryId', workEffortCategoryId).one()
+            if (label == null || label.categoryTypeEnumId !== 'WcatLabel') { ec.message.addError(ec.resource.expand('${workEffortCategoryId} is not a label', '', {workEffortCategoryId})); return }
+            const colors = ['grey', 'blue', 'indigo', 'purple', 'pink', 'red', 'orange', 'amber', 'green', 'teal', 'cyan', 'brown']
+            if (colorName && !colors.includes(colorName)) { ec.message.addError(ec.resource.expand('${colorName} is not a label color', '', {colorName})); return }
+            const name = description == null ? null : String(description).trim()
+            if (name === '') { ec.message.addError(ec.l10n.localize('A label needs a name')); return }
+            const fields = {workEffortCategoryId: workEffortCategoryId}
+            if (name) fields.description = name
+            if (colorName) fields.colorName = colorName
+            ec.service.sync().name('update#mantle.work.effort.WorkEffortCategory').parameters(fields).call()
+        ]]></script></actions>
+    </service>
+    <service verb="delete" noun="Label">
+        <description>Deletes a label and takes it off the work items that have it.</description>
+        <in-parameters><parameter name="workEffortCategoryId" required="true"/></in-parameters>
+        <out-parameters><parameter name="itemCount" type="Integer"><description>The items it was taken off</description></parameter></out-parameters>
+        <actions><script><![CDATA[
+            const label = ec.entity.find('mantle.work.effort.WorkEffortCategory').condition('workEffortCategoryId', workEffortCategoryId).one()
+            if (label == null || label.categoryTypeEnumId !== 'WcatLabel') { ec.message.addError(ec.resource.expand('${workEffortCategoryId} is not a label', '', {workEffortCategoryId})); return }
+            itemCount = ec.entity.find('mantle.work.effort.WorkEffortCategoryAppl').condition('workEffortCategoryId', workEffortCategoryId).deleteAll()
+            label.delete()
+        ]]></script></actions>
+    </service>
+    <service verb="merge" noun="Labels">
+        <description>Merges a label into another (design-projects.md §12 Labels MergeLabels): the items of fromCategoryId get
+            intoCategoryId (those that have it already keep one), and fromCategoryId is deleted.</description>
+        <in-parameters>
+            <parameter name="fromCategoryId" required="true"/>
+            <parameter name="intoCategoryId" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="itemCount" type="Integer"><description>The items moved to the other label</description></parameter></out-parameters>
+        <actions><script><![CDATA[
+            itemCount = 0
+            if (fromCategoryId === intoCategoryId) { ec.message.addError(ec.l10n.localize('Choose two different labels')); return }
+            for (const id of [fromCategoryId, intoCategoryId]) {
+                const label = ec.entity.find('mantle.work.effort.WorkEffortCategory').condition('workEffortCategoryId', id).one()
+                if (label == null || label.categoryTypeEnumId !== 'WcatLabel') { ec.message.addError(ec.resource.expand('${id} is not a label', '', {id})); return }
+            }
+            const has = new Set(Array.from(ec.entity.find('mantle.work.effort.WorkEffortCategoryAppl').condition('workEffortCategoryId', intoCategoryId)
+                    .selectField('workEffortId').list()).map((row) => row.workEffortId))
+            for (const row of ec.entity.find('mantle.work.effort.WorkEffortCategoryAppl').condition('workEffortCategoryId', fromCategoryId).list()) {
+                if (!has.has(row.workEffortId)) {
+                    ec.service.sync().name('create#mantle.work.effort.WorkEffortCategoryAppl').parameters({workEffortId: row.workEffortId, workEffortCategoryId: intoCategoryId}).call()
+                    itemCount++
+                }
+                row.delete()
+            }
+            ec.entity.find('mantle.work.effort.WorkEffortCategory').condition('workEffortCategoryId', fromCategoryId).one()?.delete()
+        ]]></script></actions>
+    </service>
+
+    <service verb="set" noun="TaskRecurrence">
+        <description>The repeat rule of a task (design-projects.md §5 "Recurring work items"): rrule an RFC 5545 RRULE value
+            (FREQ=MONTHLY;BYMONTHDAY=1), on the task's WorkEffortRecurrence, which makes it the series; recurFromCompletion Y
+            counts the next dates from the day one is completed rather than from its due date. An instance of a series sets
+            the rule of its series. An empty rule stops the repeating (the rule is removed; the items made stay). A task
+            needs a due date (or a start) to repeat.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="rrule"/>
+            <parameter name="recurFromCompletion" default-value="N"/>
+            <parameter name="timeZone"/>
+        </in-parameters>
+        <out-parameters><parameter name="seriesWorkEffortId"/></out-parameters>
+        <actions><script><![CDATA[
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null || task.workEffortTypeEnumId !== 'WetTask') { ec.message.addError(ec.resource.expand('Task ${workEffortId} not found', '', {workEffortId})); return }
+            // the series: the task, or the series it was made from
+            seriesWorkEffortId = workEffortId
+            const link = Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('toWorkEffortId', workEffortId)
+                    .condition('workEffortAssocTypeEnumId', 'WeatRecurrenceInstance').list())[0]
+            if (link && ec.entity.find('mantle.work.effort.WorkEffortRecurrence').condition('workEffortId', link.workEffortId).one() != null)
+                seriesWorkEffortId = link.workEffortId
+            const existing = ec.entity.find('mantle.work.effort.WorkEffortRecurrence').condition('workEffortId', seriesWorkEffortId).one()
+            const rule = rrule == null ? '' : String(rrule).trim().replace(/^RRULE:/i, '')
+            if (!rule) {
+                if (existing != null) existing.delete()
+                return
+            }
+            if (!/(^|;)FREQ=(DAILY|WEEKLY|MONTHLY|YEARLY)(;|$)/i.test(rule)) {
+                ec.message.addError(ec.resource.expand('Not a repeat rule: ${rule}', '', {rule}))
+                return
+            }
+            if (task.estimatedCompletionDate == null && task.estimatedStartDate == null) {
+                ec.message.addError(ec.l10n.localize('Give the work item a due date before it repeats'))
+                return
+            }
+            const fields = {workEffortId: seriesWorkEffortId, rrule: rule.toUpperCase(), recurFromCompletion: recurFromCompletion === 'Y' ? 'Y' : 'N',
+                timeZone: timeZone || existing?.timeZone || ec.user.timeZone || null}
+            ec.service.sync().name(existing != null ? 'update#mantle.work.effort.WorkEffortRecurrence' : 'create#mantle.work.effort.WorkEffortRecurrence')
+                    .parameters(fields).call()
+        ]]></script></actions>
+    </service>
+    <service verb="make" noun="NextRecurringTask">
+        <description>The next item of a recurring task, when one is completed or cancelled (skipped; to stop instead, the rule is
+            removed first, set#TaskRecurrence): a copy of it (type, name, description, project, parent, assignees and team,
+            watchers, priority, labels, component, estimate and visibility; not its sprint, time, comments or files), In
+            Planning, due on the next date of its series' rule, counted from the series' due date (the date after this item's
+            due) or, with recurFromCompletion, from the day it was completed; a start keeps its distance before the due date.
+            The new item is linked from the series by WeatRecurrenceInstance with its due date. Nothing is made past the rule's
+            end, for a task not in a series, or when the next one was made already. Run by the WorkEffort status rule
+            (Work.secas.xml) on Complete and Cancelled.</description>
+        <in-parameters><parameter name="workEffortId" required="true"/></in-parameters>
+        <out-parameters><parameter name="newWorkEffortId"/></out-parameters>
+        <actions><script><![CDATA[
+            newWorkEffortId = null
+            const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+            if (task == null || task.workEffortTypeEnumId !== 'WetTask' || !['WeComplete', 'WeCancelled'].includes(task.statusId)) return
+            let seriesId = workEffortId
+            let recurrence = ec.entity.find('mantle.work.effort.WorkEffortRecurrence').condition('workEffortId', workEffortId).one()
+            if (recurrence == null) {
+                const link = Array.from(ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('toWorkEffortId', workEffortId)
+                        .condition('workEffortAssocTypeEnumId', 'WeatRecurrenceInstance').list())[0]
+                if (!link) return
+                seriesId = link.workEffortId
+                recurrence = ec.entity.find('mantle.work.effort.WorkEffortRecurrence').condition('workEffortId', seriesId).one()
+            }
+            if (recurrence == null || !recurrence.rrule) return
+            const series = seriesId === workEffortId ? task : ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', seriesId).one()
+            if (series == null) return
+            const toMillis = (value) => {
+                if (value == null || value === '') return null
+                const text = String(value)
+                if (/^-?\d+$/.test(text)) return Number(text)
+                const parsed = Date.parse(text)
+                return Number.isNaN(parsed) ? null : parsed
+            }
+            const dueOf = (row) => toMillis(row.estimatedCompletionDate) ?? toMillis(row.estimatedStartDate)
+            const thisDue = dueOf(task)
+            const seriesDue = dueOf(series)
+            if (thisDue == null || seriesDue == null) { ec.logger.warn(`Recurring task ${workEffortId}: no due date, no next item`); return }
+            if (ec.factory.getToolFactory('ICalendar') == null) { ec.logger.error(`Recurring task ${workEffortId}: no ICalendar tool to expand ${recurrence.rrule}`); return }
+            const tool = ec.factory.getTool('ICalendar')
+            const zone = recurrence.timeZone || ec.user.timeZone || null
+            const yearMs = 366 * 86400000
+            let next = null
+            try {
+                if (recurrence.recurFromCompletion === 'Y') {
+                    // from the day it was completed, at the due date's time of day; a COUNT counts the items made
+                    const doneMs = toMillis(task.actualCompletionDate) ?? toMillis(ec.user.nowTimestamp)
+                    const dayMs = 86400000
+                    // the day it was completed at the due date's time of day (UTC days)
+                    const startMs = doneMs - ((doneMs % dayMs) + dayMs) % dayMs + ((thisDue % dayMs) + dayMs) % dayMs
+                    const countMatch = /(^|;)COUNT=(\d+)/i.exec(recurrence.rrule)
+                    const rule = String(recurrence.rrule).split(';').filter((part) => !/^COUNT=/i.test(part)).join(';')
+                    if (countMatch) {
+                        const made = ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', seriesId)
+                                .condition('workEffortAssocTypeEnumId', 'WeatRecurrenceInstance').count()
+                        if (made + 1 >= Number(countMatch[2])) return
+                    }
+                    const starts = Array.from(tool.expand(rule, startMs, zone, [], [], startMs + 1, startMs + 2 * yearMs) || []).map(toMillis)
+                    next = starts.find((ms) => ms != null && ms > startMs) ?? null
+                } else {
+                    const starts = Array.from(tool.expand(String(recurrence.rrule), seriesDue, zone, [], [], thisDue + 1, thisDue + 2 * yearMs) || []).map(toMillis)
+                    next = starts.find((ms) => ms != null && ms > thisDue) ?? null
+                }
+            } catch (err) {
+                ec.logger.error(`Recurring task ${workEffortId}: the rule ${recurrence.rrule} was not expanded: ${err && err.message ? err.message : err}`)
+                return
+            }
+            if (next == null) return
+            // made already (this item completed again after a reopen)
+            for (const link of ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('workEffortId', seriesId)
+                    .condition('workEffortAssocTypeEnumId', 'WeatRecurrenceInstance').list()) {
+                if (toMillis(link.fromDate) === next) return
+            }
+            const startMs = toMillis(task.estimatedStartDate)
+            const dueMs = toMillis(task.estimatedCompletionDate)
+            const fields = {workEffortName: task.workEffortName, description: task.description, rootWorkEffortId: task.rootWorkEffortId,
+                parentWorkEffortId: task.parentWorkEffortId, purposeEnumId: task.purposeEnumId, priority: task.priority, visibilityEnumId: task.visibilityEnumId,
+                statusFlowId: task.statusFlowId, estimatedWorkTime: task.estimatedWorkTime, remainingWorkTime: task.estimatedWorkTime,
+                estimatedPoints: task.estimatedPoints, totalTimeAllowed: task.totalTimeAllowed, timeUomId: task.timeUomId, ownerPartyId: task.ownerPartyId,
+                statusId: 'WeInPlanning', resolutionEnumId: 'WerUnresolved', sequenceNum: task.sequenceNum}
+            if (dueMs != null) fields.estimatedCompletionDate = new Date(next)
+            if (startMs != null) fields.estimatedStartDate = new Date(dueMs != null ? next - (dueMs - startMs) : next)
+            newWorkEffortId = ec.service.sync().name('mantle.work.TaskServices.create#Task').parameters(fields).call()?.workEffortId || null
+            if (!newWorkEffortId || ec.message.hasError()) return
+            ec.service.sync().name('create#mantle.work.effort.WorkEffortAssoc').parameters({workEffortId: seriesId, toWorkEffortId: newWorkEffortId,
+                workEffortAssocTypeEnumId: 'WeatRecurrenceInstance', fromDate: new Date(next)}).call()
+            // its people (assignees, team, watchers, managers; not declined), labels and component
+            for (const wep of ec.entity.find('mantle.work.effort.WorkEffortParty').condition('workEffortId', workEffortId)
+                    .conditionDate('fromDate', 'thruDate', null).list()) {
+                if (['WeptDeclined', 'WeptUnassigned'].includes(wep.statusId)) continue
+                ec.service.sync().name('mantle.work.WorkEffortServices.add#WorkEffortParty').parameters({workEffortId: newWorkEffortId, partyId: wep.partyId,
+                    roleTypeId: wep.roleTypeId, statusId: wep.statusId}).call()
+            }
+            for (const appl of ec.entity.find('mantle.work.effort.WorkEffortCategoryAppl').condition('workEffortId', workEffortId).list())
+                ec.service.sync().name('create#mantle.work.effort.WorkEffortCategoryAppl').parameters({workEffortId: newWorkEffortId,
+                    workEffortCategoryId: appl.workEffortCategoryId}).call()
+            for (const assoc of ec.entity.find('mantle.work.effort.WorkEffortAssoc').condition('toWorkEffortId', workEffortId)
+                    .condition('workEffortAssocTypeEnumId', 'WeatComponent').conditionDate('fromDate', 'thruDate', null).list())
+                ec.service.sync().name('create#mantle.work.effort.WorkEffortAssoc').parameters({workEffortId: assoc.workEffortId, toWorkEffortId: newWorkEffortId,
+                    workEffortAssocTypeEnumId: 'WeatComponent', fromDate: ec.user.nowTimestamp}).call()
+            for (const follower of ec.entity.find('mantle.party.communication.RecordFollower').condition('recordEntityName', 'mantle.work.effort.WorkEffort')
+                    .condition('recordId', workEffortId).list()) {
+                const fields = follower.getMap()
+                fields.recordId = newWorkEffortId
+                ec.service.sync().name('create#mantle.party.communication.RecordFollower').parameters(fields).call()
+            }
+        ]]></script></actions>
+    </service>
+
+    <service verb="notify" noun="TaskAssigned">
+        <description>Tells the users of a party newly assigned to a task of a project (WorkEffortParty Assignee, not by
+            themselves) on the topic WorkItemAssigned: workEffortId, workEffortName, rootWorkEffortId, projectName, assignedByName,
+            and the task as the record (the app's record link opens it). Run by the WorkEffortParty rule of WorkEffort.secas.xml;
+            a failure is logged, not the assignment's.</description>
+        <in-parameters>
+            <parameter name="workEffortId" required="true"/>
+            <parameter name="partyId" required="true"/>
+        </in-parameters>
+        <actions><script><![CDATA[
+            try {
+                const task = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', workEffortId).one()
+                if (task == null || task.workEffortTypeEnumId !== 'WetTask' || !task.rootWorkEffortId) return
+                const userIds = Array.from(ec.entity.find('moqui.security.UserAccount').condition('partyId', partyId).selectField('userId')
+                        .disableAuthz().list()).map((account) => account.userId).filter((userId) => userId !== ec.user.userId)
+                if (!userIds.length) return
+                const project = ec.entity.find('mantle.work.effort.WorkEffort').condition('workEffortId', task.rootWorkEffortId).one()
+                const me = ec.user.userAccount?.partyId ? ec.entity.find('mantle.party.PartyDetail').condition('partyId', ec.user.userAccount.partyId).one() : null
+                const assignedByName = me ? (me.organizationName || [me.firstName, me.lastName].filter((part) => part).join(' ') || me.partyId) : (ec.user.username || 'System')
+                const nm = ec.makeNotificationMessage().topic('WorkItemAssigned').userIds(userIds).message({workEffortId: workEffortId,
+                    workEffortName: task.workEffortName || workEffortId, rootWorkEffortId: task.rootWorkEffortId,
+                    projectName: project?.workEffortName || task.rootWorkEffortId, assignedByName: assignedByName,
+                    recordEntityName: 'mantle.work.effort.WorkEffort', recordId: workEffortId})
+                if (typeof nm.reasonEnumId === 'function') nm.reasonEnumId('NrAssignment')
+                if (typeof nm.record === 'function') nm.record('mantle.work.effort.WorkEffort', workEffortId)
+                nm.send()
+            } catch (err) {
+                ec.logger.error(`Work item ${workEffortId} assigned to ${partyId}: notification not sent: ${err && err.message ? err.message : err}`)
+            }
+        ]]></script></actions>
+    </service>
+
     <service verb="set" noun="TaskDefaults">
         <description>This service runs by EECA rule before creates and updates to set some defaults.</description>
         <in-parameters><parameter name="entityValue" type="Map"/></in-parameters>
         <actions>
-            <set field="entityValue.actualWorkTime" from="entityValue.actualWorkTime ?: 0 as BigDecimal"/>
-            <if condition="entityValue.remainingWorkTime == null &amp;&amp; entityValue.estimatedWorkTime &amp;&amp; entityValue.estimatedWorkTime &gt; entityValue.actualWorkTime">
-                <set field="entityValue.remainingWorkTime" from="entityValue.estimatedWorkTime - entityValue.actualWorkTime"/>
+            <!-- NOTE: the Groovy had actualWorkTime || 0 as BigDecimal, which defaults to 0 only by accident of precedence and
+                 Groovy truth; the intent is a zero default -->
+            <set field="entityValue.actualWorkTime" from="entityValue.actualWorkTime ?? toDecimal(0)"/>
+            <if condition="entityValue.remainingWorkTime == null &amp;&amp; entityValue.estimatedWorkTime != null &amp;&amp; !toDecimal(entityValue.estimatedWorkTime).isZero() &amp;&amp; toDecimal(entityValue.estimatedWorkTime).compare(entityValue.actualWorkTime) &gt; 0">
+                <set field="entityValue.remainingWorkTime" from="toDecimal(entityValue.estimatedWorkTime).subtract(entityValue.actualWorkTime)"/>
             </if>
         </actions>
     </service>
@@ -222,13 +1151,14 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="body"/>
             <parameter name="contentType" default-value="text/plain"/>
         </in-parameters>
+        <out-parameters><parameter name="communicationEventId"><description>The new comment (Chatter shows it at once)</description></parameter></out-parameters>
         <actions>
             <service-call name="create#mantle.party.communication.CommunicationEvent" out-map="context"
-                    in-map="[communicationEventTypeId:'Comment', contactMechTypeEnumId:'CmtWebForm', statusId:'CeSent',
+                    in-map="{communicationEventTypeId:'Comment', contactMechTypeEnumId:'CmtWebForm', statusId:'CeSent',
                         fromPartyId:ec.user.userAccount.partyId, entryDate:ec.user.nowTimestamp,
-                        contentType:contentType, subject:subject, body:body]"/>
+                        contentType:contentType, subject:subject, body:body}"/>
             <service-call name="create#mantle.work.effort.WorkEffortCommEvent"
-                    in-map="[workEffortId:workEffortId, communicationEventId:communicationEventId]"/>
+                    in-map="{workEffortId:workEffortId, communicationEventId:communicationEventId}"/>
         </actions>
     </service>
     <service verb="update" noun="TaskComment">
@@ -241,8 +1171,8 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <service-call name="update#mantle.party.communication.CommunicationEvent" out-map="context"
-                  in-map="[communicationEventId:communicationEventId, fromPartyId:ec.user.userAccount.partyId,
-                        contentType:contentType, subject:subject, body:body]"/>
+                  in-map="{communicationEventId:communicationEventId, fromPartyId:ec.user.userAccount.partyId,
+                        contentType:contentType, subject:subject, body:body}"/>
         </actions>
     </service>
     <service verb="delete" noun="TaskComment">
@@ -252,9 +1182,9 @@ along with this software (see the LICENSE.md file). If not, see
         </in-parameters>
         <actions>
             <service-call name="delete#mantle.work.effort.WorkEffortCommEvent"
-                    in-map="[workEffortId:workEffortId, communicationEventId:communicationEventId]"/>
+                    in-map="{workEffortId:workEffortId, communicationEventId:communicationEventId}"/>
             <service-call name="delete#mantle.party.communication.CommunicationEvent"
-                    in-map="communicationEventId:communicationEventId"/>
+                    in-map="{communicationEventId:communicationEventId}"/>
         </actions>
     </service>
 
@@ -273,20 +1203,20 @@ along with this software (see the LICENSE.md file). If not, see
         <actions>
             <entity-find entity-name="mantle.work.time.TimeEntryAndRates" list="tearList">
                 <econdition field-name="workEffortId"/></entity-find>
-            <set field="actualWorkTime" from="0"/>
-            <set field="actualClientCost" from="0"/>
-            <set field="actualCost" from="0"/>
+            <set field="actualWorkTime" from="toDecimal(0)"/>
+            <set field="actualClientCost" from="toDecimal(0)"/>
+            <set field="actualCost" from="toDecimal(0)"/>
             <iterate list="tearList" entry="tear">
-                <set field="actualWorkTime" from="actualWorkTime + (tear.hours?:0)"/>
-                <if condition="tear.clientRateAmount">
-                    <set field="actualClientCost" from="actualClientCost + (tear.hours * tear.clientRateAmount)"/></if>
-                <if condition="tear.vendorRateAmount">
-                    <set field="actualCost" from="actualCost + (tear.hours * tear.vendorRateAmount)"/></if>
+                <set field="actualWorkTime" from="actualWorkTime.add(tear.hours ?? 0)"/>
+                <if condition="tear.clientRateAmount != null">
+                    <set field="actualClientCost" from="actualClientCost.add(toDecimal(tear.hours ?? 0).multiply(tear.clientRateAmount))"/></if>
+                <if condition="tear.vendorRateAmount != null">
+                    <set field="actualCost" from="actualCost.add(toDecimal(tear.hours ?? 0).multiply(tear.vendorRateAmount))"/></if>
             </iterate>
             <!-- <log level="warn" message="======== time for ${workEffortId}: ${actualWorkTime}, ${actualCost}, ${actualClientCost}\n${tearList}"/> -->
             <service-call name="update#mantle.work.effort.WorkEffort"
-                    in-map="[workEffortId:workEffortId, actualWorkTime:actualWorkTime,
-                            actualCost:actualCost, actualClientCost:actualClientCost]"/>
+                    in-map="{workEffortId:workEffortId, actualWorkTime:actualWorkTime,
+                            actualCost:actualCost, actualClientCost:actualClientCost}"/>
         </actions>
     </service>
     <service verb="update" noun="ProjectTimeFromTask" authenticate="anonymous-all">
@@ -295,7 +1225,7 @@ along with this software (see the LICENSE.md file). If not, see
             <entity-find entity-name="mantle.work.time.TaskTimeSummary" list="ttsList">
                 <econdition field-name="rootWorkEffortId"/>
                 <econdition field-name="workEffortTypeEnumId" value="WetTask"/></entity-find>
-            <if condition="ttsList">
+            <if condition="(ttsList?.length > 0)">
                 <entity-find-one entity-name="mantle.work.effort.WorkEffort" value-field="rootWorkEffort">
                     <field-map field-name="workEffortId" from="rootWorkEffortId"/>
                 </entity-find-one>
